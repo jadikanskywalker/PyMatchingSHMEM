@@ -50,6 +50,13 @@ class SearchDetectorNode {
 
     std::vector<std::vector<ImpliedWeight>> neighbor_implied_weights;
 
+// #ifdef USE_SHMEM
+// // ===============
+//     long partition;  // partition of node
+//     bool is_virtual; // whether node is virtual (connects to directly lower partition)
+// // ===============
+// #endif
+
     size_t index_of_neighbor(SearchDetectorNode *target) const;
 
     void reset();

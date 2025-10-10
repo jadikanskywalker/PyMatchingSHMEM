@@ -16,6 +16,7 @@
 #define PYMATCHING2_SEARCH_FLOODER_H
 
 #include "pymatching/sparse_blossom/search/search_graph.h"
+// #include <set>
 #include "pymatching/sparse_blossom/tracker/radix_heap_queue.h"
 
 namespace pm {
@@ -58,6 +59,13 @@ class SearchFlooder {
     void iter_edges_on_shortest_path_from_source(size_t src, size_t dst, Callable handle_edge);
     void reset_graph();
     void reset();
+
+// #ifdef USE_SHMEM
+// // ===============
+//     // Set of active partitions. Should have 1 for partition solving, 2 for fusing
+//     std::set<long> active_partitions;
+// // ===============
+// #endif
 };
 
 template <typename Callable>

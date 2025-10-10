@@ -63,6 +63,12 @@ class MatchingGraph {
     // dem with enable_correlations=true.
     bool loaded_from_dem_without_correlations = false;
 
+#ifdef USE_SHMEM
+// ===============
+    long num_partitions = 0;
+// ===============
+#endif
+
     MatchingGraph();
     MatchingGraph(size_t num_nodes, size_t num_observables);
     MatchingGraph(size_t num_nodes, size_t num_observables, double normalising_constant);

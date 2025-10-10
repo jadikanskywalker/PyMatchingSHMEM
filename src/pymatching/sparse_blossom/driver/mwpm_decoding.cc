@@ -12,6 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifdef USE_SHMEM
+#include <shmem.h>
+#include "../config_shmem.h"
+#ifdef I
+#undef I
+#endif
+#endif
+
 #include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
 
 #include "pymatching/sparse_blossom/driver/user_graph.h"
@@ -76,6 +84,34 @@ pm::Mwpm pm::detector_error_model_to_mwpm(
     bool enable_correlations) {
     auto user_graph =
         pm::detector_error_model_to_user_graph(detector_error_model, enable_correlations, num_distinct_weights);
+#ifdef USE_SHMEM
+// ===============
+if (DEBUG && shmem_my_pe() == 0) {
+    std::cout << "DEBUG:" << std::endl;
+    for (auto it = user_graph.edges.begin(); it != user_graph.edges.end();) {
+        const auto &n1 = user_graph.nodes[it->node1];
+        std::cout << "  Edge " << it->node1
+                  << " (r " << n1.round
+                  << ", p " << n1.partition
+                  << ", v " << (int)n1.is_virtual
+                  << ") to ";
+        if (it->node2 == SIZE_MAX) {
+            std::cout << "BOUNDARY";
+        } else {
+            const auto &n2 = user_graph.nodes[it->node2];
+            std::cout << it->node2
+                      << " (r " << n2.round
+                      << ", p " << n2.partition
+                      << ", v " << (int)n2.is_virtual
+                      << ")";
+        }
+        std::cout << " with w " << it->weight << std::endl;
+        for (int i = 0; i <= 100 && it != user_graph.edges.end(); i++) ++it;
+        if (it == user_graph.edges.end()) break;
+    }
+}
+// ===============
+#endif
     return user_graph.to_mwpm(num_distinct_weights, ensure_search_flooder_included);
 }
 
@@ -93,8 +129,16 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
                     "The detection event with index " + std::to_string(detection) +
                     " does not correspond to a node in the graph, which only has " +
                     std::to_string(mwpm.flooder.graph.nodes.size()) + " nodes.");
-            if (detection + 1 > mwpm.flooder.graph.is_user_graph_boundary_node.size() ||
-                !mwpm.flooder.graph.is_user_graph_boundary_node[detection])
+            
+            if (  
+#ifdef USE_SHMEM  // Only add detection events for active non-virtual nodes
+// ===============
+                  mwpm.flooder.active_partitions.count(mwpm.flooder.graph.nodes[detection].partition) &&
+                  !mwpm.flooder.graph.nodes[detection].is_virtual &&
+// ===============
+#endif
+                  (detection + 1 > mwpm.flooder.graph.is_user_graph_boundary_node.size() ||
+                  !mwpm.flooder.graph.is_user_graph_boundary_node[detection]))
                 mwpm.create_detection_event(&mwpm.flooder.graph.nodes[detection]);
         }
 
@@ -111,8 +155,16 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
                     "Detection event index `" + std::to_string(detection) +
                     "` is larger than any detector node index in the graph.");
             if (!mwpm.flooder.graph.nodes[detection].radius_of_arrival) {
-                if (detection + 1 > mwpm.flooder.graph.is_user_graph_boundary_node.size() ||
-                    !mwpm.flooder.graph.is_user_graph_boundary_node[detection])
+                std::cout << "  " << mwpm.flooder.graph.nodes[detection].partition << std::endl;
+                if (
+#ifdef USE_SHMEM      // Only add detection events for active non-virtual nodes
+// ===============
+                      mwpm.flooder.active_partitions.count(mwpm.flooder.graph.nodes[detection].partition) &&
+                      !mwpm.flooder.graph.nodes[detection].is_virtual &&
+// ===============
+#endif
+                      (detection + 1 > mwpm.flooder.graph.is_user_graph_boundary_node.size() ||
+                      !mwpm.flooder.graph.is_user_graph_boundary_node[detection]))
                     mwpm.create_detection_event(&mwpm.flooder.graph.nodes[detection]);
             } else {
                 // Unmark node
@@ -124,6 +176,12 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
             if (mwpm.flooder.graph.nodes[det].radius_of_arrival) {
                 // Add a detection event if the node is still marked
                 mwpm.flooder.graph.nodes[det].radius_of_arrival = 0;
+#ifdef USE_SHMEM // Only add detection events for active non-virtual nodes
+// ===============
+                if (mwpm.flooder.active_partitions.count(mwpm.flooder.graph.nodes[det].partition) &&
+                    !mwpm.flooder.graph.nodes[det].is_virtual)
+// ===============
+#endif
                 mwpm.create_detection_event(&mwpm.flooder.graph.nodes[det]);
             }
         }

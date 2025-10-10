@@ -16,6 +16,7 @@
 #define PYMATCHING2_GRAPH_FLOODER_H
 
 #include <queue>
+#include <set>
 
 #include "pymatching/sparse_blossom/arena.h"
 #include "pymatching/sparse_blossom/flooder/graph.h"
@@ -55,6 +56,13 @@ struct GraphFlooder {
     /// The sum of the edge weights of all edges with negative edge weights.
     pm::total_weight_int negative_weight_sum;
 
+#ifdef USE_SHMEM
+// ===============
+    // Set of active partitions. Should have 1 for partition solving, 2 for fusing
+    std::set<long> active_partitions;
+// ===============
+#endif
+
     GraphFlooder();
     explicit GraphFlooder(MatchingGraph graph);
     GraphFlooder(GraphFlooder&&) noexcept;
@@ -71,6 +79,10 @@ struct GraphFlooder {
     MwpmEvent do_region_shrinking(GraphFillRegion& shrinking_region);
     pm::MwpmEvent do_neighbor_interaction(DetectorNode& src, size_t src_to_dst_index, DetectorNode& dst);
     pm::MwpmEvent do_region_hit_boundary_interaction(DetectorNode& node);
+#ifdef USE_SHMEM
+    // Treat a specific neighbor edge as a boundary (used for virtual boundaries between partitions)
+    pm::MwpmEvent do_region_hit_boundary_interaction_via_edge(DetectorNode& node, size_t edge_index);
+#endif
     static MwpmEvent do_degenerate_implosion(const GraphFillRegion& region);
     static MwpmEvent do_blossom_shattering(GraphFillRegion& region);
     bool dequeue_decision(pm::FloodCheckEvent ev);

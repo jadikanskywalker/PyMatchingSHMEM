@@ -47,7 +47,11 @@ void GraphFlooder::do_region_created_at_empty_detector_node(GraphFillRegion &reg
 }
 
 std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_growing_top_region(
-    const DetectorNode &detector_node, VaryingCT rad1) {
+    const DetectorNode &detector_node, VaryingCT rad1
+#ifdef USE_SHMEM
+    , const MatchingGraph* graph_ptr, std::set<long> active_parts
+#endif
+    ) {
     cumulative_time_int best_time = std::numeric_limits<cumulative_time_int>::max();
     size_t best_neighbor = SIZE_MAX;
 
@@ -60,6 +64,13 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_g
         auto weight = detector_node.neighbor_weights[i];
 
         auto neighbor = detector_node.neighbors[i];
+
+#ifdef USE_SHMEM
+// ===============
+        if (neighbor->is_virtual) // skip virtual/inactive nodes
+            continue;
+// ===============
+#endif
 
         auto rad2 = neighbor->local_radius();
 
@@ -75,7 +86,11 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_g
 }
 
 std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growing_top_region(
-    const DetectorNode &detector_node, const VaryingCT &rad1) {
+    const DetectorNode &detector_node, const VaryingCT &rad1
+#ifdef USE_SHMEM
+    , const MatchingGraph* graph_ptr, std::set<long> active_parts
+#endif
+    ) {
     cumulative_time_int best_time = std::numeric_limits<cumulative_time_int>::max();
     size_t best_neighbor = SIZE_MAX;
     size_t start = 0;
@@ -95,6 +110,21 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growi
         auto weight = detector_node.neighbor_weights[i];
 
         auto neighbor = detector_node.neighbors[i];
+
+#ifdef USE_SHMEM
+// ===============
+        // treat virtual nodes like boundary
+        if (neighbor->is_virtual) {
+            auto collision_time = weight - rad1.y_intercept();
+            if (collision_time < best_time) {
+                best_time = collision_time;
+                best_neighbor = i;
+            }
+        }
+        // treat active nodes like normal
+// ===============
+#endif
+
         if (detector_node.has_same_owner_as(*neighbor)) {
             continue;
         }
@@ -120,9 +150,19 @@ std::pair<size_t, cumulative_time_int> GraphFlooder::find_next_event_at_node_ret
     auto rad1 = detector_node.local_radius();
 
     if (rad1.is_growing()) {
-        return find_next_event_at_node_occupied_by_growing_top_region(detector_node, rad1);
+        return find_next_event_at_node_occupied_by_growing_top_region(
+            detector_node, rad1
+#ifdef USE_SHMEM
+            , &graph, active_partitions
+#endif
+        );
     } else {
-        return find_next_event_at_node_not_occupied_by_growing_top_region(detector_node, rad1);
+        return find_next_event_at_node_not_occupied_by_growing_top_region(
+            detector_node, rad1
+#ifdef USE_SHMEM
+            , &graph, active_partitions
+#endif
+        );
     }
 }
 
@@ -216,6 +256,17 @@ MwpmEvent GraphFlooder::do_region_hit_boundary_interaction(DetectorNode &node) {
         CompressedEdge{
             node.reached_from_source, nullptr, node.observables_crossed_from_source ^ node.neighbor_observables[0]}};
 }
+
+#ifdef USE_SHMEM
+// ===============
+MwpmEvent GraphFlooder::do_region_hit_boundary_interaction_via_edge(DetectorNode &node, size_t edge_index) {
+    return RegionHitBoundaryEventData{
+        node.region_that_arrived_top,
+        CompressedEdge{node.reached_from_source, nullptr,
+                       node.observables_crossed_from_source ^ node.neighbor_observables[edge_index]}};
+}
+// ===============
+#endif
 
 MwpmEvent GraphFlooder::do_degenerate_implosion(const GraphFillRegion &region) {
     return RegionHitRegionEventData{
@@ -335,6 +386,13 @@ MwpmEvent GraphFlooder::do_look_at_node_event(DetectorNode &node) {
         if (node.neighbors[next.first] == nullptr) {
             return do_region_hit_boundary_interaction(node);
         }
+#ifdef USE_SHMEM
+// ===============
+        else if (node.neighbors[next.first]->partition == *active_partitions.rbegin() + 1 && node.neighbors[next.first]->is_virtual) {
+            return do_region_hit_boundary_interaction_via_edge(node, next.first);
+        }
+// ===============
+#endif
         auto &neighbor = *node.neighbors[next.first];
         return do_neighbor_interaction(node, next.first, neighbor);
     } else if (next.first != SIZE_MAX) {

@@ -38,6 +38,12 @@ class SearchGraph {
     std::vector<PreviousWeight> previous_weights;
     std::map<size_t, std::vector<std::vector<ImpliedWeightUnconverted>>> edges_to_implied_weights_unconverted;
 
+// #ifdef USE_SHMEM
+// // ===============
+//     long num_partitions;
+// // ===============
+// #endif
+
     SearchGraph();
     explicit SearchGraph(size_t num_nodes);
     SearchGraph(SearchGraph&& graph) noexcept;

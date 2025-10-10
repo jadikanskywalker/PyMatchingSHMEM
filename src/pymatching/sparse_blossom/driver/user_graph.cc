@@ -17,6 +17,10 @@
 #include "pymatching/rand/rand_gen.h"
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
 
+#ifdef USE_SHMEM
+#include "../config_shmem.h"
+#endif
+
 double pm::merge_weights(double a, double b) {
     auto sgn = std::copysign(1, a) * std::copysign(1, b);
     auto signed_min = sgn * std::min(std::abs(a), std::abs(b));
@@ -280,6 +284,22 @@ pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_w
     }
 
     matching_graph.convert_implied_weights(normalising_constant);
+
+#ifdef USE_SHMEM
+// ===============
+    // Propagate partition and virtual metadata
+    // matching_graph.partition_of_node.resize(nodes.size(), -1);
+    // matching_graph.is_virtual_node.resize(nodes.size(), false);
+    matching_graph.num_partitions = num_partitions;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        // matching_graph.partition_of_node[i] = static_cast<int32_t>(nodes[i].partition);
+        // matching_graph.is_virtual_node[i] = nodes[i].is_virtual;
+        matching_graph.nodes[i].partition = nodes[i].partition;
+        matching_graph.nodes[i].is_virtual = nodes[i].is_virtual;
+    }
+// ===============
+#endif
+
     return matching_graph;
 }
 
@@ -304,6 +324,18 @@ pm::SearchGraph pm::UserGraph::to_search_graph(pm::weight_int num_distinct_weigh
         });
 
     search_graph.convert_implied_weights(normalizing_constant);
+
+// #ifdef USE_SHMEM
+// // ===============
+//     // Propagate partition and virtual metadata
+//     search_graph.num_partitions = num_partitions;
+//     for (size_t i = 0; i < nodes.size(); ++i) {
+//         search_graph.nodes[i].partition = nodes[i].partition;
+//         search_graph.nodes[i].is_virtual = nodes[i].is_virtual;
+//     }
+// // ===============
+// #endif
+
     return search_graph;
 }
 
@@ -483,7 +515,8 @@ void pm::add_decomposed_error_to_joint_probabilities(
 pm::UserGraph pm::detector_error_model_to_user_graph(
     const stim::DetectorErrorModel& detector_error_model,
     const bool enable_correlations,
-    pm::weight_int num_distinct_weights) {
+    pm::weight_int num_distinct_weights
+    ) {
     pm::UserGraph user_graph(detector_error_model.count_detectors(), detector_error_model.count_observables());
     std::map<std::pair<size_t, size_t>, std::map<std::pair<size_t, size_t>, double>> joint_probabilites;
     if (enable_correlations) {
@@ -503,6 +536,13 @@ pm::UserGraph pm::detector_error_model_to_user_graph(
             });
         user_graph.loaded_from_dem_without_correlations = true;
     }
+#ifdef USE_SHMEM
+// ===============
+    // Annotate user nodes with DEM-provided coordinates and virtual node infomation for partitioning.
+    const auto& rounds = annotate_nodes_with_dem_coordinates(detector_error_model, user_graph);
+    partition_nodes_by_round(user_graph, rounds);
+// ===============
+#endif
     return user_graph;
 }
 
@@ -534,3 +574,64 @@ void pm::UserGraph::populate_implied_edge_weights(
         }
     }
 }
+
+#ifdef USE_SHMEM
+// ===============
+std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g) {
+    // Query coordinates from stim. Map: det_id -> vector<double> of coords.
+    std::set<uint64_t> all_dets;
+    all_dets.clear();
+    for (uint64_t k = 0; k < dem.count_detectors(); ++k)
+        all_dets.insert(k);
+    std::map<uint64_t, std::vector<double>> coords_map = dem.get_detector_coordinates(all_dets);
+    // Annotate UserNodes
+    std::set<long> rounds;
+    for (size_t k = 0; k < g.nodes.size(); ++k) {
+        auto it = coords_map.find(k);
+        if (it == coords_map.end()) {
+            // No coordinates available; leave defaults.
+            continue;
+        }
+        const auto& coors = it->second;
+        pm::UserNode& node = g.nodes[k];
+        node.has_coords = true;
+        // Store round
+        // node.pos_x = coors[0];
+        // node.pos_y = coors[1];
+        node.round = (long)lround(coors[coors.size()-1]);
+        rounds.insert(node.round);
+    }
+    return rounds;
+}
+
+
+void pm::partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds) {
+    // M rounds per partition
+    int M = config_shmem::M;
+    g.num_partitions = (long)((long(rounds.size()) / config_shmem::M) + 1); // num partitions
+    if (DEBUG)
+        std::cout << "  M : " << M << "; num_rounds : " << rounds.size() << "; num_partitions : " << g.num_partitions << std::endl;
+    // partition nodes
+    for (auto& n : g.nodes) {
+        if (n.has_coords)
+            n.partition = (n.round / M);
+    }
+    // mark virtual nodes
+    for (const auto& e : g.edges) {
+        if (e.node1 == SIZE_MAX || e.node2 == SIZE_MAX) continue; // ignore boundary edges
+        const auto& n1 = g.nodes[e.node1];
+        const auto& n2 = g.nodes[e.node2];
+        if (!n1.has_coords || !n2.has_coords) continue; // need rounds
+        if (n1.partition == n2.partition) continue; // not a cross-partition edge
+        else if (n1.partition > n2.partition) { // n1 in higher partition
+            g.nodes[e.node1].is_virtual = true; // mark higher partition node as virtual
+            // g.nodes[e.node2].virtual_neighbors.insert(std::make_tuple(e.node1, n1.round)); // save virtual neighbor in lower round node
+        } else { // n2 in higher partition
+            g.nodes[e.node2].is_virtual = true; // mark higher partition node as virtual
+            // g.nodes[e.node1].virtual_neighbors.insert(std::make_tuple(e.node2, n2.round)); // save virtual neighbor in lower round node
+        }
+    }
+}
+
+// ===============
+#endif

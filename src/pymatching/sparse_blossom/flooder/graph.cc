@@ -135,7 +135,13 @@ MatchingGraph::MatchingGraph(MatchingGraph&& graph) noexcept
       normalising_constant(graph.normalising_constant),
       previous_weights(graph.previous_weights),
       edges_to_implied_weights_unconverted(graph.edges_to_implied_weights_unconverted),
-      loaded_from_dem_without_correlations(graph.loaded_from_dem_without_correlations) {
+      loaded_from_dem_without_correlations(graph.loaded_from_dem_without_correlations) 
+#ifdef USE_SHMEM
+// ===============
+      , num_partitions(graph.num_partitions)
+// ===============
+#endif
+      {
 }
 
 MatchingGraph::MatchingGraph() : negative_weight_sum(0), num_nodes(0), num_observables(0), normalising_constant(0) {

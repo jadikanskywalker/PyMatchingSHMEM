@@ -67,6 +67,13 @@ class DetectorNode {
     std::vector<weight_int> neighbor_weights;   /// Distance crossed by the edge to each neighbor.
     std::vector<obs_int> neighbor_observables;  /// Observables crossed by the edge to each neighbor.
 
+#ifdef USE_SHMEM
+// ===============
+    long partition;  // partition of node
+    bool is_virtual; // whether node is virtual (connects to directly lower partition)
+// ===============
+#endif
+
     /// After it reached this node, how much further did the owning search region grow? Also is it currently growing?
     inline VaryingCT local_radius() const {
         if (region_that_arrived_top == nullptr) {

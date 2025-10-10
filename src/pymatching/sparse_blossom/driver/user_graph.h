@@ -52,6 +52,20 @@ class UserNode {
     size_t index_of_neighbor(size_t node) const;
     std::vector<UserNeighbor> neighbors;  /// The node's neighbors.
     bool is_boundary;
+#ifdef USE_SHMEM
+// ===============
+    // Optional structural metadata from the DEM for partitioning/layout.
+    //   Feilds are set from DETECTOR instruction coordinates.
+    //   Convention: round corresponds to the last DEM coordinate,
+    bool has_coords = false;
+    long round = -1;         // measurement round
+    // double pos_x = 0.0;      // spatial x
+    // double pos_y = 0.0;      // spatial y
+    long partition = -1;     // assigned partition
+    bool is_virtual = false; // virtual nodes have edges to nodes in lower partitions
+    // std::set<std::tuple<size_t,long >> virtual_neighbors; 
+// ===============
+#endif
 };
 
 const pm::weight_int MAX_USER_EDGE_WEIGHT = NUM_DISTINCT_WEIGHTS - 1;
@@ -64,6 +78,12 @@ class UserGraph {
     std::list<UserEdge> edges;
     std::set<size_t> boundary_nodes;
     bool loaded_from_dem_without_correlations = false;
+
+#ifdef USE_SHMEM
+// ===============
+    long num_partitions;
+// ===============
+#endif
 
     UserGraph();
     explicit UserGraph(size_t num_nodes);
@@ -200,6 +220,17 @@ UserGraph detector_error_model_to_user_graph(
     const stim::DetectorErrorModel& detector_error_model,
     bool enable_correlations,
     pm::weight_int num_distinct_weights);
+
+#ifdef USE_SHMEM
+// ===============
+/// Annotates UserGraph nodes with coordinates from the DEM, if available.
+std::set<long> annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g);
+
+/// Partitions the UserGraph into chunks of M rounds
+///   Virtual node rule: for any cross-partition edge, the node in the higher partition is virtual.
+void partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds);
+// ===============
+#endif
 
 /// Computes the weight of an edge resulting from merging edges with weight `a' and weight `b', assuming each edge
 /// weight is a log-likelihood ratio log((1-p)/p) associated with the probability p of an error occurring on the
