@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.4...3.18)
 project(PyMatching2)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# Option to enable OpenSHMEM code paths across the sparse_blossom sources.
+option(USE_SHMEM "Enable OpenSHMEM-related code (defines USE_SHMEM)" ON)
+if(USE_SHMEM)
+    message(STATUS "Compiling with USE_SHMEM enabled")
+endif()
+
 include_directories(src)
 set(CMAKE_CXX_STANDARD 20 CACHE STRING "C++ version selection")
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -63,6 +69,7 @@ set(SOURCE_FILES_NO_MAIN
 set(TEST_FILES
         src/pymatching/sparse_blossom/driver/namespaced_main.test.cc
         src/pymatching/sparse_blossom/driver/mwpm_decoding.test.cc
+        src/pymatching/sparse_blossom/driver/partition_decoding.test.cc
         src/pymatching/sparse_blossom/flooder_matcher_interop/varying.test.cc
         src/pymatching/sparse_blossom/flooder/graph.test.cc
         src/pymatching/sparse_blossom/flooder/detector_node.test.cc
@@ -104,6 +111,9 @@ target_compile_options(pymatching PRIVATE ${ARCH_OPT})
 if (NOT (MSVC))
     target_link_options(pymatching PRIVATE -pthread ${ARCH_OPT})
 endif ()
+if(USE_SHMEM)
+    target_compile_definitions(pymatching PRIVATE USE_SHMEM)
+endif()
 target_link_libraries(pymatching libstim)
 install(TARGETS pymatching RUNTIME DESTINATION bin)
 
@@ -116,6 +126,9 @@ if (NOT (MSVC))
 else ()
     target_link_options(pymatching_tests PRIVATE -fsanitize=address -fsanitize=undefined -coverage)
 endif ()
+if(USE_SHMEM)
+    target_compile_definitions(pymatching_tests PRIVATE USE_SHMEM)
+endif()
 target_link_libraries(pymatching_tests GTest::gtest_main GTest::gmock_main libstim)
 
 add_executable(pymatching_perf ${SOURCE_FILES_NO_MAIN} ${PERF_FILES})
@@ -123,6 +136,9 @@ target_compile_options(pymatching_perf PRIVATE ${ARCH_OPT})
 if (NOT (MSVC))
     target_link_options(pymatching_perf PRIVATE -pthread -O3)
 endif ()
+if(USE_SHMEM)
+    target_compile_definitions(pymatching_perf PRIVATE USE_SHMEM)
+endif()
 target_link_libraries(pymatching_perf libstim)
 
 add_library(libpymatching ${SOURCE_FILES_NO_MAIN})
@@ -131,6 +147,9 @@ target_include_directories(libpymatching PUBLIC src)
 target_compile_options(libpymatching PRIVATE ${ARCH_OPT} -fPIC)
 if(NOT(MSVC))
     target_link_options(libpymatching PRIVATE -pthread -O3)
+endif()
+if(USE_SHMEM)
+    target_compile_definitions(libpymatching PUBLIC USE_SHMEM)
 endif()
 target_link_libraries(libpymatching libstim)
 install(TARGETS libpymatching LIBRARY DESTINATION)
@@ -144,6 +163,9 @@ IF(EXISTS ${CMAKE_CURRENT_LIST_DIR}/pybind11/CMakeLists.txt)
     pybind11_add_module(_cpp_pymatching ${PYTHON_API_FILES} ${SOURCE_FILES_NO_MAIN})
     target_link_libraries(_cpp_pymatching PRIVATE libstim)
     target_compile_options(_cpp_pymatching PRIVATE ${ARCH_OPT})
+    if(USE_SHMEM)
+        target_compile_definitions(_cpp_pymatching PRIVATE USE_SHMEM)
+    endif()
 else()
     message("WARNING: Skipped the pybind11 module _cpp_pymatching because the `pybind11` git submodule isn't present. To fix, run `git submodule update --init --recursive`")
 endif()
