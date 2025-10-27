@@ -59,10 +59,10 @@ class UserNode {
     //   Convention: round corresponds to the last DEM coordinate,
     bool has_coords = false;
     long round = -1;         // measurement round
-    // double pos_x = 0.0;      // spatial x
-    // double pos_y = 0.0;      // spatial y
+    double pos_x = 0.0;      // spatial x
+    double pos_y = 0.0;      // spatial y
     long partition = -1;     // assigned partition
-    bool is_virtual = false; // virtual nodes have edges to nodes in lower partitions
+    bool is_cross_partition = false; // cross_partition nodes have edges to nodes in lower partitions
     // std::set<std::tuple<size_t,long >> virtual_neighbors; 
 // ===============
 #endif
@@ -233,6 +233,9 @@ std::set<long> annotate_nodes_with_dem_coordinates(const stim::DetectorErrorMode
 /// Partitions the UserGraph into chunks of M rounds
 ///   Virtual node rule: for any cross-partition edge, the node in the higher partition is virtual.
 void partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds);
+
+// Partitions 2d UserGraph by splitting vertically
+void partition_nodes_2d_vertical_split(pm::UserGraph& g, std::set<long> rounds);
 // ===============
 #endif
 

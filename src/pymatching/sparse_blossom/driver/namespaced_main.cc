@@ -29,6 +29,7 @@
 // ===============
 #include <shmem.h>
 #include "../config_shmem.h"
+#include "../diagram/mwpm_diagram.h"
 // ===============
 #endif
 
@@ -45,6 +46,8 @@ int main_predict(int argc, const char **argv) {
 #ifdef USE_SHMEM
 // ===============
             "--rounds_per_partition",
+            "--parallel",
+            "--draw_frames"
 // ===============
 #endif
         },
@@ -66,6 +69,8 @@ int main_predict(int argc, const char **argv) {
 #ifdef USE_SHMEM
 // ===============
     config_shmem::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
+    bool parallel = stim::find_bool_argument("--parallel", argc, argv);
+    bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
 // ===============
 #endif
 
@@ -91,6 +96,12 @@ int main_predict(int argc, const char **argv) {
 
 #ifdef USE_SHMEM
 // ===============
+    if (DEBUG) {
+        pm::setup_output_dirs(draw_frames);
+        output_detector_nodes(mwpm, parallel);
+    }
+    mwpm.coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
+
     int mype = shmem_my_pe();
     if (DEBUG)
         std::cout << "DEBUG: PE " << mype << " dem.count_detectors() : " << dem.count_detectors() << std::endl;
@@ -104,15 +115,19 @@ int main_predict(int argc, const char **argv) {
             if (reader->start_and_read_entire_record(sparse_shot)) {
                 *hits_size = (long) sparse_shot.hits.size();
                 // Copy hits into buffer
-                for (size_t i = 0; i < *hits_size; ++i) hits[i] = sparse_shot.hits[i];
+                for (size_t i = 0; i < *hits_size; ++i)
+                    hits[i] = sparse_shot.hits[i];
             } else {
-                *hits_size = 0;
+                *hits_size = -1;
             }
         }
         shmem_barrier_all();
         // Broadcast hits size
         shmem_long_broadcast(SHMEM_TEAM_WORLD, hits_size, hits_size, 1, 0);
-        if (*hits_size == 0) {
+        if (*hits_size < 0) {
+            shmem_barrier_all();
+            shmem_free(hits_size);
+            shmem_free(hits);
             // no more shots
             break;
         }
@@ -123,16 +138,11 @@ int main_predict(int argc, const char **argv) {
         if (mype != 0) {
             sparse_shot.hits.assign(hits, hits + *hits_size);
         }
-        // TODO: Simple Scheduling Algorithm
-        mwpm.flooder.active_partitions.clear();
-        if (mype < mwpm.flooder.graph.num_partitions)
-            mwpm.flooder.active_partitions.insert(mype);
-        else
-            mwpm.flooder.active_partitions.insert(mype % mwpm.flooder.graph.num_partitions);
-        if (DEBUG)
-            std::cout << "DEBUG: Shot " << i << ": PE " << mype << " solving partition " << *mwpm.flooder.active_partitions.begin() << std::endl;
         // Decode shot
-        pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations);
+        if (parallel)
+            pm::decode_detection_events_in_parallel(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
+        else
+            pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
         if (mype == 0) {
             for (size_t k = 0; k < num_obs; k++) {
                 writer->write_bit(res.obs_crossed[k]);

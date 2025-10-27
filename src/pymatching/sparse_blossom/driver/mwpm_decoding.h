@@ -65,7 +65,12 @@ void decode_detection_events(
     const std::vector<uint64_t>& detection_events,
     uint8_t* obs_begin_ptr,
     pm::total_weight_int& weight,
-    bool edge_correlations);
+    bool edge_correlations
+#ifdef USE_SHMEM
+    , int shot = 0,
+    bool draw_frames = false
+#endif
+);
 
 /// Decode detection events using a Mwpm object and vector of detection event indices
 /// Returns the compressed edges in the matching: the pairs of detection events that are
@@ -81,7 +86,25 @@ void decode_detection_events_to_edges(
 
 void decode_detection_events_to_edges_with_edge_correlations(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, std::vector<int64_t>& edges);
+ 
+#ifdef USE_SHMEM
+void setup_output_dirs(bool draw_frames);
+void output_detector_nodes(pm::Mwpm& mwpm, bool parallel=true);
+void output_detection_events(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, int shot, bool parallel=true);
+void output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, int shot, std::set<long>parts, bool parallel=true);
 
-}  // namespace pm
+void draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int shot, int frame_number);
+
+void decode_detection_events_in_parallel(
+    pm::Mwpm& mwpm,
+    const std::vector<uint64_t>& detection_events,
+    uint8_t* obs_begin_ptr,
+    pm::total_weight_int& weight,
+    bool edge_correlations,
+    int shot,
+    bool draw_frames);
+#endif
+
+} // namespace pm
 
 #endif  // PYMATCHING2_MWPM_DECODING_H

@@ -17,6 +17,10 @@
 
 #include "pymatching/sparse_blossom/ints.h"
 
+#ifdef USE_SHMEM
+#include <iostream>
+#endif
+
 namespace pm {
 
 class DetectorNode;
@@ -41,6 +45,10 @@ struct CompressedEdge {
     /// was crossed an odd number of times.
     obs_int obs_mask;
 
+#ifdef USE_SHMEM
+    inline bool is_boundary() const { return loc_to == nullptr; }
+#endif
+
     CompressedEdge reversed() const;
 
     bool operator==(const CompressedEdge& rhs) const;
@@ -57,7 +65,14 @@ struct CompressedEdge {
     }
 };
 
+
 inline CompressedEdge CompressedEdge::reversed() const {
+#ifdef USE_SHMEM
+    if (is_boundary()) {
+        std::cout << "  ERROR: calling CompressedEdge::reversed() on boundary edge" << std::endl;
+        return *this;
+    }
+#endif
     return {loc_to, loc_from, obs_mask};
 }
 

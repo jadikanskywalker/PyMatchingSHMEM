@@ -70,7 +70,8 @@ class DetectorNode {
 #ifdef USE_SHMEM
 // ===============
     long partition;  // partition of node
-    bool is_virtual; // whether node is virtual (connects to directly lower partition)
+    bool is_cross_partition; // whether node connect to directly lower partitions
+    bool is_active = true; // whether node is currently virtual
 // ===============
 #endif
 

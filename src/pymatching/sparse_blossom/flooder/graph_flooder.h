@@ -60,6 +60,7 @@ struct GraphFlooder {
 // ===============
     // Set of active partitions. Should have 1 for partition solving, 2 for fusing
     std::set<long> active_partitions;
+    std::vector<GraphFillRegion *> regions_matched_to_virtual_boundary;
 // ===============
 #endif
 
@@ -81,7 +82,7 @@ struct GraphFlooder {
     pm::MwpmEvent do_region_hit_boundary_interaction(DetectorNode& node);
 #ifdef USE_SHMEM
     // Treat a specific neighbor edge as a boundary (used for virtual boundaries between partitions)
-    pm::MwpmEvent do_region_hit_boundary_interaction_via_edge(DetectorNode& node, size_t edge_index);
+    pm::MwpmEvent do_region_hit_virtual_boundary_interaction(DetectorNode& node, size_t edge_index);
 #endif
     static MwpmEvent do_degenerate_implosion(const GraphFillRegion& region);
     static MwpmEvent do_blossom_shattering(GraphFillRegion& region);
@@ -89,6 +90,17 @@ struct GraphFlooder {
     std::pair<size_t, pm::cumulative_time_int> find_next_event_at_node_returning_neighbor_index_and_time(
         const DetectorNode& detector_node) const;
     pm::MwpmEvent do_look_at_node_event(DetectorNode& node);
+
+#ifdef USE_SHMEM
+    void update_active_nodes();
+    // Sets up internal variables for single partition solving
+    void prepare_for_solve_partition(long p);
+    // Sets up internal variables for fusion
+    //   Assumes the flooder has intermediate solution states for p1 and p2, including:
+    //     - matched GraphFillRegions
+    //     - DetectorNode ephermeral states
+    void prepare_for_fuse_partitions(long p1, long p2);
+#endif
 
     pm::FloodCheckEvent dequeue_valid();
     pm::MwpmEvent process_tentative_event_returning_mwpm_event(FloodCheckEvent tentative_event);

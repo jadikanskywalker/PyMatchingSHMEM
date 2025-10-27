@@ -308,7 +308,7 @@ pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_w
         // matching_graph.partition_of_node[i] = static_cast<int32_t>(nodes[i].partition);
         // matching_graph.is_virtual_node[i] = nodes[i].is_virtual;
         matching_graph.nodes[i].partition = nodes[i].partition;
-        matching_graph.nodes[i].is_virtual = nodes[i].is_virtual;
+        matching_graph.nodes[i].is_cross_partition = nodes[i].is_cross_partition;
     }
 // ===============
 #endif
@@ -596,6 +596,8 @@ std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorError
     std::map<uint64_t, std::vector<double>> coords_map = dem.get_detector_coordinates(all_dets);
     // Annotate UserNodes
     std::set<long> rounds;
+    std::set<long> x;
+    std::set<long> y;
     for (size_t k = 0; k < g.nodes.size(); ++k) {
         auto it = coords_map.find(k);
         if (it == coords_map.end()) {
@@ -605,12 +607,18 @@ std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorError
         const auto& coors = it->second;
         pm::UserNode& node = g.nodes[k];
         node.has_coords = true;
-        // Store round
-        // node.pos_x = coors[0];
-        // node.pos_y = coors[1];
+        // Store coordinates
+        node.pos_x = coors[0];
+        node.pos_y = coors[1];
         node.round = (long)lround(coors[coors.size()-1]);
         rounds.insert(node.round);
+        x.insert(node.pos_x);
+        y.insert(node.pos_y);
     }
+    if (DEBUG)
+        std::cout << "X: " << *x.begin() << " to " << *x.rbegin() << std::endl
+                  << "Y: " << *y.begin() << " to " << *y.rbegin() << std::endl
+                  << "Z: " << *rounds.begin() << " to " << *rounds.rbegin() << std::endl;
     return rounds;
 }
 
@@ -634,13 +642,19 @@ void pm::partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds) {
         if (!n1.has_coords || !n2.has_coords) continue; // need rounds
         if (n1.partition == n2.partition) continue; // not a cross-partition edge
         else if (n1.partition > n2.partition) { // n1 in higher partition
-            g.nodes[e.node1].is_virtual = true; // mark higher partition node as virtual
+            g.nodes[e.node1].is_cross_partition = true; // mark higher partition node as virtual
             // g.nodes[e.node2].virtual_neighbors.insert(std::make_tuple(e.node1, n1.round)); // save virtual neighbor in lower round node
         } else { // n2 in higher partition
-            g.nodes[e.node2].is_virtual = true; // mark higher partition node as virtual
+            g.nodes[e.node2].is_cross_partition = true; // mark higher partition node as virtual
             // g.nodes[e.node1].virtual_neighbors.insert(std::make_tuple(e.node2, n2.round)); // save virtual neighbor in lower round node
         }
     }
+}
+
+void pm::partition_nodes_2d_vertical_split(pm::UserGraph& g, std::set<long> rounds) {
+    g.num_partitions = 2;
+
+    
 }
 
 // ===============

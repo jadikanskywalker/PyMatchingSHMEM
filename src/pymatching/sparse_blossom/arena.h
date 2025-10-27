@@ -53,8 +53,10 @@ struct Arena {
     }
 
     void del(T *p) {
-        available.push_back(p);
+        // Destroy the object first, then mark memory as available for reuse.
+        // This avoids having an object considered "available" while its destructor is still running.
         p->~T();
+        available.push_back(p);
     }
 
     ~Arena() {
