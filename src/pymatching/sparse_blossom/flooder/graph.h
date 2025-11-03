@@ -63,7 +63,7 @@ class MatchingGraph {
     // dem with enable_correlations=true.
     bool loaded_from_dem_without_correlations = false;
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 // ===============
     long num_partitions = 0;
 // ===============

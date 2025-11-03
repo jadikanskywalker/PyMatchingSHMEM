@@ -41,6 +41,9 @@ void DetectorNode::reset() {
     region_that_arrived_top = nullptr;
     wrapped_radius_cached = 0;
     node_event_tracker.clear();
+#ifdef USE_THREADS
+    is_active = -1;
+#endif
 }
 
 size_t DetectorNode::index_of_neighbor(DetectorNode *target) const {

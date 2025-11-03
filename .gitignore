@@ -34,3 +34,11 @@ build.ninja
 .ninja_log
 .clwb
 .vscode
+
+Doxyfile
+*.dox
+run
+logs
+docs/doxygen
+tmp
+build*

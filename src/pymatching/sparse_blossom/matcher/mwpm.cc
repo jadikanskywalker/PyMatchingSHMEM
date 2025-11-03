@@ -19,8 +19,8 @@
 #include "pymatching/sparse_blossom/flooder/graph_fill_region.h"
 #include "pymatching/sparse_blossom/matcher/alternating_tree.h"
 
-#ifdef USE_SHMEM
-#include "../config_shmem.h"
+#ifdef ENABLE_FUSION
+#include "../config_parallel.h"
 #endif
 
 using namespace pm;
@@ -75,7 +75,7 @@ void Mwpm::handle_tree_hitting_boundary(const RegionHitBoundaryEventData &event)
     flooder.set_region_frozen(*event.region);
 }
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 void Mwpm::handle_tree_hitting_virtual_boundary(const RegionHitVirtualBoundaryEventData &event) {
     auto node = event.region->alt_tree_node;
     node->become_root();
@@ -99,7 +99,7 @@ void Mwpm::handle_tree_hitting_boundary_match(
     GraphFillRegion *unmatched_region,
     GraphFillRegion *matched_region,
     const CompressedEdge &unmatched_to_matched_edge) {
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
     if (DEBUG) {
         std::cout << "  DEBUG: tree hitting boundary match" << std::endl
                   << "    matched_region: " << matched_region << std::endl
@@ -115,12 +115,12 @@ void Mwpm::handle_tree_hitting_boundary_match(
     shatter_descendants_into_matches_and_freeze(*alt_tree_node);
 }
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 void Mwpm::handle_tree_hitting_virtual_boundary_match(
     GraphFillRegion *unmatched_region,
     GraphFillRegion *matched_region,
     const CompressedEdge &unmatched_to_matched_edge) {
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
     if (DEBUG) {
         std::cout << "  DEBUG: tree hitting virtual boundary match" << std::endl
                   << "    matched_region: " << matched_region << std::endl
@@ -363,7 +363,7 @@ void Mwpm::process_event(const MwpmEvent &event) {
         case REGION_HIT_BOUNDARY:
             handle_tree_hitting_boundary(event.region_hit_boundary_event_data);
             break;
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
         case REGION_HIT_VIRTUAL_BOUNDARY:
             handle_tree_hitting_virtual_boundary(event.region_hit_virtual_boundary_event_data);
             break;
@@ -379,7 +379,7 @@ void Mwpm::process_event(const MwpmEvent &event) {
     }
 }
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 void Mwpm::unmatch_virtual_boundaries_between_partitions() {
     if (DEBUG)
         std::cout << "  DEBUG: unmatching virtual boundaries" << std::endl;
@@ -399,8 +399,6 @@ void Mwpm::unmatch_virtual_boundaries_between_partitions() {
                     std:: cout << "  -  CROSS_PARTITION";
                 std::cout << std::endl;
             }
-            // Remember original virtual-boundary match so we can restore it if fusion doesn't consume this region.
-            unmatched_regions_backup.emplace_back(matched_region);
             auto alt_tree_node = node_arena.alloc_unconstructed();
             new (alt_tree_node) AltTreeNode(matched_region);
             matched_region->alt_tree_node = alt_tree_node;

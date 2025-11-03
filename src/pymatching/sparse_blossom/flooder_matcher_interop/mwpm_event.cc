@@ -31,7 +31,7 @@ std::ostream &pm::operator<<(std::ostream &out, const RegionHitBoundaryEventData
     return out;
 }
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 std::ostream &pm::operator<<(std::ostream &out, const RegionHitVirtualBoundaryEventData &ev) {
     out << "{.region=" << ev.region;
     out << ", .edge=" << ev.edge;
@@ -63,7 +63,7 @@ std::ostream &pm::operator<<(std::ostream &out, const MwpmEvent &ev) {
         case REGION_HIT_BOUNDARY:
             out << "REGION_HIT_BOUNDARY, .dat=" << ev.region_hit_boundary_event_data;
             break;
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
         case REGION_HIT_VIRTUAL_BOUNDARY:
             out << "REGION_HIT_VIRTUAL_BOUNDARY, .dat=" << ev.region_hit_virtual_boundary_event_data;
             break;
@@ -93,7 +93,7 @@ std::string RegionHitBoundaryEventData::str() const {
     return out.str();
 }
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 std::string RegionHitVirtualBoundaryEventData::str() const {
     std::stringstream out;
     out << *this;
@@ -128,7 +128,7 @@ bool RegionHitBoundaryEventData::operator!=(const RegionHitBoundaryEventData &rh
     return !(rhs == *this);
 }
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 bool RegionHitVirtualBoundaryEventData::operator==(const RegionHitVirtualBoundaryEventData &rhs) const {
     return region == rhs.region && edge == rhs.edge;
 }
@@ -153,7 +153,7 @@ MwpmEvent::MwpmEvent(RegionHitRegionEventData region_hit_region_event_data)
 MwpmEvent::MwpmEvent(RegionHitBoundaryEventData region_hit_region_event_data)
     : region_hit_boundary_event_data(region_hit_region_event_data), event_type(REGION_HIT_BOUNDARY) {
 }
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 MwpmEvent::MwpmEvent(RegionHitVirtualBoundaryEventData region_hit_region_event_data)
     : region_hit_virtual_boundary_event_data(region_hit_region_event_data), event_type(REGION_HIT_VIRTUAL_BOUNDARY) {
 }
@@ -174,7 +174,7 @@ bool MwpmEvent::operator==(const MwpmEvent &rhs) const {
             return region_hit_region_event_data == rhs.region_hit_region_event_data;
         case REGION_HIT_BOUNDARY:
             return region_hit_boundary_event_data == rhs.region_hit_boundary_event_data;
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
         case REGION_HIT_VIRTUAL_BOUNDARY:
             return region_hit_virtual_boundary_event_data == rhs.region_hit_virtual_boundary_event_data;
 #endif

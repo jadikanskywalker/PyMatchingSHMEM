@@ -67,11 +67,11 @@ class DetectorNode {
     std::vector<weight_int> neighbor_weights;   /// Distance crossed by the edge to each neighbor.
     std::vector<obs_int> neighbor_observables;  /// Observables crossed by the edge to each neighbor.
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 // ===============
     long partition;  // partition of node
     bool is_cross_partition; // whether node connect to directly lower partitions
-    bool is_active = true; // whether node is currently virtual
+    int is_active = -1; // tid of what threads this belongs to
 // ===============
 #endif
 

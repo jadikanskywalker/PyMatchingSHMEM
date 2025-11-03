@@ -17,8 +17,8 @@
 #include "pymatching/rand/rand_gen.h"
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
 
-#ifdef USE_SHMEM
-#include "../config_shmem.h"
+#ifdef ENABLE_FUSION
+#include "../config_parallel.h"
 #endif
 
 namespace {
@@ -269,8 +269,14 @@ double pm::UserGraph::max_abs_weight() {
     return max_abs_weight;
 }
 
+#ifdef USE_THREADS
+std::shared_ptr<pm::MatchingGraph> pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_weights) {
+    std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
+    pm::MatchingGraph& matching_graph = *matching_graph_ptr;
+#else
 pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_weights) {
     pm::MatchingGraph matching_graph(nodes.size(), _num_observables);
+#endif
 
     double normalising_constant = to_matching_or_search_graph_helper(
         num_distinct_weights,
@@ -298,7 +304,7 @@ pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_w
 
     matching_graph.convert_implied_weights(normalising_constant);
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 // ===============
     // Propagate partition and virtual metadata
     // matching_graph.partition_of_node.resize(nodes.size(), -1);
@@ -313,7 +319,11 @@ pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_w
 // ===============
 #endif
 
+#ifdef USE_THREADS
+    return matching_graph_ptr;
+#else
     return matching_graph;
+#endif
 }
 
 pm::SearchGraph pm::UserGraph::to_search_graph(pm::weight_int num_distinct_weights) {
@@ -338,7 +348,7 @@ pm::SearchGraph pm::UserGraph::to_search_graph(pm::weight_int num_distinct_weigh
 
     search_graph.convert_implied_weights(normalizing_constant);
 
-// #ifdef USE_SHMEM
+// #ifdef ENABLE_FUSION
 // // ===============
 //     // Propagate partition and virtual metadata
 //     search_graph.num_partitions = num_partitions;
@@ -546,7 +556,7 @@ pm::UserGraph pm::detector_error_model_to_user_graph(
             });
         user_graph.loaded_from_dem_without_correlations = true;
     }
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 // ===============
     // Annotate user nodes with DEM-provided coordinates and virtual node infomation for partitioning.
     const auto& rounds = annotate_nodes_with_dem_coordinates(detector_error_model, user_graph);
@@ -585,7 +595,7 @@ void pm::UserGraph::populate_implied_edge_weights(
     }
 }
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 // ===============
 std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g) {
     // Query coordinates from stim. Map: det_id -> vector<double> of coords.
@@ -605,12 +615,22 @@ std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorError
             continue;
         }
         const auto& coors = it->second;
+        if (coors.empty()) {
+            // No coordinate data; skip annotation.
+            throw std::invalid_argument("Detector node " + std::to_string(it->first) + " has no coords");
+        }
         pm::UserNode& node = g.nodes[k];
         node.has_coords = true;
-        // Store coordinates
-        node.pos_x = coors[0];
-        node.pos_y = coors[1];
-        node.round = (long)lround(coors[coors.size()-1]);
+        // Store coordinates if available
+        if (coors.size() >= 2) {
+            node.pos_x = coors[0];
+            node.pos_y = coors[1];
+        } else {
+            // Only one coordinate present; leave x/y defaults
+            node.pos_x = coors[0];
+        }
+        // Use the last value as the round index
+        node.round = (long)lround(coors.back());
         rounds.insert(node.round);
         x.insert(node.pos_x);
         y.insert(node.pos_y);
@@ -625,14 +645,36 @@ std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorError
 
 void pm::partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds) {
     // M rounds per partition
-    int M = config_shmem::M;
-    g.num_partitions = (long)((long(rounds.size()) / config_shmem::M) + 1); // num partitions
+    int M = config_parallel::M;
+    int num_p = rounds.size() / M;
+    int num_tail = rounds.size() % M;
+    int num_tail_per_p = num_tail / num_p;
+    g.num_partitions = (long)(long(rounds.size()) / config_parallel::M); // num partitions
+    std::vector<long> round_in_partition;
+    long p = 0;
+    int i = 0;
+    int t = 0;
+    for (long round : rounds) {
+        round_in_partition.emplace_back(p);
+        i++;
+        if (i == M && num_tail > 0) {
+            num_tail--;
+            t++;
+        } else if (i >= M && t < num_tail_per_p) {
+            num_tail--;
+            t++;
+        } else if (i >= M) {
+            p++;
+            i = 0;
+            t = 0;
+        }
+    }
     if (DEBUG)
         std::cout << "  M : " << M << "; num_rounds : " << rounds.size() << "; num_partitions : " << g.num_partitions << std::endl;
     // partition nodes
     for (auto& n : g.nodes) {
         if (n.has_coords)
-            n.partition = (n.round / M);
+            n.partition = round_in_partition[n.round];
     }
     // mark virtual nodes
     for (const auto& e : g.edges) {
@@ -653,8 +695,7 @@ void pm::partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds) {
 
 void pm::partition_nodes_2d_vertical_split(pm::UserGraph& g, std::set<long> rounds) {
     g.num_partitions = 2;
-
-    
+    throw std::invalid_argument("partition_nodes_2d_vertical_split: not yet implemented");
 }
 
 // ===============

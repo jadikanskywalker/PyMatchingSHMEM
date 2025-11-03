@@ -522,7 +522,12 @@ TEST(UserGraph, ConvertImpliedWeights) {
     edge1.implied_weights_for_other_edges.push_back({2, 3, 5});
     edge1.implied_weights_for_other_edges.push_back({4, SIZE_MAX, 7});
 
+    #ifdef USE_THREADS
+    auto matching_graph_ptr = user_graph.to_matching_graph(100);
+    pm::MatchingGraph& matching_graph = *matching_graph_ptr;
+    #else
     pm::MatchingGraph matching_graph = user_graph.to_matching_graph(100);
+    #endif
 
     auto& node0_neighbors = matching_graph.nodes[0].neighbors;
     auto it0 = std::find(node0_neighbors.begin(), node0_neighbors.end(), &matching_graph.nodes[1]);
@@ -563,7 +568,12 @@ TEST(UserGraph, ConvertImpliedWeights_NoRules) {
     user_graph.add_or_merge_edge(2, 3, {}, 1.0, 0.1);
     user_graph.add_or_merge_boundary_edge(4, {}, 1.0, 0.1);
 
+    #ifdef USE_THREADS
+    auto matching_graph_ptr = user_graph.to_matching_graph(100);
+    pm::MatchingGraph& matching_graph = *matching_graph_ptr;
+    #else
     pm::MatchingGraph matching_graph = user_graph.to_matching_graph(100);
+    #endif
 
     for (const auto& node : matching_graph.nodes) {
         for (const auto& implied_weights_vec : node.neighbor_implied_weights) {
@@ -582,7 +592,12 @@ TEST(UserGraph, ConvertImpliedWeights_EmptyRules) {
     });
     edge.implied_weights_for_other_edges = {};
 
+    #ifdef USE_THREADS
+    auto matching_graph_ptr = user_graph.to_matching_graph(100);
+    pm::MatchingGraph& matching_graph = *matching_graph_ptr;
+    #else
     pm::MatchingGraph matching_graph = user_graph.to_matching_graph(100);
+    #endif
 
     for (const auto& node : matching_graph.nodes) {
         for (const auto& implied_weights_vec : node.neighbor_implied_weights) {

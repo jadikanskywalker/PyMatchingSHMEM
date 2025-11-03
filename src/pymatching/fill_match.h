@@ -13,6 +13,9 @@
 // limitations under the License.
 
 #include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
+#ifdef USE_THREADS
+#include "pymatching/sparse_blossom/driver/work_stealing_deque.h"
+#endif
 #include "pymatching/sparse_blossom/driver/namespaced_main.h"
 #include "pymatching/sparse_blossom/flooder/graph.h"
 #include "pymatching/sparse_blossom/flooder/graph_fill_region.h"

@@ -43,10 +43,8 @@ struct Mwpm {
     Arena<AltTreeNode> node_arena;
     SearchFlooder search_flooder;
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
     std::pair<std::vector<std::pair<float, float>>, std::vector<std::pair<float, float>>> coords;
-    // Regions temporarily unmatched from virtual boundaries during fusion, along with their original edge.
-    std::vector<GraphFillRegion*> unmatched_regions_backup;
 #endif
 
     Mwpm();
@@ -65,7 +63,7 @@ struct Mwpm {
     void handle_blossom_shattering(const BlossomShatterEventData& event);
     void shatter_descendants_into_matches_and_freeze(AltTreeNode& alt_tree_node);
     void handle_tree_hitting_boundary(const RegionHitBoundaryEventData& event);
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
     void handle_tree_hitting_virtual_boundary(const RegionHitVirtualBoundaryEventData& event);
 #endif
     void handle_region_hit_region(const MwpmEvent event);
@@ -77,7 +75,7 @@ struct Mwpm {
         GraphFillRegion* unmatched_region,
         GraphFillRegion* matched_region,
         const CompressedEdge& unmatched_to_matched_edge);
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
     void handle_tree_hitting_virtual_boundary_match(
         GraphFillRegion* unmatched_region,
         GraphFillRegion* matched_region,
@@ -85,9 +83,8 @@ struct Mwpm {
 #endif
     void handle_tree_hitting_self(const RegionHitRegionEventData& event, AltTreeNode* common_ancestor);
     void handle_tree_hitting_other_tree(const RegionHitRegionEventData& event);
-#ifdef USE_SHMEM
-    // Removes matchings to virtual boundaries, turning matched regions back
-    // into alternating trees
+#ifdef ENABLE_FUSION
+    // Removes matchings to virtual boundaries, turning matched regions into alternating trees
     void unmatch_virtual_boundaries_between_partitions();
 #endif
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_matches(GraphFillRegion* region, MatchingResult& res);

@@ -27,10 +27,18 @@
 
 #ifdef USE_SHMEM
 // ===============
+#include <omp.h>
 #include <shmem.h>
-#include "../config_shmem.h"
+#endif
+
+#ifdef ENABLE_FUSION
+#include "../config_parallel.h"
 #include "../diagram/mwpm_diagram.h"
 // ===============
+#endif
+
+#ifdef USE_THREADS
+#include <omp.h>
 #endif
 
 int main_predict(int argc, const char **argv) {
@@ -42,12 +50,12 @@ int main_predict(int argc, const char **argv) {
             "--out",
             "--out_format",
             "--dem",
-            "--enable_correlations",
-#ifdef USE_SHMEM
+            "--enable_correlations"
+#if defined(ENABLE_FUSION)
 // ===============
-            "--rounds_per_partition",
-            "--parallel",
-            "--draw_frames"
+            , "--rounds_per_partition",
+            "--draw_frames",
+            "--parallel"
 // ===============
 #endif
         },
@@ -66,11 +74,15 @@ int main_predict(int argc, const char **argv) {
     bool append_obs = stim::find_bool_argument("--in_includes_appended_observables", argc, argv);
     bool enable_correlations = stim::find_bool_argument("--enable_correlations", argc, argv);
 
-#ifdef USE_SHMEM
+#if defined(ENABLE_FUSION)
 // ===============
-    config_shmem::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
-    bool parallel = stim::find_bool_argument("--parallel", argc, argv);
+    config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
+#if defined(USE_THREADS) || defined(USE_SHMEM)
+    bool parallel = stim::find_bool_argument("--parallel", argc, argv);
+#else
+    bool parallel = false;
+#endif
 // ===============
 #endif
 
@@ -84,27 +96,75 @@ int main_predict(int argc, const char **argv) {
     writer->begin_result_type('L');
 
     pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
+
     auto mwpm = pm::detector_error_model_to_mwpm(
         dem,
         num_buckets,
         /*ensure_search_flooder_included=*/enable_correlations,
         /*enable_correlations=*/enable_correlations);
 
+#ifdef USE_THREADS
+    int num_threads = omp_get_max_threads();
+    if (num_threads > mwpm.flooder.graph.num_partitions) {
+        omp_set_num_threads(mwpm.flooder.graph.num_partitions);
+        num_threads = mwpm.flooder.graph.num_partitions;
+    }
+    pm::build_thread_solvers(
+        mwpm,
+        /*ensure_search_flooder_included=*/enable_correlations,
+        /*enable_correlations=*/enable_correlations,
+        num_threads
+    );
+    
+    auto coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
+    mwpm.coords = coords;
+    for (auto &s : pm::solvers)
+        s->coords = coords;
+
+    pm::init_tasks(num_threads, mwpm.flooder.graph.num_partitions);
+    pm::init_task_queues(num_threads, mwpm.flooder.graph.num_partitions);
+
+#else
+#ifdef ENABLE_FUSION
+    mwpm.coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
+#endif
+#endif
+
     stim::SparseShot sparse_shot;
     sparse_shot.clear();
     pm::ExtendedMatchingResult res(mwpm.flooder.graph.num_observables);
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 // ===============
+    pm::setup_output_dirs(draw_frames, parallel);
     if (DEBUG) {
-        pm::setup_output_dirs(draw_frames);
+        output_detector_nodes(mwpm, true);
+    }
+#endif
+
+#if defined(USE_THREADS) && !defined(USE_SHMEM)
+    int i = 0;
+    while (reader->start_and_read_entire_record(sparse_shot)) {
+        if (parallel)
+            pm::decode_detection_events_in_parallel(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
+        else
+            pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
+        for (size_t k = 0; k < num_obs; k++) {
+            writer->write_bit(res.obs_crossed[k]);
+        }
+        writer->write_end();
+        sparse_shot.clear();
+        res.reset();
+        i++;
+    }
+#elif defined(USE_SHMEM)
+    int mype = shmem_my_pe();
+    if (DEBUG && mype==0) {
+        std::cout << "DEBUG: PE " << mype << " dem.count_detectors() : " << dem.count_detectors() << std::endl;
         output_detector_nodes(mwpm, parallel);
     }
-    mwpm.coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
 
-    int mype = shmem_my_pe();
-    if (DEBUG)
-        std::cout << "DEBUG: PE " << mype << " dem.count_detectors() : " << dem.count_detectors() << std::endl;
+    // Hits buffers
     long *hits_size = (long *)shmem_malloc(sizeof(long));
     uint64_t *hits = (uint64_t *)shmem_malloc(dem.count_detectors() * sizeof(uint64_t));
     // Start processing shots

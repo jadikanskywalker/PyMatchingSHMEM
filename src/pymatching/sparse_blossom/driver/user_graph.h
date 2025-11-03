@@ -52,7 +52,7 @@ class UserNode {
     size_t index_of_neighbor(size_t node) const;
     std::vector<UserNeighbor> neighbors;  /// The node's neighbors.
     bool is_boundary;
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 // ===============
     // Optional structural metadata from the DEM for partitioning/layout.
     //   Feilds are set from DETECTOR instruction coordinates.
@@ -79,7 +79,7 @@ class UserGraph {
     std::set<size_t> boundary_nodes;
     bool loaded_from_dem_without_correlations = false;
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 // ===============
     long num_partitions;
 // ===============
@@ -133,7 +133,11 @@ class UserGraph {
         pm::weight_int num_distinct_weights,
         const EdgeCallable& edge_func,
         const BoundaryEdgeCallable& boundary_edge_func);
+#ifdef USE_THREADS
+    std::shared_ptr<pm::MatchingGraph> to_matching_graph(pm::weight_int num_distinct_weights);
+#else
     pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);
+#endif
     pm::SearchGraph to_search_graph(pm::weight_int num_distinct_weights);
     pm::Mwpm to_mwpm(pm::weight_int num_distinct_weights, bool ensure_search_graph_included);
     void update_mwpm();
@@ -225,7 +229,7 @@ UserGraph detector_error_model_to_user_graph(
     bool enable_correlations,
     pm::weight_int num_distinct_weights);
 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 // ===============
 /// Annotates UserGraph nodes with coordinates from the DEM, if available.
 std::set<long> annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g);

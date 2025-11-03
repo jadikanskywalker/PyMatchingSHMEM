@@ -136,7 +136,7 @@ MatchingGraph::MatchingGraph(MatchingGraph&& graph) noexcept
       previous_weights(graph.previous_weights),
       edges_to_implied_weights_unconverted(graph.edges_to_implied_weights_unconverted),
       loaded_from_dem_without_correlations(graph.loaded_from_dem_without_correlations) 
-#ifdef USE_SHMEM
+#ifdef ENABLE_FUSION
 // ===============
       , num_partitions(graph.num_partitions)
 // ===============
