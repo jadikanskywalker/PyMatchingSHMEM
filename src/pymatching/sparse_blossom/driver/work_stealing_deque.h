@@ -23,7 +23,7 @@
 enum Status { UNSOLVED, BUSY = 0, STEALABLE, IN_TRANSFER, FINISHED };
 
 struct Task {
-    std::atomic<int> solution_owner_tid{ -1 };
+    int solution_owner_tid{ -1 };
     std::vector<long> partitions{};
     std::atomic<Status> status{ Status::UNSOLVED };
 
@@ -34,12 +34,11 @@ struct Task {
     Task& operator=(const Task&) = delete;
     // Movable by manually transferring atomic state and moving shared_ptrs via load/store.
     Task(Task&& other) noexcept
-        : solution_owner_tid(other.solution_owner_tid.load(std::memory_order_relaxed)),
-        //   partitions(other.partitions.load(std::memory_order_acquire)),
+        : solution_owner_tid(other.solution_owner_tid),
           partitions(std::move(partitions)),
           status(other.status.load(std::memory_order_relaxed)) {
         // Leave other in a benign state
-        other.solution_owner_tid.store(-1, std::memory_order_relaxed);
+        other.solution_owner_tid = -1;
         // other.partitions.store(nullptr, std::memory_order_release);
         other.status.store(Status::STEALABLE, std::memory_order_relaxed);
     }

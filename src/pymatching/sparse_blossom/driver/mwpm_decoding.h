@@ -102,24 +102,25 @@ void draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int shot, int frame_number, bo
 #endif
 
 #ifdef USE_THREADS
+// ===============
 // Initially, a task is created for each partition and tasks are
 //   assigned to thread partition%num_threads.
 // Fusion collapses tasks leftward. If p3 & p4 are fused, p4 is
 //   added to p3's task and p4's task is marked FINISHED.
 extern std::vector<Task> tasks;
 extern std::vector<int> partitions_task_id; // Convenience store of which task own each partition
-extern std::vector<std::queue<int>> partition_task_queues;
-extern std::vector<std::deque<int>> fusion_task_deques;
+// extern std::vector<std::queue<int>> partition_task_queues;
+// extern std::vector<std::deque<int>> fusion_task_deques;
 // Stable per-thread solver instances. Use shared_ptr to manage lifetime safely across threads.
-extern std::vector<std::shared_ptr<Mwpm>> solvers;
+// extern std::vector<std::shared_ptr<Mwpm>> solvers;
 // Build and assign one solver per thread from a DEM, storing stable instances and wiring `solvers`.
-void build_thread_solvers(
-    pm::Mwpm& mwpm,
-    bool ensure_search_flooder_included,
-    bool enable_correlations,
-    int num_threads);
-void init_tasks(int num_threads, int num_partitions);
-void init_task_queues(int num_threads, int num_partitions);
+// void build_thread_solvers(
+//     pm::Mwpm& mwpm,
+//     bool ensure_search_flooder_included,
+//     bool enable_correlations,
+//     int num_threads);
+void reset_tasks(int num_threads, int num_partitions);
+// void init_task_queues(int num_threads, int num_partitions);
 #endif
 
 #if defined(USE_THREADS) || defined(USE_SHMEM)
@@ -132,7 +133,7 @@ void decode_detection_events_in_parallel(
     int shot,
     bool draw_frames);
 #endif
-
+// ===============
 } // namespace pm
 
 #endif  // PYMATCHING2_MWPM_DECODING_H

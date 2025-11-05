@@ -35,8 +35,10 @@ namespace pm {
 struct GraphFlooder {
     /// The graph of detector nodes that is being flooded.
 #ifdef USE_THREADS
+// ===============
     std::shared_ptr<MatchingGraph> graph_ptr;
     MatchingGraph& graph;
+// ===============
 #else
     MatchingGraph graph;
 #endif
@@ -75,8 +77,10 @@ struct GraphFlooder {
 
     GraphFlooder();
 #ifdef USE_THREADS
+// ===============
     // Construct with a shared graph pointer (shared across solvers)
     explicit GraphFlooder(std::shared_ptr<MatchingGraph> graph);
+// ===============
 #endif
     explicit GraphFlooder(MatchingGraph graph);
     GraphFlooder(GraphFlooder&&) noexcept;
@@ -105,7 +109,8 @@ struct GraphFlooder {
     pm::MwpmEvent do_look_at_node_event(DetectorNode& node);
 
 #ifdef USE_THREADS
-    void update_active_nodes(int tid);
+// ===============
+    void update_active_nodes(int tid, long fusion_partition_with_virtuals=-1);
     // Sets up internal variables for single partition solving
     void prepare_for_solve_partition(int tid, long p);
     // Sets up internal variables for fusion
@@ -113,6 +118,7 @@ struct GraphFlooder {
     //     - matched GraphFillRegions
     //     - DetectorNode ephermeral states
     void prepare_for_fuse_partitions(int tid, long p1, long p2);
+// ===============
 #endif
 
     pm::FloodCheckEvent dequeue_valid();

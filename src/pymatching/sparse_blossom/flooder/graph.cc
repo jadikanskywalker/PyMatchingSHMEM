@@ -202,6 +202,14 @@ void MatchingGraph::convert_implied_weights(double normalising_constant) {
     }
 }
 
+#ifdef USE_THREADS
+void MatchingGraph::reset_active_status_for_all_nodes() {
+    for (auto& node : nodes) {
+        node.is_active = -1;
+    }
+}
+#endif
+
 // Reweight assuming an error has occurred on a single edge u, v. When v == -1, assumes an edge from
 // u to the boundary.
 void MatchingGraph::reweight_for_edge(const int64_t& u, const int64_t& v) {

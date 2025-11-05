@@ -134,7 +134,9 @@ class UserGraph {
         const EdgeCallable& edge_func,
         const BoundaryEdgeCallable& boundary_edge_func);
 #ifdef USE_THREADS
+// ===============
     std::shared_ptr<pm::MatchingGraph> to_matching_graph(pm::weight_int num_distinct_weights);
+// ===============
 #else
     pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);
 #endif

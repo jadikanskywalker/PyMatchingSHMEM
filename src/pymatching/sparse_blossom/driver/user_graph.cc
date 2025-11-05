@@ -270,9 +270,11 @@ double pm::UserGraph::max_abs_weight() {
 }
 
 #ifdef USE_THREADS
+// ===============
 std::shared_ptr<pm::MatchingGraph> pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_weights) {
     std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
     pm::MatchingGraph& matching_graph = *matching_graph_ptr;
+// ===============
 #else
 pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_weights) {
     pm::MatchingGraph matching_graph(nodes.size(), _num_observables);
@@ -320,7 +322,9 @@ pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_w
 #endif
 
 #ifdef USE_THREADS
+// ===============
     return matching_graph_ptr;
+// ===============
 #else
     return matching_graph;
 #endif
@@ -642,39 +646,16 @@ std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorError
     return rounds;
 }
 
-
 void pm::partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds) {
     // M rounds per partition
     int M = config_parallel::M;
-    int num_p = rounds.size() / M;
-    int num_tail = rounds.size() % M;
-    int num_tail_per_p = num_tail / num_p;
-    g.num_partitions = (long)(long(rounds.size()) / config_parallel::M); // num partitions
-    std::vector<long> round_in_partition;
-    long p = 0;
-    int i = 0;
-    int t = 0;
-    for (long round : rounds) {
-        round_in_partition.emplace_back(p);
-        i++;
-        if (i == M && num_tail > 0) {
-            num_tail--;
-            t++;
-        } else if (i >= M && t < num_tail_per_p) {
-            num_tail--;
-            t++;
-        } else if (i >= M) {
-            p++;
-            i = 0;
-            t = 0;
-        }
-    }
+    g.num_partitions = (long)((long(rounds.size()) / config_parallel::M) + 1); // num partitions
     if (DEBUG)
         std::cout << "  M : " << M << "; num_rounds : " << rounds.size() << "; num_partitions : " << g.num_partitions << std::endl;
     // partition nodes
     for (auto& n : g.nodes) {
         if (n.has_coords)
-            n.partition = round_in_partition[n.round];
+            n.partition = (n.round / M);
     }
     // mark virtual nodes
     for (const auto& e : g.edges) {
@@ -692,6 +673,56 @@ void pm::partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds) {
         }
     }
 }
+
+// void pm::partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds) {
+//     // M rounds per partition
+//     int M = config_parallel::M;
+//     int num_p = rounds.size() / M;
+//     int num_tail = rounds.size() % M;
+//     int num_tail_per_p = num_tail / num_p;
+//     g.num_partitions = (long)(long(rounds.size()) / config_parallel::M); // num partitions
+//     std::vector<long> round_in_partition;
+//     long p = 0;
+//     int i = 0;
+//     int t = 0;
+//     for (long round : rounds) {
+//         round_in_partition.emplace_back(p);
+//         i++;
+//         if (i == M && num_tail > 0) {
+//             num_tail--;
+//             t++;
+//         } else if (i >= M && t < num_tail_per_p) {
+//             num_tail--;
+//             t++;
+//         } else if (i >= M) {
+//             p++;
+//             i = 0;
+//             t = 0;
+//         }
+//     }
+//     if (DEBUG)
+//         std::cout << "  M : " << M << "; num_rounds : " << rounds.size() << "; num_partitions : " << g.num_partitions << std::endl;
+//     // partition nodes
+//     for (auto& n : g.nodes) {
+//         if (n.has_coords)
+//             n.partition = round_in_partition[n.round];
+//     }
+//     // mark virtual nodes
+//     for (const auto& e : g.edges) {
+//         if (e.node1 == SIZE_MAX || e.node2 == SIZE_MAX) continue; // ignore boundary edges
+//         const auto& n1 = g.nodes[e.node1];
+//         const auto& n2 = g.nodes[e.node2];
+//         if (!n1.has_coords || !n2.has_coords) continue; // need rounds
+//         if (n1.partition == n2.partition) continue; // not a cross-partition edge
+//         else if (n1.partition > n2.partition) { // n1 in higher partition
+//             g.nodes[e.node1].is_cross_partition = true; // mark higher partition node as virtual
+//             // g.nodes[e.node2].virtual_neighbors.insert(std::make_tuple(e.node1, n1.round)); // save virtual neighbor in lower round node
+//         } else { // n2 in higher partition
+//             g.nodes[e.node2].is_cross_partition = true; // mark higher partition node as virtual
+//             // g.nodes[e.node1].virtual_neighbors.insert(std::make_tuple(e.node2, n2.round)); // save virtual neighbor in lower round node
+//         }
+//     }
+// }
 
 void pm::partition_nodes_2d_vertical_split(pm::UserGraph& g, std::set<long> rounds) {
     g.num_partitions = 2;

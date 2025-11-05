@@ -34,11 +34,11 @@
 #ifdef ENABLE_FUSION
 #include "../config_parallel.h"
 #include "../diagram/mwpm_diagram.h"
-// ===============
 #endif
 
 #ifdef USE_THREADS
 #include <omp.h>
+// ===============
 #endif
 
 int main_predict(int argc, const char **argv) {
@@ -104,30 +104,36 @@ int main_predict(int argc, const char **argv) {
         /*enable_correlations=*/enable_correlations);
 
 #ifdef USE_THREADS
+// ===============
     int num_threads = omp_get_max_threads();
     if (num_threads > mwpm.flooder.graph.num_partitions) {
         omp_set_num_threads(mwpm.flooder.graph.num_partitions);
         num_threads = mwpm.flooder.graph.num_partitions;
     }
-    pm::build_thread_solvers(
-        mwpm,
-        /*ensure_search_flooder_included=*/enable_correlations,
-        /*enable_correlations=*/enable_correlations,
-        num_threads
-    );
+    pm::tasks.resize(static_cast<size_t>(mwpm.flooder.graph.num_partitions));
+    pm::partitions_task_id.resize(static_cast<size_t>(mwpm.flooder.graph.num_partitions));
+
+    // pm::partition_task_queues.resize(static_cast<size_t>(num_threads));
+    // pm::build_thread_solvers(
+    //     mwpm,
+    //     /*ensure_search_flooder_included=*/enable_correlations,
+    //     /*enable_correlations=*/enable_correlations,
+    //     num_threads
+    // );
     
-    auto coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
-    mwpm.coords = coords;
-    for (auto &s : pm::solvers)
-        s->coords = coords;
+    // auto coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
+    // mwpm.coords = coords;
+    // for (auto &s : pm::solvers)
+    //     s->coords = coords;
 
-    pm::init_tasks(num_threads, mwpm.flooder.graph.num_partitions);
-    pm::init_task_queues(num_threads, mwpm.flooder.graph.num_partitions);
-
-#else
-#ifdef ENABLE_FUSION
-    mwpm.coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
+    // pm::init_tasks(num_threads, mwpm.flooder.graph.num_partitions);
+    // pm::init_task_queues(num_threads, mwpm.flooder.graph.num_partitions);
+// ===============
 #endif
+#ifdef ENABLE_FUSION
+// ===============
+    mwpm.coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
+// ===============
 #endif
 
     stim::SparseShot sparse_shot;
@@ -140,9 +146,11 @@ int main_predict(int argc, const char **argv) {
     if (DEBUG) {
         output_detector_nodes(mwpm, true);
     }
+// ===============
 #endif
 
 #if defined(USE_THREADS) && !defined(USE_SHMEM)
+// ===============
     int i = 0;
     while (reader->start_and_read_entire_record(sparse_shot)) {
         if (parallel)
@@ -150,6 +158,8 @@ int main_predict(int argc, const char **argv) {
         else
             pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
         for (size_t k = 0; k < num_obs; k++) {
+            if (DEBUG)
+                std::cout << "res.obs_crossed[" << k << "]: " << (static_cast<unsigned int>(res.obs_crossed[k])) << std::endl;
             writer->write_bit(res.obs_crossed[k]);
         }
         writer->write_end();

@@ -113,7 +113,7 @@ if [ $ppn -le 0 ]
         --dem error_model.dem \
         --in detection_events.b8 \
         --in_format b8 \
-        --out predicted_obs_flips__without_shmem.01 \
+        --out predicted_obs_flips__with_shmem.01 \
         --out_format 01 \
         --rounds_per_partition $M \
         --parallel \

@@ -88,6 +88,10 @@ class MatchingGraph {
     void update_negative_weight_detection_events(size_t node_id);
     void convert_implied_weights(double normalising_constant);
 
+#ifdef USE_THREADS
+    void reset_active_status_for_all_nodes();
+#endif
+
     void undo_reweights();
     void reweight(std::vector<ImpliedWeight>& implied_weights);
     void reweight_for_edge(const int64_t& u, const int64_t& v);
