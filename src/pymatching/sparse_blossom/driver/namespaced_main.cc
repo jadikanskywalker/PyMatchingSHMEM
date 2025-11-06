@@ -112,26 +112,20 @@ int main_predict(int argc, const char **argv) {
     }
     pm::tasks.resize(static_cast<size_t>(mwpm.flooder.graph.num_partitions));
     pm::partitions_task_id.resize(static_cast<size_t>(mwpm.flooder.graph.num_partitions));
-
-    // pm::partition_task_queues.resize(static_cast<size_t>(num_threads));
-    // pm::build_thread_solvers(
-    //     mwpm,
-    //     /*ensure_search_flooder_included=*/enable_correlations,
-    //     /*enable_correlations=*/enable_correlations,
-    //     num_threads
-    // );
+    build_partition_solvers(
+        mwpm,
+        /*ensure_search_flooder_included=*/enable_correlations,
+        /*enable_correlations=*/enable_correlations
+    );
     
-    // auto coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
-    // mwpm.coords = coords;
-    // for (auto &s : pm::solvers)
-    //     s->coords = coords;
+    auto coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
+    mwpm.coords = coords;
+    for (auto &s : pm::solvers)
+        s->coords = coords;
 
     // pm::init_tasks(num_threads, mwpm.flooder.graph.num_partitions);
     // pm::init_task_queues(num_threads, mwpm.flooder.graph.num_partitions);
-// ===============
-#endif
-#ifdef ENABLE_FUSION
-// ===============
+#elif defined(ENABLE_FUSION)
     mwpm.coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
 // ===============
 #endif

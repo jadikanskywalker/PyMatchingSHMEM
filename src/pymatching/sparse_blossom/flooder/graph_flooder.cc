@@ -615,17 +615,16 @@ void GraphFlooder::prepare_for_solve_partition(int tid, long p) {
 }
 
 // Prepare the flooder to fuse partitions p1 and p2
-void GraphFlooder::prepare_for_fuse_partitions(int tid, long p1, long p2) {
+void GraphFlooder::prepare_for_fuse_partitions(int tid, long p_without_virtuals, long p_with_virtuals) {
     active_partitions.clear();
-    active_partitions.insert(p1);
-    active_partitions.insert(p2);
-    long lower_p = std::min(p1, p2);
-    long higher_p = std::max(p1, p2);
+    active_partitions.insert(p_without_virtuals);
+    active_partitions.insert(p_with_virtuals);
     if (DEBUG)
-        std::cout << "  DEBUG: Thread " << tid << " solver preparing to fuse partitions " << p1 << " and " << p2 << ", higher_p=" << higher_p << std::endl;
+        std::cout << "  DEBUG: Thread " << tid << " solver preparing to fuse partitions "
+                  << p_without_virtuals << " and " << p_with_virtuals << std::endl;
     for (DetectorNode& node : graph.nodes)
-        if ((node.partition == lower_p && !node.is_cross_partition) ||
-            (node.partition == higher_p))
+        if ((node.partition == p_without_virtuals && !node.is_cross_partition) ||
+            (node.partition == p_with_virtuals))
             node.is_active = tid;
 }
 // ===============

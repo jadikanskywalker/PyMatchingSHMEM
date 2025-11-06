@@ -85,7 +85,7 @@ struct Mwpm {
     void handle_tree_hitting_other_tree(const RegionHitRegionEventData& event);
 #ifdef ENABLE_FUSION
     // Removes matchings to virtual boundaries, turning matched regions into alternating trees
-    void unmatch_virtual_boundaries_between_partitions();
+    void unmatch_virtual_boundaries_between_partitions(std::vector<GraphFillRegion *> *regions_from_other_solver=nullptr);
 #endif
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_matches(GraphFillRegion* region, MatchingResult& res);
     MatchingResult shatter_blossom_and_extract_matches(GraphFillRegion* region);

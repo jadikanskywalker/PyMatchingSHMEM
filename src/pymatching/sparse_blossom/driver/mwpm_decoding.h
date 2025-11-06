@@ -111,14 +111,13 @@ extern std::vector<Task> tasks;
 extern std::vector<int> partitions_task_id; // Convenience store of which task own each partition
 // extern std::vector<std::queue<int>> partition_task_queues;
 // extern std::vector<std::deque<int>> fusion_task_deques;
-// Stable per-thread solver instances. Use shared_ptr to manage lifetime safely across threads.
-// extern std::vector<std::shared_ptr<Mwpm>> solvers;
+// Stable per-partition solver instances. Use shared_ptr to manage lifetime safely across threads.
+extern std::vector<std::shared_ptr<Mwpm>> solvers;
 // Build and assign one solver per thread from a DEM, storing stable instances and wiring `solvers`.
-// void build_thread_solvers(
-//     pm::Mwpm& mwpm,
-//     bool ensure_search_flooder_included,
-//     bool enable_correlations,
-//     int num_threads);
+void build_partition_solvers(
+    pm::Mwpm& mwpm,
+    bool ensure_search_flooder_included,
+    bool enable_correlations);
 void reset_tasks(int num_threads, int num_partitions);
 // void init_task_queues(int num_threads, int num_partitions);
 #endif

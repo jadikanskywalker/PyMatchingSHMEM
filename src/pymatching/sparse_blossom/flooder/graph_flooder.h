@@ -117,7 +117,7 @@ struct GraphFlooder {
     //   Assumes the flooder has intermediate solution states for p1 and p2, including:
     //     - matched GraphFillRegions
     //     - DetectorNode ephermeral states
-    void prepare_for_fuse_partitions(int tid, long p1, long p2);
+    void prepare_for_fuse_partitions(int tid, long p_without_virtuals, long p_with_virtuals);
 // ===============
 #endif
 
