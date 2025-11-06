@@ -1,9 +1,9 @@
 #pragma once
 
-#define DEBUG 1
+#define DEBUG 0
 
 #ifdef ENABLE_FUSION
 namespace config_parallel {
-    inline int M = 1;
+    inline int M = 0;
 }
 #endif

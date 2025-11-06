@@ -75,6 +75,10 @@ struct GraphFlooder {
 // ===============
 #endif
 
+#ifdef USE_THREADS
+    int current_tid=-1; // used in is_active() to determine if node belongs to thread
+#endif
+
     GraphFlooder();
 #ifdef USE_THREADS
 // ===============
@@ -104,12 +108,19 @@ struct GraphFlooder {
     static MwpmEvent do_degenerate_implosion(const GraphFillRegion& region);
     static MwpmEvent do_blossom_shattering(GraphFillRegion& region);
     bool dequeue_decision(pm::FloodCheckEvent ev);
+#ifdef USE_THREADS
+    std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_growing_top_region(
+        const DetectorNode &detector_node, VaryingCT rad1) const;
+    std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growing_top_region(
+        const DetectorNode &detector_node, const VaryingCT &rad1) const;
+#endif
     std::pair<size_t, pm::cumulative_time_int> find_next_event_at_node_returning_neighbor_index_and_time(
         const DetectorNode& detector_node) const;
     pm::MwpmEvent do_look_at_node_event(DetectorNode& node);
 
 #ifdef USE_THREADS
 // ===============
+    bool is_active(const DetectorNode *node) const;
     void update_active_nodes(int tid, long fusion_partition_with_virtuals=-1);
     // Sets up internal variables for single partition solving
     void prepare_for_solve_partition(int tid, long p);

@@ -316,8 +316,10 @@ void Mwpm::handle_blossom_shattering(const BlossomShatterEventData &event) {
     flooder.set_region_shrinking(*blossom_alt_node->inner_region);
     blossom_cycle[child_idx].region->alt_tree_node = blossom_alt_node;
     current_alt_node->add_child(AltTreeEdge(blossom_alt_node, child_edge));
-
+    
+#if !defined(USE_THREADS)
     flooder.region_arena.del(event.blossom_region);
+#endif
 }
 
 void Mwpm::handle_region_hit_region(const MwpmEvent event) {

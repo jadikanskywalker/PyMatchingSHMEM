@@ -341,8 +341,8 @@ void pm::decode_detection_events(
 
 #ifdef USE_THREADS
 // ===============
-    for (auto &node : mwpm.flooder.graph.nodes)
-        node.is_active = 0;
+    // for (auto &node : mwpm.flooder.graph.nodes)
+    //     node.is_active = 0;
 // ===============
 #endif
 
@@ -495,7 +495,6 @@ void pm::setup_output_dirs(bool draw_frames=true, bool parallel) {
     if (draw_frames)
             std::filesystem::create_directory(out_dir + "/frames");
 }
-
 
 void pm::output_detector_nodes(pm::Mwpm& mwpm, bool parallel) {
     static int count = 0;
@@ -731,12 +730,29 @@ void pm::build_partition_solvers(
 // Resets tasks in pm::tasks, assuming tasks has size num_partitions
 // Tasks are initialized linearly for each partition. The owner of each task is set
 // to p % num_threads. partitions_task_id[p] is set to p.
-inline void pm::reset_tasks(int num_threads, int num_partitions) {
-    for (long p = 0; p < num_partitions; ++p) {
+inline void reset_solvers_and_tasks(int tid, int num_threads, int num_partitions) {
+    int chunk_size = num_partitions / num_threads;
+    int extra = (tid == num_threads-1) ? num_partitions % num_threads : 0;
+    for (long p=tid*chunk_size; p < tid*chunk_size + chunk_size + extra; ++p) {
+        if (DEBUG) {
+            std::cout << "DEBUG: Thread " << tid << " reseting partition " << p << std::endl;
+        }
+        // Cleanup partition's solver's flooder from previous shot
+        auto& region_arena = pm::solvers[p]->flooder.region_arena;
+        const std::unordered_set<pm::GraphFillRegion*> freed_regions(
+            region_arena.available.begin(), region_arena.available.end());
+        for (pm::GraphFillRegion* region : region_arena.allocated) {
+            if (region == nullptr) continue;
+            if (freed_regions.find(region) != freed_regions.end()) continue;
+            region->~GraphFillRegion();
+            region_arena.available.push_back(region);
+        }
+        // Reset tasks
         pm::partitions_task_id[p] = p;
         pm::tasks[p].solution_owner_tid = static_cast<int>(p % num_threads);
         pm::tasks[p].partitions.clear();
         pm::tasks[p].partitions.emplace_back(p);
+            
     }
 }
 
@@ -830,27 +846,18 @@ void pm::decode_detection_events_in_parallel(
 #if defined(USE_THREADS) && !defined(USE_SHMEM)
 // ===============
     int num_partitions = mwpm.flooder.graph.num_partitions;
-    int num_threads = omp_get_num_threads();
-    reset_tasks(num_threads, num_partitions);
     mwpm.flooder.graph.reset_active_status_for_all_nodes();
     #pragma omp parallel
     {
         int tid = omp_get_thread_num();
+        int num_threads = omp_get_num_threads();
         try {
-        
+    
+        reset_solvers_and_tasks(tid, num_threads, num_partitions);
+
         std::queue<long> pq;
-        for (int p=tid; p < num_partitions; p += num_threads) {
-            // Cleanup partition's solver's flooder from previous shot
-            auto& region_arena = solvers[p]->flooder.region_arena;
-            const std::unordered_set<pm::GraphFillRegion*> freed_regions(
-                region_arena.available.begin(), region_arena.available.end());
-            for (GraphFillRegion* region : region_arena.allocated) {
-                if (region == nullptr) continue;
-                if (freed_regions.find(region) != freed_regions.end()) continue;
-                region->~GraphFillRegion();
-                region_arena.available.push_back(region);
-            }
-            // Push partition
+        // Push partition
+        for (long p=tid; p < num_partitions; p += num_threads) {
             pq.push(p);
         }
 

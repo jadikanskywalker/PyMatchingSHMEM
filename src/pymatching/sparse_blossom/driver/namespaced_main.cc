@@ -152,8 +152,6 @@ int main_predict(int argc, const char **argv) {
         else
             pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
         for (size_t k = 0; k < num_obs; k++) {
-            if (DEBUG)
-                std::cout << "res.obs_crossed[" << k << "]: " << (static_cast<unsigned int>(res.obs_crossed[k])) << std::endl;
             writer->write_bit(res.obs_crossed[k]);
         }
         writer->write_end();

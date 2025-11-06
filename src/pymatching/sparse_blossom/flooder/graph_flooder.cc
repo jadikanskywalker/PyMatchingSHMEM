@@ -98,15 +98,15 @@ GraphFlooder::GraphFlooder(GraphFlooder &&flooder) noexcept
 
 #ifdef USE_THREADS
 // ===============
-inline bool is_active(DetectorNode *node) {
-    int tid = omp_get_thread_num();
-    if (node->is_active == tid) {
+inline bool GraphFlooder::is_active(const DetectorNode *node) const {
+    if (node->is_active == current_tid) {
         return true;
     }
-    // Warn if another thread owns this node and it's not a cross-partition bridge.
-    if (node->is_active >= 0 && node->is_active != tid && !node->is_cross_partition) {
-        std::cout << "  ERROR: neighbor is active in different thread, tid=" << tid
-                  << ", is_active=" << node->is_active << std::endl;
+    // Warn if another thread owns this node and it's not cross-partition
+    if (node->is_active >= 0) {
+        std::cout << "  ERROR: node " << node << " is active in different thread" << std::endl
+                  << "    current_tid: " << current_tid << "  node->is_active: " << node->is_active
+                  << "  node->is_cross_partition: " << node->is_cross_partition << std::endl;
     }
     return false;
 }
@@ -133,8 +133,14 @@ void GraphFlooder::do_region_created_at_empty_detector_node(GraphFillRegion &reg
     reschedule_events_at_detector_node(detector_node);
 }
 
+
+#ifdef USE_THREADS
+std::pair<size_t, cumulative_time_int> GraphFlooder::find_next_event_at_node_not_occupied_by_growing_top_region(
+    const DetectorNode &detector_node, VaryingCT rad1) const {
+#else
 std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_growing_top_region(
     const DetectorNode &detector_node, VaryingCT rad1) {
+#endif
     cumulative_time_int best_time = std::numeric_limits<cumulative_time_int>::max();
     size_t best_neighbor = SIZE_MAX;
 
@@ -150,8 +156,11 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_g
 
 #ifdef ENABLE_FUSION
 // ===============
-        if (is_active(neighbor)) // skip inactive neighbors
+        if (!is_active(neighbor)) {// skip inactive neighbors
+            if (!neighbor->is_cross_partition)
+                std::cout << "    NOTE2: neighbor inactive not cross partition (not growing)" << std::endl;
             continue;
+        }
 // ===============
 #endif
 
@@ -168,8 +177,13 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_g
     return {best_neighbor, best_time};
 }
 
+#ifdef USE_THREADS
+std::pair<size_t, cumulative_time_int> GraphFlooder::find_next_event_at_node_occupied_by_growing_top_region(
+    const DetectorNode &detector_node, const VaryingCT &rad1) const {
+#else
 std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growing_top_region(
     const DetectorNode &detector_node, const VaryingCT &rad1) {
+#endif
     cumulative_time_int best_time = std::numeric_limits<cumulative_time_int>::max();
     size_t best_neighbor = SIZE_MAX;
     size_t start = 0;
@@ -194,6 +208,13 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growi
 // ===============
         // Treat virtual nodes like boundary
         if (!is_active(neighbor)) {
+            if (!neighbor->is_cross_partition) {
+                std::cout << "    NOTE3: neighbor inactive not cross partition (growing)" << std::endl
+                          << "      node: " << &detector_node << "  " << "  partition: " << detector_node.partition
+                          << "  is_active: " << detector_node.is_active << "  is_cross_partition: " << detector_node.is_cross_partition
+                          << std::endl;
+
+            }
             auto collision_time = weight - rad1.y_intercept();
             if (collision_time < best_time) {
                 best_time = collision_time;
@@ -238,8 +259,10 @@ std::pair<size_t, cumulative_time_int> GraphFlooder::find_next_event_at_node_ret
 void GraphFlooder::reschedule_events_at_detector_node(DetectorNode &detector_node) {
 #ifdef ENABLE_FUSION
 // ===============
-    if (!is_active(&detector_node))
+    if (!is_active(&detector_node)) {
+        std::cout << "    NOTE: reschedule called on inactive node" << std::endl;
         return;
+    }
 // ===============
 #endif
     auto x = find_next_event_at_node_returning_neighbor_index_and_time(detector_node);
@@ -612,6 +635,7 @@ void GraphFlooder::prepare_for_solve_partition(int tid, long p) {
     for (DetectorNode& node : graph.nodes)
         if (node.partition == p && !node.is_cross_partition)
             node.is_active = tid;
+    current_tid = tid;
 }
 
 // Prepare the flooder to fuse partitions p1 and p2
@@ -626,6 +650,7 @@ void GraphFlooder::prepare_for_fuse_partitions(int tid, long p_without_virtuals,
         if ((node.partition == p_without_virtuals && !node.is_cross_partition) ||
             (node.partition == p_with_virtuals))
             node.is_active = tid;
+    current_tid = tid;
 }
 // ===============
 #endif
