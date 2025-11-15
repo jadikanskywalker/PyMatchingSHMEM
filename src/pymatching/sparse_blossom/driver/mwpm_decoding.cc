@@ -30,6 +30,7 @@
 #ifdef USE_THREADS
 #include <atomic>
 #include <omp.h>
+// #include "pymatching/sparse_blossom/driver/decoding_task.h"
 // ===============
 #endif
 
@@ -111,7 +112,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
 #endif
 #ifdef USE_THREADS
     , int tid=-1,
-    pm::Mwpm* second_mwpm=nullptr
+    Task* task=nullptr
 #endif
 ) {
     if (!mwpm.flooder.queue.empty()) {
@@ -119,15 +120,8 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
     }
     mwpm.flooder.queue.cur_time = 0;
 
-#ifdef ENABLE_FUSION
-// ===============
-    if (mwpm.flooder.active_partitions.size() == 2) // fusion
-        mwpm.unmatch_virtual_boundaries_between_partitions(
 #ifdef USE_THREADS
-            (second_mwpm) ? &second_mwpm->flooder.regions_matched_to_virtual_boundary : nullptr
-#endif
-        );
-// ===============
+    mwpm.unmatch_virtual_boundaries_between_partitions();
 #endif
 
     if (mwpm.flooder.negative_weight_detection_events.empty()) {
@@ -358,7 +352,7 @@ void pm::decode_detection_events(
 #ifdef ENABLE_FUSION
 // ===============
     if (DEBUG && mype==0)
-        output_solution_state(mwpm, detection_events, shot, std::set<long>{}, false);
+        output_solution_state(mwpm, detection_events, shot, false);
 // ===============
 #endif
 
@@ -543,12 +537,15 @@ inline bool node_has_detection_event(size_t node_i, const std::vector<uint64_t>&
         return true;
     return false;
 }
+#endif
 
-void pm::output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, int shot, std::set<long>parts, bool parallel) {
+#ifdef USE_THREADS
+void pm::output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, int shot, bool parallel) {
     std::string out_dir = parallel ? "out_parallel/" : "out_serial/";
-    std::string out_name = out_dir + "solution_" + std::to_string(shot) + "_";
-    for (long part: parts)
-        out_name += std::to_string(part);
+    std::string out_name = out_dir + "solution_" + std::to_string(shot);
+    if (mwpm.task) {
+        out_name += "_" + std::to_string(mwpm.task->p) + (mwpm.task->is_fusion ? std::to_string(mwpm.task->pv) : "");
+    }
     std::ofstream out(out_name + ".out");
     // Skip regions that have been freed back to the arena (available). Only walk live objects.
     const std::unordered_set<pm::GraphFillRegion*> freed_regions(
@@ -666,9 +663,10 @@ void pm::draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int shot, int frame_number
     if (thread > -1) {
         out_name += "t" + std::to_string(thread) + "/";
     } 
-    out_name +=  "frame_"; 
-    for (auto it = mwpm.flooder.active_partitions.rbegin(); it != mwpm.flooder.active_partitions.rend(); ++it)
-        out_name += std::to_string(*it);
+    out_name +=  "frame"; 
+    if (mwpm.task) {
+        out_name += "_" + std::to_string(mwpm.task->p) + (mwpm.task->is_fusion ? std::to_string(mwpm.task->pv) : "");
+    }
     out_name += "_" + std::to_string(frame_number);
     // Draw decoder state
     std::ofstream out_file(out_name + ".svg");
@@ -679,17 +677,115 @@ void pm::draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int shot, int frame_number
     out_file.close();
 }
 
-inline std::vector<uint64_t> create_detection_events_mask(pm::Mwpm& solver, const std::vector<uint64_t>& detection_events, int fusion_partition_with_virtuals=-1) {
+// Define the global per-thread solvers/queues declared in the header.
+// std::vector<Task> pm::tasks;
+// std::vector<int> pm::partitions_task_id;
+std::vector<Task> pm::tasks;
+std::vector<long> pm::step_sizes;
+std::vector<std::shared_ptr<pm::Mwpm>> pm::solvers;
+// WorkStealingDeque pm::task_deque;
+
+// std::vector<std::queue<int>> pm::partition_task_queues;
+// std::vector<std::deque<int>> pm::fusion_task_deques;
+
+void pm::init_tasks(int num_partitions) {
+    if (DEBUG) {
+        std::cout << "DEBUG: initializing tasks" << std::endl;
+    }
+    // Build a full fusion tree: at most ~2*N tasks. Reserve to keep element addresses stable.
+    tasks.clear();
+    step_sizes.clear();
+    tasks.reserve(static_cast<size_t>(2 * num_partitions - 1));
+    // Add tasks for each partitions
+    int task_id;
+    for (task_id = 0; task_id<num_partitions; ++task_id) {
+        tasks.emplace_back(task_id);
+        // task_deque.push(new_task);
+    }
+    step_sizes.emplace_back(num_partitions);
+
+    // Save odd trailing task
+    std::vector<int> tails_idx;
+    if (num_partitions % 2) {
+        tails_idx.emplace_back(num_partitions - 1);
+    }
+    // Add each step of fusions
+    int last_step_starts = 0;
+    int num_fusions_this_step = num_partitions / 2 ;
+    while (num_fusions_this_step > 0) {
+        for (int i = 0; i < num_fusions_this_step; ++i) {
+            Task* left_task = &tasks[last_step_starts + 2 * i];
+            Task* right_task = &tasks[last_step_starts + 2 * i + 1];
+            tasks.emplace_back(left_task, right_task);
+            ++task_id;
+        }
+        if (tails_idx.size() == 2) {
+            // Fuse tail pair
+            tasks.emplace_back(&tasks[tails_idx[1]], &tasks[tails_idx[0]]);
+            ++task_id;
+            // task_deque.push(new_task);
+            tails_idx.clear();
+            num_fusions_this_step++;
+        }
+        last_step_starts += *step_sizes.rbegin();
+        if (num_fusions_this_step % 2) {
+            // Add tail
+            tails_idx.emplace_back(last_step_starts+num_fusions_this_step-1);
+        }
+        step_sizes.emplace_back(num_fusions_this_step);
+        num_fusions_this_step /= 2;
+    }
+    // Fuse remaining tail
+    if (tails_idx.size() > 1) {
+        tasks.emplace_back(&tasks[tails_idx[1]], &tasks[tails_idx[0]]);
+        // task_deque.push(new_task);
+        step_sizes.emplace_back(1);
+    }
+    if (DEBUG) {
+        std::cout << "DEBUG:" << std::endl;
+        for (Task& t : tasks) {
+            std::cout << "--p: " << t.p << std::endl
+                      << "  pv: " << t.pv << std::endl
+                      << "  left_child: " << t.left_child << std::endl
+                      << "  right_child: " << t.right_child << std::endl
+                      << "  parent: " << t.parent << std::endl
+                      << "  is_fusion: " << t.is_fusion << std::endl;
+        }
+    }
+}
+
+// Build per-thread solvers directly from a DEM by constructing a UserGraph once
+// and producing independent Mwpm instances via to_mwpm for each thread.
+// (Assumes first mwpm has already been built)
+void pm::build_thread_solvers(
+    pm::Mwpm& mwpm,
+    bool ensure_search_flooder_included,
+    bool enable_correlations,
+    int num_threads) {
+    if (num_threads < 1)
+        return;
+    if (ensure_search_flooder_included || enable_correlations)
+        throw std::invalid_argument("Correlations and SearchFlooder are not yet supported with threads");
+    pm::solvers.clear();
+    pm::solvers.reserve(static_cast<size_t>(num_threads));
+    for (int t = 0; t < num_threads; ++t) {
+        // Each solver shares the same MatchingGraph via shared_ptr.
+        pm::solvers.emplace_back(std::make_shared<pm::Mwpm>(pm::GraphFlooder(mwpm.flooder.graph_ptr)));
+        pm::solvers[t]->flooder.sync_negative_weight_observables_and_detection_events();
+    }
+}
+
+inline std::vector<uint64_t> create_detection_events_mask(pm::Mwpm& solver, const std::vector<uint64_t>& detection_events, Task &t) {
     std::vector<uint64_t> detection_events_mask;
-    if (solver.flooder.active_partitions.size() == 1) {
+    if (!t.is_fusion) {
         for (auto& det : detection_events) {
-            if (solver.flooder.active_partitions.count(solver.flooder.graph.nodes[det].partition) 
+            if (t.p == solver.flooder.graph.nodes[det].partition
                 && !solver.flooder.graph.nodes[det].is_cross_partition)
                 detection_events_mask.push_back(det);
         }
-    } else if (solver.flooder.active_partitions.size() > 1) {
+    } else {
         for (auto& det : detection_events) {
-            if (fusion_partition_with_virtuals == solver.flooder.graph.nodes[det].partition
+            if (t.pv == solver.flooder.graph.nodes[det].partition
                 && solver.flooder.graph.nodes[det].is_cross_partition)
                 detection_events_mask.push_back(det);
         }     
@@ -697,116 +793,34 @@ inline std::vector<uint64_t> create_detection_events_mask(pm::Mwpm& solver, cons
     return detection_events_mask;
 }
 
-#endif
-
-#ifdef USE_THREADS
-// Define the global per-thread solvers/queues declared in the header.
-std::vector<Task> pm::tasks;
-std::vector<int> pm::partitions_task_id;
-std::vector<std::shared_ptr<pm::Mwpm>> pm::solvers;
-// std::vector<std::queue<int>> pm::partition_task_queues;
-// std::vector<std::deque<int>> pm::fusion_task_deques;
-
-// Build per-thread solvers directly from a DEM by constructing a UserGraph once
-// and producing independent Mwpm instances via to_mwpm for each thread.
-// (Assumes first mwpm has already been built)
-void pm::build_partition_solvers(
-    pm::Mwpm& mwpm,
-    bool ensure_search_flooder_included,
-    bool enable_correlations) {
-    if (mwpm.flooder.graph.num_partitions < 1)
-        return;
-    if (ensure_search_flooder_included || enable_correlations)
-        throw std::invalid_argument("Correlations and SearchFlooder are not yet supported with threads");
-    pm::solvers.clear();
-    pm::solvers.reserve(static_cast<size_t>(mwpm.flooder.graph.num_partitions));
-    for (int t = 0; t < mwpm.flooder.graph.num_partitions; ++t) {
-        // Each solver shares the same MatchingGraph via shared_ptr.
-        pm::solvers.emplace_back(std::make_shared<pm::Mwpm>(pm::GraphFlooder(mwpm.flooder.graph_ptr)));
-        pm::solvers[t]->flooder.sync_negative_weight_observables_and_detection_events();
+inline void solve_task(int tid, int shot, const std::vector<uint64_t>& detection_events, int draw_frames, Task& task) {
+    task.setup_regions();
+    auto& solver = *pm::solvers[tid];
+    solver.prepare_for_task(tid, &task);
+    auto detection_events_mask = create_detection_events_mask(solver, detection_events, task);
+    if (DEBUG && omp_get_thread_num()==0) {
+        output_detector_nodes(solver, true);
+    }
+    process_timeline_until_completion(solver, detection_events_mask, shot, draw_frames, true, tid);
+    if (DEBUG) {
+        output_solution_state(solver, detection_events, shot, true);
     }
 }
 
-// Resets tasks in pm::tasks, assuming tasks has size num_partitions
-// Tasks are initialized linearly for each partition. The owner of each task is set
-// to p % num_threads. partitions_task_id[p] is set to p.
-inline void reset_solvers_and_tasks(int tid, int num_threads, int num_partitions) {
-    int chunk_size = num_partitions / num_threads;
-    int extra = (tid == num_threads-1) ? num_partitions % num_threads : 0;
-    for (long p=tid*chunk_size; p < tid*chunk_size + chunk_size + extra; ++p) {
-        if (DEBUG) {
-            std::cout << "DEBUG: Thread " << tid << " reseting partition " << p << std::endl;
-        }
-        // Cleanup partition's solver's flooder from previous shot
-        auto& region_arena = pm::solvers[p]->flooder.region_arena;
-        const std::unordered_set<pm::GraphFillRegion*> freed_regions(
-            region_arena.available.begin(), region_arena.available.end());
-        for (pm::GraphFillRegion* region : region_arena.allocated) {
-            if (region == nullptr) continue;
-            if (freed_regions.find(region) != freed_regions.end()) continue;
-            region->~GraphFillRegion();
-            region_arena.available.push_back(region);
-        }
-        // Reset tasks
-        pm::partitions_task_id[p] = p;
-        pm::tasks[p].solution_owner_tid = static_cast<int>(p % num_threads);
-        pm::tasks[p].partitions.clear();
-        pm::tasks[p].partitions.emplace_back(p);
-            
+inline void reset_tasks_and_solvers(int tid, int num_threads) {
+    // Free solver arena regions
+    auto& mwpm = *pm::solvers[tid];
+    const std::unordered_set<pm::GraphFillRegion*> freed_regions(
+        mwpm.flooder.region_arena.available.begin(), mwpm.flooder.region_arena.available.end());
+    for (auto region : mwpm.flooder.region_arena.allocated) {
+        if (region == nullptr) continue;
+        if (freed_regions.find(region) != freed_regions.end()) continue;
+        mwpm.flooder.region_arena.del(region);
+    }
+    for (int i = tid; i < pm::tasks.size(); i += num_threads) {
+        pm::tasks[i].reset();
     }
 }
-
-// void pm::reset_problem(int num_threads) {
-//     for (auto& task : pm::tasks) {
-
-//         pm::partitions_task_id[p] = p;
-//         pm::tasks[p].solution_owner_tid.store(static_cast<int>(p % num_threads), std::memory_order_relaxed);
-//         pm::tasks[p].partitions.emplace_back(p);
-//     }
-// }
-
-// Initializes a partition_queue and fusion_queue for each task.
-// Pushes task t to partition_task_queues[t % num_threads] in reverse.
-// void pm::init_task_queues(int num_threads, int num_partitions) {
-    // pm::partition_task_queues.clear();
-    // pm::fusion_task_deques.clear();
-    // pm::partition_task_queues.resize(static_cast<size_t>(num_threads));
-    // pm::fusion_task_deques.resize(static_cast<size_t>(num_threads));
-    // Inititally assign partitions to thread partition%num_threads
-    // for (int t = 0; t < num_partitions; ++t) {
-    //     std::cout << "Pushing " << t << " to thread " << t%num_threads << std::endl;
-    //     pm::partition_task_queues[t % num_threads].push(t);
-    // }
-// }
-
-inline void solve_task(int tid,  int shot, const std::vector<uint64_t>& detection_events, int draw_frames, long p1, long p2=-1) {
-    if (p2 < 0) {
-        auto& solver = *pm::solvers[p1];
-        solver.flooder.prepare_for_solve_partition(tid, p1);
-        auto detection_events_mask = create_detection_events_mask(solver, detection_events, p1);
-        if (DEBUG && omp_get_thread_num()==0) {
-            output_detector_nodes(solver, true);
-        }
-        process_timeline_until_completion(solver, detection_events_mask, shot, draw_frames, true, tid);
-        if (DEBUG) {
-            output_solution_state(solver, detection_events, shot, solver.flooder.active_partitions, true);
-        }
-    } else {
-        int lower_p = std::min(p1, p2);
-        int higher_p = std::max(p1, p2);
-        auto& solver = *pm::solvers[lower_p];
-        auto& solver_two = *pm::solvers[higher_p];
-        solver.flooder.prepare_for_fuse_partitions(tid, lower_p, higher_p);
-        auto detection_events_mask = create_detection_events_mask(solver, detection_events, higher_p);
-        if (DEBUG && omp_get_thread_num()==0) {
-            output_detector_nodes(solver, true);
-        }
-        process_timeline_until_completion(solver, detection_events_mask, shot, draw_frames, true, tid, &solver_two);
-        if (DEBUG) {
-            output_solution_state(solver, detection_events, shot, solver.flooder.active_partitions, true);
-        }
-    }
-};
 #endif
 
 #ifdef ENABLE_FUSION
@@ -845,153 +859,50 @@ void pm::decode_detection_events_in_parallel(
 
 #if defined(USE_THREADS) && !defined(USE_SHMEM)
 // ===============
+    // std::cout << "Starting shot " << shot << std::endl;
     int num_partitions = mwpm.flooder.graph.num_partitions;
-    mwpm.flooder.graph.reset_active_status_for_all_nodes();
+    mwpm.flooder.graph.reset_active_status_for_all_nodes(); // CAN MAKE THIS MORE EFFICIENT
     #pragma omp parallel
     {
         int tid = omp_get_thread_num();
         int num_threads = omp_get_num_threads();
         try {
-    
-        reset_solvers_and_tasks(tid, num_threads, num_partitions);
+            reset_tasks_and_solvers(tid, num_threads);
 
-        std::queue<long> pq;
-        // Push partition
-        for (long p=tid; p < num_partitions; p += num_threads) {
-            pq.push(p);
-        }
+            if (draw_frames)
+                std::filesystem::create_directory("out_parallel/frames/" + std::to_string(shot) + "/t" + std::to_string(tid));
 
-        if (draw_frames)
-            std::filesystem::create_directory("out_parallel/frames/" + std::to_string(shot) + "/t" + std::to_string(tid));
+            #pragma omp barrier
 
-        int i = 0;
-        int task_id = -1; 
-        std::vector<std::vector<int>> neighbors; // (task_id, left_neighor_task_id, right_neighbor_task_id)
-        neighbors.reserve(static_cast<size_t>(num_partitions));
-        // bool check_neighbors;
-        Status expected;
-
-        std::queue<std::pair<int, int>> next_fusion;
-        while (i < 100) {
-            if (next_fusion.empty()) {
-                if (pq.empty()) {
-                    if (neighbors.empty()) {
-                        // No more tasks
-                        task_id = -1;
+            std::queue<int> partition_tasks;
+            std::queue<Task *> fusion_tasks;
+            for (int i = tid; i < num_partitions; i += num_threads) {
+                partition_tasks.push(i);
+            }
+            while (true) {
+                Task *t = nullptr;
+                if (fusion_tasks.empty()) {
+                    if (partition_tasks.empty()) {
+                        break;
                     } else {
-                        // Try to steal
-                        // for (auto &n : neighbors) {
-                        //     Status expected0 = STEALABLE;
-                        //     if (tasks[n[0]].status.compare_exchange_strong(expected0, IN_TRANSFER, std::memory_order_acq_rel)) {
-                        //         // Got first one
-                        //         if (n[1] >= 0) {
-                        //             Status expected1 = STEALABLE;
-                        //             (void)tasks[n[1]].status.compare_exchange_strong(expected1, IN_TRANSFER, std::memory_order_acq_rel);
-                        //         } else if (n[2] >= 0) {
-                        //             Status expected2 = STEALABLE;
-                        //             (void)tasks[n[2]].status.compare_exchange_strong(expected2, IN_TRANSFER, std::memory_order_acq_rel);
-                        //         }
-                        //     }
-                        // }
+                        t = &tasks[partition_tasks.front()];
+                        partition_tasks.pop();
                     }
                 } else {
-                    // Solve my next partition
-                    task_id = pq.front();
-                    // Try to claim task
-                    Task& task = tasks[task_id];
-                    auto& solver = (*solvers[task_id]);
-                    expected = UNSOLVED;
-                    if (task.status.compare_exchange_strong(expected, BUSY, std::memory_order_acq_rel)) {
-                        // Got it, solve it
-                        if (task.partitions.size() != 1) {
-                            if (DEBUG) {
-                                std::cerr << "ERROR: expected single-partition task, got size=" << task.partitions.size()
-                                          << " for task_id=" << task_id << std::endl;
-                            }
-                            pq.pop();
-                            continue;
-                        }
-                        if (DEBUG) {
-                            std::cout << "DEBUG: Shot " << shot << " Thread " << tid << " solving partition " << task.partitions[0] << std::endl;
-                        }
-                        // Solve task
-                        solve_task(tid, shot, detection_events, draw_frames, task.partitions[0]);
-                        task.solution_owner_tid = tid;
-                        // Check neighbors (THIS CAN CHANGE IF PARTITIONS ARENT CONNECTED LINEARLY)
-                        bool got_neighbor = false;
-                        std::vector<int> neighbor_vector = {task_id};
-                        if (task.partitions[0] > 0) {  // Try left neighbor
-                            int left = partitions_task_id[task.partitions[0] - 1];
-                            expected = STEALABLE;
-                            if (tasks[left].status.compare_exchange_strong(expected, IN_TRANSFER, std::memory_order_acq_rel)) {
-                                // Got left neighbor
-                                if (*tasks[left].partitions.rbegin() == task.partitions[0] - 1) {
-                                    // Is correct task, we want to keep it
-                                    tasks[left].status.store(BUSY, std::memory_order_relaxed);
-                                    next_fusion.push((std::pair<int, int>){left, task_id});
-                                    got_neighbor = true;
-                                } else {
-                                    // Not correct task, release it
-                                    tasks[left].status.store(STEALABLE, std::memory_order_release);
-                                    neighbor_vector.emplace_back(left);
-                                }
-                            } else {
-                                neighbor_vector.emplace_back(left);
-                            }
-                        } else {
-                            neighbor_vector.emplace_back(-1);
-                        }
-                        if (!got_neighbor && task.partitions[0] < num_partitions-1) { // Try right neighbor
-                            int right = partitions_task_id[task.partitions[0] + 1];
-                            expected = STEALABLE;
-                            if (tasks[right].status.compare_exchange_strong(expected, IN_TRANSFER, std::memory_order_acq_rel)) {
-                                // Got right neighbor
-                                if (*tasks[right].partitions.begin() == task.partitions[0] + 1) {
-                                    // Is correct task, keep it
-                                    tasks[right].status.store(BUSY, std::memory_order_relaxed);
-                                    next_fusion.push((std::pair<int, int>){task_id, right});
-                                    got_neighbor = true;
-                                } else {
-                                    // Not correct task, release it
-                                    tasks[right].status.store(STEALABLE, std::memory_order_release);
-                                    neighbor_vector.emplace_back(right);
-                                }
-                            } else {
-                                neighbor_vector.emplace_back(right);
-                            }
-                        } else {
-                            neighbor_vector.emplace_back(-1);
-                        }
-                        if (!got_neighbor) { // Couldn't get neighbor
-                            // Release task
-                            if (DEBUG) {
-                                std::cout << "DEBUG: Thread " << tid << " releasing " << task.partitions[0] << std::endl;
-                            }
-                            task.status.store(STEALABLE, std::memory_order_release);
-                            neighbors.emplace_back(neighbor_vector);
-                        }
+                    t = fusion_tasks.front();
+                    fusion_tasks.pop();
+                }
+                if (t->try_to_steal()) {
+                    // Got task
+                    // std::cout << "Thread " << tid << " solving " << t->p << (t->is_fusion ? std::to_string(t->pv) : "") << std::endl;
+                    solve_task(tid, shot, detection_events, draw_frames, *t);
+                    t->mark_solved();
+                    // Try to steal parent
+                    if (t->parent) {
+                        fusion_tasks.push(t->parent);
                     }
-                    pq.pop();
                 }
-            } else {
-                // Solve fusion
-                auto fusion_pair = next_fusion.back();
-                auto& solver = *solvers[fusion_pair.first];
-                if (DEBUG) { 
-                    std::cout << "DEBUG: Thread " << tid << " fusing " << fusion_pair.first << " to " << fusion_pair.second << std::endl;
-                }
-                // Task& task = tasks[task_id];
-                solve_task(tid, shot, detection_events, draw_frames, fusion_pair.first, fusion_pair.second);
-                // fusion_pair.solution_owner_tid = tid;
-                next_fusion.pop();
             }
-
-            if (task_id < 0) { // No more tasks
-                break;
-            }
-
-            i++;
-        } // end while
         } catch (const std::exception &e) {
             #pragma omp critical
             {

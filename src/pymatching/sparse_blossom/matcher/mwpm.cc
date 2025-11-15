@@ -85,7 +85,9 @@ void Mwpm::handle_tree_hitting_virtual_boundary(const RegionHitVirtualBoundaryEv
     // Now match the event region to the boundary and freeze
     event.region->match = Match{nullptr, event.edge};
     flooder.set_region_frozen(*event.region);
-    flooder.regions_matched_to_virtual_boundary.push_back(event.region);
+#ifdef USE_THREADS
+    task->regions_matched_to_virtual_boundary.push_back(event.region);
+#endif
 
     if (DEBUG) {
         std::cout << "  DEBUG: tree hitting virtual boundary" << std::endl
@@ -139,12 +141,14 @@ void Mwpm::handle_tree_hitting_virtual_boundary_match(
     alt_tree_node->become_root();
     shatter_descendants_into_matches_and_freeze(*alt_tree_node);
     // matched_region no longer matched to virtual boundary,
-    // remove it from flooder.regions_matched_to_virtual_boundary
-    auto it = std::find(flooder.regions_matched_to_virtual_boundary.begin(),
-                        flooder.regions_matched_to_virtual_boundary.end(), matched_region);
-    if (it != flooder.regions_matched_to_virtual_boundary.end()) {
-        flooder.regions_matched_to_virtual_boundary.erase(it);
+    // remove it fromtask->regions_matched_to_virtual_boundary
+#ifdef USE_THREADS
+    auto it = std::find(task->regions_matched_to_virtual_boundary.begin(),
+                        task->regions_matched_to_virtual_boundary.end(), matched_region);
+    if (it != task->regions_matched_to_virtual_boundary.end()) {
+        task->regions_matched_to_virtual_boundary.erase(it);
     }
+#endif
 }
 #endif
 
@@ -381,11 +385,13 @@ void Mwpm::process_event(const MwpmEvent &event) {
     }
 }
 
-#ifdef ENABLE_FUSION
-void Mwpm::unmatch_virtual_boundaries_between_partitions(std::vector<GraphFillRegion *> *regions_from_other_solver) {
+#ifdef USE_THREADS
+void Mwpm::unmatch_virtual_boundaries_between_partitions() {
+    if (!task || !task->is_fusion)
+        return;
     if (DEBUG)
-        std::cout << "  DEBUG: unmatching virtual boundaries" << std::endl;
-    for (GraphFillRegion *matched_region: flooder.regions_matched_to_virtual_boundary) {
+        std::cout << "  DEBUG: unmatching regions_one" << std::endl;
+    for (GraphFillRegion *matched_region: task->regions_to_unmatch) {
         CompressedEdge match_edge = matched_region->match.edge;
         // TODO: FIX THIS IF
         if (DEBUG) {
@@ -414,43 +420,6 @@ void Mwpm::unmatch_virtual_boundaries_between_partitions(std::vector<GraphFillRe
                       << "    match_edge.loc_from: " << match_edge.loc_from << std::endl;
             throw std::invalid_argument("region_matched_to_virtual_boundary has non-virtual match");
         }
-    }
-    flooder.regions_matched_to_virtual_boundary.clear();
-    if (regions_from_other_solver && regions_from_other_solver->size() > 0) {
-        if (DEBUG) {
-            std::cout << "  DEBUG: unmatching regions_two" << std::endl;
-        }
-        for (GraphFillRegion *matched_region: *regions_from_other_solver) {
-            CompressedEdge match_edge = matched_region->match.edge;
-            // TODO: FIX THIS IF
-            if (DEBUG) {
-                std::cout << "    region: " << matched_region << std::endl;
-            }
-            if ((match_edge.loc_to && match_edge.loc_from)) {
-                if (DEBUG) {
-                    std::cout << "      loc_to: " << match_edge.loc_to;
-                    if (match_edge.loc_to->is_cross_partition)
-                        std:: cout << "  -  CROSS_PARTITION";
-                    std::cout << std::endl <<"      loc_from: " << match_edge.loc_from;
-                    if (match_edge.loc_from->is_cross_partition)
-                        std:: cout << "  -  CROSS_PARTITION";
-                    std::cout << std::endl;
-                }
-                auto alt_tree_node = node_arena.alloc_unconstructed();
-                new (alt_tree_node) AltTreeNode(matched_region);
-                matched_region->alt_tree_node = alt_tree_node;
-                flooder.set_region_growing(*matched_region);
-                matched_region->match.clear();
-            } else {
-                std::cout << "ERROR: regions_two has non-virtual match" << std::endl
-                        << "  matched_region: " << matched_region << std::endl
-                        << "    match->region: " << matched_region->match.region << std::endl
-                        << "    match_edge.loc_to: " << match_edge.loc_to << std::endl
-                        << "    match_edge.loc_from: " << match_edge.loc_from << std::endl;
-                throw std::invalid_argument("regions_two has non-virtual match");
-            }
-        }
-        regions_from_other_solver->clear();
     }
 }
 #endif
@@ -631,6 +600,33 @@ void Mwpm::extract_paths_from_match_edges(
             });
     }
 }
+
+#ifdef USE_THREADS
+// Prepare the flooder to solve task
+void Mwpm::prepare_for_task(int tid, Task* t) {
+    task = t;
+    flooder.current_tid = tid;
+    // active_partitions.clear();
+    // active_partitions.insert(t->p);
+    if (!task->is_fusion) {
+        if (DEBUG)
+            std::cout << "  DEBUG: Thread " << tid << " solver preparing to solve partition "
+                      << t->p << std::endl;
+        for (DetectorNode& node : flooder.graph.nodes)
+            if (node.partition == t->p && !node.is_cross_partition)
+                node.is_active = tid;
+    } else {
+        // active_partitions.insert(t->pv);
+        if (DEBUG)
+            std::cout << "  DEBUG: Thread " << tid << " solver preparing for task "
+                      << t->p << " and " << t->pv << std::endl;
+        for (DetectorNode& node : flooder.graph.nodes)
+            if ((node.partition == t->p && !node.is_cross_partition) ||
+                (node.partition == t->pv))
+                node.is_active = tid;
+    }
+}
+#endif
 
 Mwpm::Mwpm() {
 }

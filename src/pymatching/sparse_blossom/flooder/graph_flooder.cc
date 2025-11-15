@@ -619,38 +619,29 @@ void GraphFlooder::sync_negative_weight_observables_and_detection_events() {
 
 #ifdef USE_THREADS
 // ===============
-void GraphFlooder::update_active_nodes(int tid, long fusion_partition_with_virtuals) {
-    if (DEBUG) std::cout << "    active_partitions.size()=" << active_partitions.size() << std::endl;
-    if (active_partitions.size() == 1) {}
-        
-    else if (active_partitions.size() > 1) {
-        
-    }
-}
-
 // Prepare the flooder to solve a single partition
-void GraphFlooder::prepare_for_solve_partition(int tid, long p) {
-    active_partitions.clear();
-    active_partitions.insert(p);
-    for (DetectorNode& node : graph.nodes)
-        if (node.partition == p && !node.is_cross_partition)
-            node.is_active = tid;
-    current_tid = tid;
-}
+// void GraphFlooder::prepare_for_solve_partition(int tid, long p) {
+//     active_partitions.clear();
+//     active_partitions.insert(p);
+//     for (DetectorNode& node : graph.nodes)
+//         if (node.partition == p && !node.is_cross_partition)
+//             node.is_active = tid;
+//     current_tid = tid;
+// }
 
-// Prepare the flooder to fuse partitions p1 and p2
-void GraphFlooder::prepare_for_fuse_partitions(int tid, long p_without_virtuals, long p_with_virtuals) {
-    active_partitions.clear();
-    active_partitions.insert(p_without_virtuals);
-    active_partitions.insert(p_with_virtuals);
-    if (DEBUG)
-        std::cout << "  DEBUG: Thread " << tid << " solver preparing to fuse partitions "
-                  << p_without_virtuals << " and " << p_with_virtuals << std::endl;
-    for (DetectorNode& node : graph.nodes)
-        if ((node.partition == p_without_virtuals && !node.is_cross_partition) ||
-            (node.partition == p_with_virtuals))
-            node.is_active = tid;
-    current_tid = tid;
-}
+// // Prepare the flooder to fuse partitions p1 and p2
+// void GraphFlooder::prepare_for_fuse_partitions(int tid, long p_without_virtuals, long p_with_virtuals) {
+//     active_partitions.clear();
+//     active_partitions.insert(p_without_virtuals);
+//     active_partitions.insert(p_with_virtuals);
+//     if (DEBUG)
+//         std::cout << "  DEBUG: Thread " << tid << " solver preparing to fuse partitions "
+//                   << p_without_virtuals << " and " << p_with_virtuals << std::endl;
+//     for (DetectorNode& node : graph.nodes)
+//         if ((node.partition == p_without_virtuals && !node.is_cross_partition) ||
+//             (node.partition == p_with_virtuals))
+//             node.is_active = tid;
+//     current_tid = tid;
+// }
 // ===============
 #endif

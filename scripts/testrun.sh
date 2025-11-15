@@ -55,10 +55,10 @@ fi
 
 stim gen \
     --rounds=$rounds \
-    --distance=20 \
-    --after_clifford_depolarization=0.03 \
-    --code repetition_code \
-    --task memory \
+    --distance=7 \
+    --after_clifford_depolarization=0.001 \
+    --code surface_code \
+    --task rotated_memory_x \
     > circuit.stim
 stim analyze_errors \
     --decompose_errors \
@@ -73,6 +73,8 @@ stim detect \
     --out detection_events.b8 \
     --out_format b8
 
+echo "Starting serial run..."
+start_serial=$(date +%s)
 if [ $ppn -le 0 ]
   then
     ~/PyMatchingSHMEM/build_threads/pymatching predict \
@@ -93,6 +95,9 @@ else
         --out_format 01 \
         --rounds_per_partition $M > log_serial.out
 fi
+end_serial=$(date +%s)
+serial_time=$((end_serial - start_serial))
+echo "Serial run completed in $serial_time seconds."
 
 echo Serial
 echo correct predictions:
@@ -107,6 +112,9 @@ if [ $nthreads -gt 0 ]
     export OMP_NUM_THREADS=$nthreads
 fi
 
+# Parallel run with timing
+echo "Starting parallel run..."
+start_parallel=$(date +%s)
 if [ $ppn -le 0 ]
   then
     ~/PyMatchingSHMEM/build_threads/pymatching predict \
@@ -117,7 +125,6 @@ if [ $ppn -le 0 ]
         --out_format 01 \
         --rounds_per_partition $M \
         --parallel \
-        --draw_frames \
         > log_parallel.out
 else
     oshrun --hostfile hostfile.txt -N $ppn \
@@ -131,6 +138,9 @@ else
         --parallel \
         > log_parallel.out
 fi
+end_parallel=$(date +%s)
+parallel_time=$((end_parallel - start_parallel))
+echo "Parallel run completed in $parallel_time seconds."
 
 # Check work
 echo Parallel

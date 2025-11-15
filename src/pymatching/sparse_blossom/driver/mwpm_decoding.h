@@ -20,8 +20,8 @@
 #include <set>
 
 #ifdef USE_THREADS
-#include "pymatching/sparse_blossom/driver/work_stealing_deque.h"
 #include <memory>
+#include "pymatching/sparse_blossom/driver/parallel/decoding_task.h"
 #endif
 
 namespace pm {
@@ -97,28 +97,34 @@ void decode_detection_events_to_edges_with_edge_correlations(
 void setup_output_dirs(bool draw_frames, bool parallel=false);
 void output_detector_nodes(pm::Mwpm& mwpm, bool parallel=false);
 void output_detection_events(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, int shot, bool parallel=false);
-void output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, int shot, std::set<long>parts, bool parallel=false);
-void draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int shot, int frame_number, bool parallel=false, int thread=-1);
 #endif
 
 #ifdef USE_THREADS
+void output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, int shot, bool parallel=false);
+void draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int shot, int frame_number, bool parallel=false, int thread=-1);
 // ===============
 // Initially, a task is created for each partition and tasks are
 //   assigned to thread partition%num_threads.
 // Fusion collapses tasks leftward. If p3 & p4 are fused, p4 is
 //   added to p3's task and p4's task is marked FINISHED.
-extern std::vector<Task> tasks;
-extern std::vector<int> partitions_task_id; // Convenience store of which task own each partition
+// extern std::vector<Task> tasks;
+// extern std::vector<int> partitions_task_id; // Convenience store of which task own each partition
 // extern std::vector<std::queue<int>> partition_task_queues;
 // extern std::vector<std::deque<int>> fusion_task_deques;
-// Stable per-partition solver instances. Use shared_ptr to manage lifetime safely across threads.
+// Stable per-thread solver instances. Use shared_ptr to manage lifetime safely across threads.
+//
+// extern WorkStealingDeque task_deque;
+extern std::vector<Task> tasks;
+extern std::vector<long> step_sizes;
 extern std::vector<std::shared_ptr<Mwpm>> solvers;
 // Build and assign one solver per thread from a DEM, storing stable instances and wiring `solvers`.
-void build_partition_solvers(
+void build_thread_solvers(
     pm::Mwpm& mwpm,
     bool ensure_search_flooder_included,
-    bool enable_correlations);
-void reset_tasks(int num_threads, int num_partitions);
+    bool enable_correlations,
+    int num_threads);
+void init_tasks(int num_partitions);
+// void reset_tasks(int num_threads, int num_partitions);
 // void init_task_queues(int num_threads, int num_partitions);
 #endif
 

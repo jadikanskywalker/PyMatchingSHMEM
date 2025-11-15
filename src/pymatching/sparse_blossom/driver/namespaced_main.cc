@@ -38,6 +38,7 @@
 
 #ifdef USE_THREADS
 #include <omp.h>
+#include <chrono>
 // ===============
 #endif
 
@@ -110,13 +111,15 @@ int main_predict(int argc, const char **argv) {
         omp_set_num_threads(mwpm.flooder.graph.num_partitions);
         num_threads = mwpm.flooder.graph.num_partitions;
     }
-    pm::tasks.resize(static_cast<size_t>(mwpm.flooder.graph.num_partitions));
-    pm::partitions_task_id.resize(static_cast<size_t>(mwpm.flooder.graph.num_partitions));
-    build_partition_solvers(
+    // pm::tasks.resize(static_cast<size_t>(mwpm.flooder.graph.num_partitions));
+    // pm::partitions_task_id.resize(static_cast<size_t>(mwpm.flooder.graph.num_partitions));
+    build_thread_solvers(
         mwpm,
         /*ensure_search_flooder_included=*/enable_correlations,
-        /*enable_correlations=*/enable_correlations
+        /*enable_correlations=*/enable_correlations,
+        num_threads
     );
+    pm::init_tasks(mwpm.flooder.graph.num_partitions);
     
     auto coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
     mwpm.coords = coords;
@@ -146,6 +149,13 @@ int main_predict(int argc, const char **argv) {
 #if defined(USE_THREADS) && !defined(USE_SHMEM)
 // ===============
     int i = 0;
+    
+    using std::chrono::high_resolution_clock;
+    using std::chrono::duration_cast;
+    using std::chrono::duration;
+    using std::chrono::milliseconds;
+
+    auto t1 = high_resolution_clock::now();
     while (reader->start_and_read_entire_record(sparse_shot)) {
         if (parallel)
             pm::decode_detection_events_in_parallel(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
@@ -159,6 +169,16 @@ int main_predict(int argc, const char **argv) {
         res.reset();
         i++;
     }
+    auto t2 = high_resolution_clock::now();
+
+    /* Getting number of milliseconds as an integer. */
+    auto ms_int = duration_cast<milliseconds>(t2 - t1);
+
+    /* Getting number of milliseconds as a double. */
+    duration<double, std::milli> ms_double = t2 - t1;
+
+    std::cout << "Decoding time: " << ms_double.count() << "ms\n";
+
 #elif defined(USE_SHMEM)
     int mype = shmem_my_pe();
     if (DEBUG && mype==0) {

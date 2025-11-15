@@ -19,6 +19,10 @@
 #include "pymatching/sparse_blossom/matcher/alternating_tree.h"
 #include "pymatching/sparse_blossom/search/search_flooder.h"
 
+#ifdef USE_THREADS
+#include "pymatching/sparse_blossom/driver/parallel/decoding_task.h"
+#endif
+
 namespace pm {
 
 class AltTreeNode;
@@ -45,6 +49,12 @@ struct Mwpm {
 
 #ifdef ENABLE_FUSION
     std::pair<std::vector<std::pair<float, float>>, std::vector<std::pair<float, float>>> coords;
+#endif
+
+#ifdef USE_THREADS
+    Task* task;
+    // Set of active partitions. Should have 1 for partition solving, 2 for fusing
+    // std::set<long> active_partitions;
 #endif
 
     Mwpm();
@@ -83,9 +93,16 @@ struct Mwpm {
 #endif
     void handle_tree_hitting_self(const RegionHitRegionEventData& event, AltTreeNode* common_ancestor);
     void handle_tree_hitting_other_tree(const RegionHitRegionEventData& event);
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
     // Removes matchings to virtual boundaries, turning matched regions into alternating trees
-    void unmatch_virtual_boundaries_between_partitions(std::vector<GraphFillRegion *> *regions_from_other_solver=nullptr);
+    void unmatch_virtual_boundaries_between_partitions();
+    // Sets up internal variables for single partition solving
+    // void prepare_for_solve_partition(int tid, Task* task);
+    // Sets up internal variables for fusion
+    //   Assumes the flooder has intermediate solution states for p1 and p2, including:
+    //     - matched GraphFillRegions
+    //     - DetectorNode ephermeral states
+    void prepare_for_task(int tid, Task* task);
 #endif
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_matches(GraphFillRegion* region, MatchingResult& res);
     MatchingResult shatter_blossom_and_extract_matches(GraphFillRegion* region);

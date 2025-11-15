@@ -604,9 +604,9 @@ void pm::UserGraph::populate_implied_edge_weights(
 std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g) {
     // Query coordinates from stim. Map: det_id -> vector<double> of coords.
     std::set<uint64_t> all_dets;
-    all_dets.clear();
-    for (uint64_t k = 0; k < dem.count_detectors(); ++k)
-        all_dets.insert(k);
+    size_t num_nodes = g.nodes.size();
+    for (uint64_t k = 0; k < num_nodes; ++k)
+        all_dets.emplace_hint(all_dets.end(), k);
     std::map<uint64_t, std::vector<double>> coords_map = dem.get_detector_coordinates(all_dets);
     // Annotate UserNodes
     std::set<long> rounds;

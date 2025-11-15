@@ -70,8 +70,8 @@ struct GraphFlooder {
 #ifdef ENABLE_FUSION
 // ===============
     // Set of active partitions. Should have 1 for partition solving, 2 for fusing
-    std::set<long> active_partitions;
-    std::vector<GraphFillRegion *> regions_matched_to_virtual_boundary;
+    // std::set<long> active_partitions;
+    // std::vector<GraphFillRegion *> regions_matched_to_virtual_boundary;
 // ===============
 #endif
 
@@ -121,14 +121,14 @@ struct GraphFlooder {
 #ifdef USE_THREADS
 // ===============
     bool is_active(const DetectorNode *node) const;
-    void update_active_nodes(int tid, long fusion_partition_with_virtuals=-1);
-    // Sets up internal variables for single partition solving
-    void prepare_for_solve_partition(int tid, long p);
-    // Sets up internal variables for fusion
-    //   Assumes the flooder has intermediate solution states for p1 and p2, including:
-    //     - matched GraphFillRegions
-    //     - DetectorNode ephermeral states
-    void prepare_for_fuse_partitions(int tid, long p_without_virtuals, long p_with_virtuals);
+    // void update_active_nodes(int tid, long fusion_partition_with_virtuals=-1);
+    // // Sets up internal variables for single partition solving
+    // void prepare_for_solve_partition(int tid, long p);
+    // // Sets up internal variables for fusion
+    // //   Assumes the flooder has intermediate solution states for p1 and p2, including:
+    // //     - matched GraphFillRegions
+    // //     - DetectorNode ephermeral states
+    // void prepare_for_fuse_partitions(int tid, long p_without_virtuals, long p_with_virtuals);
 // ===============
 #endif
 
