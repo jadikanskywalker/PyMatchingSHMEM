@@ -105,14 +105,12 @@ pm::Mwpm pm::detector_error_model_to_mwpm(
 void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events
 #ifdef ENABLE_FUSION
 // ===============
-    , int shot=0,
-    bool draw_frames=false,
-    bool parallel=false
+    , bool draw_frames=false
 // ===============
 #endif
 #ifdef USE_THREADS
-    , int tid=-1,
-    Task* task=nullptr
+    , bool parallel=false,
+    int tid=-1
 #endif
 ) {
     if (!mwpm.flooder.queue.empty()) {
@@ -174,7 +172,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
                 mwpm.flooder.graph.nodes[det].radius_of_arrival = 0;
 #ifdef USE_THREADS // Only add detection events for active non-virtual nodes
 // ===============
-                if (mwpm.flooder.graph.nodes[det].is_active == tid)
+                if (mwpm.flooder.is_active(&mwpm.flooder.graph.nodes[det]))
 // ===============
 #endif
                 mwpm.create_detection_event(&mwpm.flooder.graph.nodes[det]);
@@ -186,7 +184,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
 // ===============
     int frame = 0;
     if (draw_frames)
-        draw_frame(mwpm, pm::MwpmEvent::no_event(), shot, frame, parallel, tid);
+        draw_frame(mwpm, pm::MwpmEvent::no_event(), frame, parallel, tid);
     frame++;
 // ===============
 #endif
@@ -196,7 +194,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
 #ifdef ENABLE_FUSION
 // ===============
         if (draw_frames)
-            draw_frame(mwpm, event, shot, frame, parallel, tid);
+            draw_frame(mwpm, event, frame, parallel, tid);
         frame++;
 // ===============
 #endif
@@ -344,7 +342,7 @@ void pm::decode_detection_events(
     process_timeline_until_completion(mwpm, detection_events
 #ifdef ENABLE_FUSION
 // ===============
-        , shot, draw_frames, false
+        , draw_frames
 // ===============
 #endif
     );
@@ -657,11 +655,11 @@ void pm::output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& dete
     out.close();
 }
 
-void pm::draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int shot, int frame_number, bool parallel, int thread) {
+void pm::draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int frame_number, bool parallel, int tid) {
     std::string out_dir = parallel ? "out_parallel/" : "out_serial/";
-    std::string out_name = out_dir + "frames/" + std::to_string(shot) + "/";
-    if (thread > -1) {
-        out_name += "t" + std::to_string(thread) + "/";
+    std::string out_name = out_dir + "frames/" + std::to_string(mwpm.flooder.current_shot) + "/";
+    if (tid > -1) {
+        out_name += "t" + std::to_string(tid) + "/";
     } 
     out_name +=  "frame"; 
     if (mwpm.task) {
@@ -793,15 +791,15 @@ inline std::vector<uint64_t> create_detection_events_mask(pm::Mwpm& solver, cons
     return detection_events_mask;
 }
 
-inline void solve_task(int tid, int shot, const std::vector<uint64_t>& detection_events, int draw_frames, Task& task) {
-    task.setup_regions();
+inline void solve_task(int tid, int shot, const std::vector<uint64_t>& detection_events, int draw_frames, Task* task) {
+    task->setup_regions();
     auto& solver = *pm::solvers[tid];
-    solver.prepare_for_task(tid, &task);
-    auto detection_events_mask = create_detection_events_mask(solver, detection_events, task);
+    solver.prepare_for_task(tid, task);
+    auto detection_events_mask = create_detection_events_mask(solver, detection_events, *task);
     if (DEBUG && omp_get_thread_num()==0) {
         output_detector_nodes(solver, true);
     }
-    process_timeline_until_completion(solver, detection_events_mask, shot, draw_frames, true, tid);
+    process_timeline_until_completion(solver, detection_events_mask, draw_frames, true, tid);
     if (DEBUG) {
         output_solution_state(solver, detection_events, shot, true);
     }
@@ -817,8 +815,15 @@ inline void reset_tasks_and_solvers(int tid, int num_threads) {
         if (freed_regions.find(region) != freed_regions.end()) continue;
         mwpm.flooder.region_arena.del(region);
     }
-    for (int i = tid; i < pm::tasks.size(); i += num_threads) {
+    int chunk_size = pm::tasks.size() / num_threads;
+    int i;
+    for (i = tid*chunk_size; i < tid*chunk_size + chunk_size; ++i) {
         pm::tasks[i].reset();
+    }
+    if (tid == num_threads-1) {
+        for (; i < pm::tasks.size(); ++i) {
+            pm::tasks[i].reset();
+        }
     }
 }
 #endif
@@ -895,7 +900,7 @@ void pm::decode_detection_events_in_parallel(
                 if (t->try_to_steal()) {
                     // Got task
                     // std::cout << "Thread " << tid << " solving " << t->p << (t->is_fusion ? std::to_string(t->pv) : "") << std::endl;
-                    solve_task(tid, shot, detection_events, draw_frames, *t);
+                    solve_task(tid, shot, detection_events, draw_frames, t);
                     t->mark_solved();
                     // Try to steal parent
                     if (t->parent) {

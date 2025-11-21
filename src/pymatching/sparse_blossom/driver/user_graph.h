@@ -62,7 +62,7 @@ class UserNode {
     double pos_x = 0.0;      // spatial x
     double pos_y = 0.0;      // spatial y
     long partition = -1;     // assigned partition
-    bool is_cross_partition = false; // cross_partition nodes have edges to nodes in lower partitions
+    long vb = -1; // cross_partition nodes have edges to nodes in lower partitions
     // std::set<std::tuple<size_t,long >> virtual_neighbors; 
 // ===============
 #endif
@@ -136,6 +136,7 @@ class UserGraph {
 #ifdef USE_THREADS
 // ===============
     std::shared_ptr<pm::MatchingGraph> to_matching_graph(pm::weight_int num_distinct_weights);
+    std::shared_ptr<MatchingGraph> to_decoding_unit(pm::weight_int num_distinct_weights);
 // ===============
 #else
     pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);

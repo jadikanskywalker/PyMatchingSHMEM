@@ -98,17 +98,54 @@ GraphFlooder::GraphFlooder(GraphFlooder &&flooder) noexcept
 
 #ifdef USE_THREADS
 // ===============
-inline bool GraphFlooder::is_active(const DetectorNode *node) const {
-    if (node->is_active == current_tid) {
-        return true;
+inline bool GraphFlooder::is_active(DetectorNode *node) const {
+    if (node->is_cross_partition && node->shot_marker != current_shot) {
+        return false;
     }
+    return true;
+    // if (current_shot == node->shot_marker && current_task == node->task_marker) {
+    //     return node->is_active;
+    // } else {
+    //     if (!node->is_cross_partition) {
+    //         node->is_active = true;
+    //     } else if (/* node is cross partition && */ !fusing) {
+    //         node->is_active = false;
+    //     } else /* node is cross partition and fusing */ {
+    //         node->is_active = true;
+    //         for (int vb_node : node->vbs) {
+    //             bool found = false;
+    //             for (int vb_fusing : vbs) {
+    //                 if (vb_node < vb_fusing) {
+    //                     break;
+    //                 } else if (vb_node == vb_fusing) {
+    //                     found = true;
+    //                     break;
+    //                 }
+    //             }
+    //             if (!found) {
+    //                 node->is_active = false;
+    //                 break;
+    //             }
+    //         }
+    //         if (DEBUG) {
+    //             std::cout << "  DEBUG: T" << omp_get_thread_num() << " setting node " << node << " is_active = " << node->is_active << std::endl
+    //                       << "    vbs: ";
+    //             for (int vb : vbs) std::cout << vb;
+    //             std::cout << ";  node->vbs: ";
+    //             for (int vb : node->vbs) std::cout << vb;
+    //             std::cout << std::endl;
+    //         }
+    //     }
+    //     node->shot_marker = current_shot;
+    //     node->task_marker = current_task;
+    //     return node->is_active;
+    // }
     // Warn if another thread owns this node and it's not cross-partition
-    if (node->is_active >= 0) {
-        std::cout << "  ERROR: node " << node << " is active in different thread" << std::endl
-                  << "    current_tid: " << current_tid << "  node->is_active: " << node->is_active
-                  << "  node->is_cross_partition: " << node->is_cross_partition << std::endl;
-    }
-    return false;
+    // if (node->is_active >= 0) {
+    //     std::cout << "  ERROR: node " << node << " is active in different thread" << std::endl
+    //               << "    current_tid: " << current_tid << "  node->is_active: " << node->is_active
+    //               << "  node->is_cross_partition: " << node->is_cross_partition << std::endl;
+    // }
 }
 #elif defined(ENABLE_FUSION)
 inline bool is_active(DetectorNode *node) {

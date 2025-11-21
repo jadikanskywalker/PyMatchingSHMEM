@@ -14,7 +14,7 @@
 
 #include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
 #ifdef USE_THREADS
-#include "pymatching/sparse_blossom/driver/parallel/decoding_task.h"
+#include "pymatching/sparse_blossom/driver/parallel/decoding_unit.h"
 #endif
 #include "pymatching/sparse_blossom/driver/namespaced_main.h"
 #include "pymatching/sparse_blossom/flooder/graph.h"

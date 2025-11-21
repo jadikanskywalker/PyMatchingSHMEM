@@ -76,7 +76,10 @@ struct GraphFlooder {
 #endif
 
 #ifdef USE_THREADS
-    int current_tid=-1; // used in is_active() to determine if node belongs to thread
+    // bool fusing = false;
+    // std::vector<int> vbs; 
+    int current_shot=-1;
+    // int current_task=-1;
 #endif
 
     GraphFlooder();
@@ -120,7 +123,7 @@ struct GraphFlooder {
 
 #ifdef USE_THREADS
 // ===============
-    bool is_active(const DetectorNode *node) const;
+    bool is_active(DetectorNode *node) const;
     // void update_active_nodes(int tid, long fusion_partition_with_virtuals=-1);
     // // Sets up internal variables for single partition solving
     // void prepare_for_solve_partition(int tid, long p);
@@ -138,6 +141,6 @@ struct GraphFlooder {
     void sync_negative_weight_observables_and_detection_events();
 };
 
-}  // namespace pm
+} // namespace pm
 
 #endif  // PYMATCHING2_GRAPH_FLOODER_H

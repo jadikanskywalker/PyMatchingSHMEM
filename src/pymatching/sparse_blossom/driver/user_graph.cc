@@ -312,11 +312,12 @@ pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_w
     // matching_graph.partition_of_node.resize(nodes.size(), -1);
     // matching_graph.is_virtual_node.resize(nodes.size(), false);
     matching_graph.num_partitions = num_partitions;
-    for (size_t i = 0; i < nodes.size(); ++i) {
+    int num_nodes = nodes.size();
+    for (size_t i = 0; i < num_nodes; ++i) {
         // matching_graph.partition_of_node[i] = static_cast<int32_t>(nodes[i].partition);
         // matching_graph.is_virtual_node[i] = nodes[i].is_virtual;
-        matching_graph.nodes[i].partition = nodes[i].partition;
-        matching_graph.nodes[i].is_cross_partition = nodes[i].is_cross_partition;
+        // matching_graph.nodes[i].partition = nodes[i].partition;
+        // matching_graph.nodes[i].is_cross_partition = nodes[i].is_cross_partition;
     }
 // ===============
 #endif
@@ -329,6 +330,62 @@ pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_w
     return matching_graph;
 #endif
 }
+
+
+#ifdef USE_THREADS
+std::shared_ptr<pm::MatchingGraph> pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_weights) {
+    std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
+    pm::MatchingGraph& matching_graph = *matching_graph_ptr;
+    double normalising_constant = to_matching_or_search_graph_helper(
+        num_distinct_weights,
+        [&](size_t u,
+            size_t v,
+            pm::signed_weight_int weight,
+            const std::vector<size_t>& observables,
+            const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
+            matching_graph.add_edge(u, v, weight, observables, implied_weights_for_other_edges);
+        },
+        [&](size_t u,
+            pm::signed_weight_int weight,
+            const std::vector<size_t>& observables,
+            const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
+            matching_graph.add_boundary_edge(u, weight, observables, implied_weights_for_other_edges);
+        });
+
+    matching_graph.normalising_constant = normalising_constant;
+    if (boundary_nodes.size() > 0) {
+        matching_graph.is_user_graph_boundary_node.clear();
+        matching_graph.is_user_graph_boundary_node.resize(nodes.size(), false);
+        for (auto& i : boundary_nodes)
+            matching_graph.is_user_graph_boundary_node[i] = true;
+    }
+
+    matching_graph.convert_implied_weights(normalising_constant);
+
+        // Propagate partition and virtual metadata
+    // matching_graph.partition_of_node.resize(nodes.size(), -1);
+    // matching_graph.is_virtual_node.resize(nodes.size(), false);
+    matching_graph.num_partitions = num_partitions;
+    int num_nodes = nodes.size();
+
+    std::vector<int> node_mask(num_nodes);
+    std::vector<std::pair<int, int>> partitions(num_partitions);
+    std::vector<std::pair<int, int>> virtual_boundaries(num_partitions-1);
+    int last_p = 0;
+    partitions[0].first = 0;
+    for (size_t i = 0; i < num_nodes; ++i) {
+        // matching_graph.partition_of_node[i] = static_cast<int32_t>(nodes[i].partition);
+        // matching_graph.is_virtual_node[i] = nodes[i].is_virtual;
+        node_mask[i] = i;
+        // Finish this
+        // partitions
+        matching_graph.nodes[i].vb = nodes[i].vb;
+        matching_graph.nodes[i].is_cross_partition = (nodes[i].vb >= 0);
+    }
+
+    return matching_graph_ptr;
+}
+#endif
 
 pm::SearchGraph pm::UserGraph::to_search_graph(pm::weight_int num_distinct_weights) {
     /// Identical to to_matching_graph but for constructing a pm::SearchGraph
@@ -653,25 +710,41 @@ void pm::partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds) {
     if (DEBUG)
         std::cout << "  M : " << M << "; num_rounds : " << rounds.size() << "; num_partitions : " << g.num_partitions << std::endl;
     // partition nodes
-    for (auto& n : g.nodes) {
-        if (n.has_coords)
-            n.partition = (n.round / M);
-    }
-    // mark virtual nodes
-    for (const auto& e : g.edges) {
-        if (e.node1 == SIZE_MAX || e.node2 == SIZE_MAX) continue; // ignore boundary edges
-        const auto& n1 = g.nodes[e.node1];
-        const auto& n2 = g.nodes[e.node2];
-        if (!n1.has_coords || !n2.has_coords) continue; // need rounds
-        if (n1.partition == n2.partition) continue; // not a cross-partition edge
-        else if (n1.partition > n2.partition) { // n1 in higher partition
-            g.nodes[e.node1].is_cross_partition = true; // mark higher partition node as virtual
-            // g.nodes[e.node2].virtual_neighbors.insert(std::make_tuple(e.node1, n1.round)); // save virtual neighbor in lower round node
-        } else { // n2 in higher partition
-            g.nodes[e.node2].is_cross_partition = true; // mark higher partition node as virtual
-            // g.nodes[e.node1].virtual_neighbors.insert(std::make_tuple(e.node2, n2.round)); // save virtual neighbor in lower round node
+    int num_nodes = g.nodes.size();
+    int partition_size = num_nodes / M - 1;
+    int p = 0;
+    int vb = 0;
+    int i = 0;
+    for (int n=0; n<num_nodes; ++n) {
+        if (i < partition_size || (n == num_nodes-1)) {
+            g.nodes[n].partition = p;
+            i++;
+        } else if (i == partition_size) {
+            g.nodes[n].vb = vb;
+            i = 0;
+            p++;
+            vb++;
         }
     }
+    // for (auto& n : g.nodes) {
+    //     if (n.has_coords)
+    //         n.partition = (n.round / M);
+    // }
+    // mark virtual nodes
+    // for (const auto& e : g.edges) {
+    //     if (e.node1 == SIZE_MAX || e.node2 == SIZE_MAX) continue; // ignore boundary edges
+    //     const auto& n1 = g.nodes[e.node1];
+    //     const auto& n2 = g.nodes[e.node2];
+    //     if (!n1.has_coords || !n2.has_coords) continue; // need rounds
+    //     if (n1.partition == n2.partition) continue; // not a cross-partition edge
+    //     else if (n1.partition > n2.partition) { // n1 in higher partition
+    //         g.nodes[e.node1].is_cross_partition = true; // mark higher partition node as virtual
+    //         // g.nodes[e.node2].virtual_neighbors.insert(std::make_tuple(e.node1, n1.round)); // save virtual neighbor in lower round node
+    //     } else { // n2 in higher partition
+    //         g.nodes[e.node2].is_cross_partition = true; // mark higher partition node as virtual
+    //         // g.nodes[e.node1].virtual_neighbors.insert(std::make_tuple(e.node2, n2.round)); // save virtual neighbor in lower round node
+    //     }
+    // }
 }
 
 // void pm::partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds) {

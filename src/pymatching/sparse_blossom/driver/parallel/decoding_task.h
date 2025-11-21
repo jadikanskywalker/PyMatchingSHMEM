@@ -29,12 +29,16 @@ private:
     std::atomic<Status> status{ Status::UNSOLVED };
 
 public:
+    int task_id;
     bool is_fusion{ 0 };
 
-    long p{ -1 };
-    long pv{ -1 };
-    long leftmost_p{ -1 };
-    long rightmost_p{ -1 };
+    // long p{ -1 };
+    // long pv{ -1 };
+    // long leftmost_p{ -1 };
+    // long rightmost_p{ -1 };
+
+    // id of partition to solve or virtual boundary to fuse
+    int part;
 
     Task* left_child{ nullptr };
     Task* right_child{ nullptr };
@@ -45,17 +49,24 @@ public:
 
     // Default construct with safe initial values.
     Task() = default;
-    Task(long partition) : p(partition), pv(partition), leftmost_p(partition), rightmost_p(partition) {};
+    // Task(int task_id, long partition) : task_id(task_id), p(partition), pv(partition), leftmost_p(partition), rightmost_p(partition) {};
+    Task(int task_id, int partition) : task_id(task_id) {
+        part = partition;
+    }
     // Task(long partition_without_virtuals, long partition_with_virtuals)
     //   : p(partition_without_virtuals), pv(partition_with_virtuals), p_leftmost(p), p_rightmost(pv), is_fusion(true) {};
-    Task(Task* left_child, Task* right_child) : left_child(left_child), right_child(right_child), is_fusion(1) {
-        p = left_child->rightmost_p;
-        pv = right_child->leftmost_p;
-        leftmost_p = left_child->leftmost_p;
-        rightmost_p = right_child->rightmost_p;
-        left_child->parent = this;
-        right_child->parent = this;
-        // status.store(Status::UNSOLVED, std::memory_order_relaxed);
+    // Task(int t_id, Task* left_child, Task* right_child) : task_id(t_id), left_child(left_child), right_child(right_child), is_fusion(1) {
+    //     p = left_child->rightmost_p;
+    //     pv = right_child->leftmost_p;
+    //     leftmost_p = left_child->leftmost_p;
+    //     rightmost_p = right_child->rightmost_p;
+    //     left_child->parent = this;
+    //     right_child->parent = this;
+    //     // status.store(Status::UNSOLVED, std::memory_order_relaxed);
+    // }
+    Task(int t_id, Task* left_child, Task* right_child, int vb) 
+     : task_id(task_id), left_child(left_child), right_child(right_child), is_fusion(true) {
+        part = vb;
     }
     // Non-copyable due to atomic members.
     Task(const Task&) = delete;
@@ -129,8 +140,6 @@ public:
         status.store(UNSOLVED, std::memory_order_release);
     }
 };
-
-
 
 
 // If solved=False, partitions should only have one partition

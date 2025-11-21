@@ -603,28 +603,29 @@ void Mwpm::extract_paths_from_match_edges(
 
 #ifdef USE_THREADS
 // Prepare the flooder to solve task
-void Mwpm::prepare_for_task(int tid, Task* t) {
+void Mwpm::prepare_for_task(int shot, Task* t) {
+    flooder.current_shot = shot;
+    // flooder.current_task = t->task_id;
     task = t;
-    flooder.current_tid = tid;
     // active_partitions.clear();
     // active_partitions.insert(t->p);
-    if (!task->is_fusion) {
-        if (DEBUG)
-            std::cout << "  DEBUG: Thread " << tid << " solver preparing to solve partition "
-                      << t->p << std::endl;
-        for (DetectorNode& node : flooder.graph.nodes)
-            if (node.partition == t->p && !node.is_cross_partition)
-                node.is_active = tid;
-    } else {
-        // active_partitions.insert(t->pv);
-        if (DEBUG)
-            std::cout << "  DEBUG: Thread " << tid << " solver preparing for task "
-                      << t->p << " and " << t->pv << std::endl;
-        for (DetectorNode& node : flooder.graph.nodes)
-            if ((node.partition == t->p && !node.is_cross_partition) ||
-                (node.partition == t->pv))
-                node.is_active = tid;
-    }
+    // if (!task->is_fusion) {
+    //     if (DEBUG)
+    //         std::cout << "  DEBUG: Thread " << tid << " solver preparing to solve partition "
+    //                   << t->p << std::endl;
+    //     for (DetectorNode& node : flooder.graph.nodes)
+    //         if (node.partition == t->p && !node.is_cross_partition)
+    //             node.is_active = tid;
+    // } else {
+    //     // active_partitions.insert(t->pv);
+    //     if (DEBUG)
+    //         std::cout << "  DEBUG: Thread " << tid << " solver preparing for task "
+    //                   << t->p << " and " << t->pv << std::endl;
+    //     for (DetectorNode& node : flooder.graph.nodes)
+    //         if ((node.partition == t->p && !node.is_cross_partition) ||
+    //             (node.partition == t->pv))
+    //             node.is_active = tid;
+    // }
 }
 #endif
 
