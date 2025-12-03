@@ -63,12 +63,6 @@ class MatchingGraph {
     // dem with enable_correlations=true.
     bool loaded_from_dem_without_correlations = false;
 
-#ifdef ENABLE_FUSION
-// ===============
-    long num_partitions = 0;
-// ===============
-#endif
-
     MatchingGraph();
     MatchingGraph(size_t num_nodes, size_t num_observables);
     MatchingGraph(size_t num_nodes, size_t num_observables, double normalising_constant);
@@ -89,7 +83,7 @@ class MatchingGraph {
     void convert_implied_weights(double normalising_constant);
 
 #ifdef USE_THREADS
-    void reset_active_status_for_all_nodes();
+    // void reset_active_status_for_all_nodes();
 #endif
 
     void undo_reweights();

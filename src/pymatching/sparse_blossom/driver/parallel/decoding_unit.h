@@ -15,34 +15,56 @@
 #ifndef PYMATCHING2_DECODING_UNIT_H
 #define PYMATCHING2_DECODING_UNIT_H
 
-#include "pymatching/sparse_blossom/driver/parallel/decoding_tree.h"
+#include "../../config_parallel.h"
+#include "pymatching/sparse_blossom/driver/parallel/decoding_task.h"
+
 #include <vector>
 
-
-struct Partition {
-    std::pair<int, int> nodes; // mask range of nodes in partition
-};
-
-struct VirtualBoundary {
-    std::pair<int, int> nodes; // mask range of nodes in partition
-    // std::vector<int> partitions; // partitions this boundary connects
-};
+namespace pm { class MatchingGraph; class Mwpm; }
 
 // A decoding unit is a connected decoding graph
 //   Connected decoding graphs are partitioned to allow parallel solving
 //   Decoding task involve solving a partition or fusing partitions along virtual boundaries
 struct DecodingUnit {
-    const std::vector<int> node_mask; // id mask over all nodes: [ p0 vb0 p1 vb1 p2 ... ]
-    const std::vector<Partition> partitions; 
-    const std::vector<VirtualBoundary> virtual_boundaries; // start and end index for each boundary
+    const std::vector<std::vector<int>> partitions; 
+    const std::vector<std::vector<int>> virtual_boundaries; // start and end index for each boundary
+    const std::vector<std::vector<int>> virtual_boundary_partitions; // for each vb, list of partitions it connects
 
-    std::shared_ptr<MatchingGraph> graph_ptr;
+    const std::shared_ptr<pm::MatchingGraph> graph_ptr;
+    std::vector<std::shared_ptr<pm::Mwpm>> solvers;
+
+    int num_tasks;
+    std::shared_ptr<std::vector<Task>> tasks;
+    // std::vector<int> step_sizes;
 
     DecodingUnit(
-        const std::vector<int>& node_mask,
-        const std::vector<Partition>& partitions,
-        const std::vector<VirtualBoundary>& virtual_boundaries
-    ) : node_mask(node_mask), partitions(partitions), virtual_boundaries(virtual_boundaries) {}
+        const std::shared_ptr<pm::MatchingGraph> graph_ptr,
+        const std::vector<std::vector<int>>& partitions,
+        const std::vector<std::vector<int>>& virtual_boundaries,
+        const std::vector<std::vector<int>> virtual_boundary_partitions
+    ) : graph_ptr(graph_ptr), partitions(partitions), virtual_boundaries(virtual_boundaries),
+        virtual_boundary_partitions(virtual_boundary_partitions) {}
+    // DecodingUnit(const DecodingUnit&) {
+    //     tasks_ptr = tasks_ptr;
+    // };
+    // DecogingUnit& operator=(const DecodingUnit&) {
+    //     tasks_ptr = tasks_ptr;
+    // };
+    // DecodingUnit(DecodingUnit&& other) noexcept {
+    //     status.store(other.status.load());
+    // }
+    // Task& operator=(Task&& other) noexcept {
+    //     status.store(other.status.load());
+    //     return *this;
+    // }
+
+    void build_solvers(
+        bool ensure_search_flooder_included,
+        bool enable_correlations,
+        int num_threads);
+
+    void build_tasks_for_round_partitioning();
 };
+
 
 #endif // PYMATCHING2_DECODING_UNIT_H

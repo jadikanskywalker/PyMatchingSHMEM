@@ -136,11 +136,6 @@ MatchingGraph::MatchingGraph(MatchingGraph&& graph) noexcept
       previous_weights(graph.previous_weights),
       edges_to_implied_weights_unconverted(graph.edges_to_implied_weights_unconverted),
       loaded_from_dem_without_correlations(graph.loaded_from_dem_without_correlations) 
-#ifdef ENABLE_FUSION
-// ===============
-      , num_partitions(graph.num_partitions)
-// ===============
-#endif
       {
 }
 
@@ -204,11 +199,11 @@ void MatchingGraph::convert_implied_weights(double normalising_constant) {
 
 #ifdef USE_THREADS
 // ===============
-void MatchingGraph::reset_active_status_for_all_nodes() {
-    for (auto& node : nodes) {
-        node.is_active = -1;
-    }
-}
+// void MatchingGraph::reset_active_status_for_all_nodes() {
+//     for (auto& node : nodes) {
+//         node.is_active = -1;
+//     }
+// }
 // ===============
 #endif
 

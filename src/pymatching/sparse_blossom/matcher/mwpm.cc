@@ -321,7 +321,9 @@ void Mwpm::handle_blossom_shattering(const BlossomShatterEventData &event) {
     blossom_cycle[child_idx].region->alt_tree_node = blossom_alt_node;
     current_alt_node->add_child(AltTreeEdge(blossom_alt_node, child_edge));
     
-#if !defined(USE_THREADS)
+#ifdef USE_THREADS
+    event.blossom_region->owner_arena->del(event.blossom_region);
+#else
     flooder.region_arena.del(event.blossom_region);
 #endif
 }
@@ -342,22 +344,30 @@ void Mwpm::handle_region_hit_region(const MwpmEvent event) {
         if (d.region2->match.region) {
             handle_tree_hitting_match(d.region1, d.region2, d.edge);
         } else {
+#ifdef USE_THREADS
             if (d.region2->match.edge.loc_to == nullptr) {
                 handle_tree_hitting_boundary_match(d.region1, d.region2, d.edge);
             } else {
                 handle_tree_hitting_virtual_boundary_match(d.region1, d.region2, d.edge);
             }
+#else
+            handle_tree_hitting_boundary_match(d.region1, d.region2, d.edge);
+#endif
         }
     } else {
         // Region 1 is not in the tree, so must be matched to the boundary or another region
         if (d.region1->match.region) {
             handle_tree_hitting_match(d.region2, d.region1, d.edge.reversed());
         } else {
+#ifdef USE_THREADS
             if (d.region1->match.edge.loc_to == nullptr) {
                 handle_tree_hitting_boundary_match(d.region2, d.region1, d.edge.reversed());
             } else {
                 handle_tree_hitting_virtual_boundary_match(d.region2, d.region1, d.edge.reversed());
             }
+#else
+            handle_tree_hitting_boundary_match(d.region2, d.region1, d.edge);
+#endif
         }
     }
 }
@@ -400,10 +410,10 @@ void Mwpm::unmatch_virtual_boundaries_between_partitions() {
         if ((match_edge.loc_to && match_edge.loc_from)) {
             if (DEBUG) {
                 std::cout << "      loc_to: " << match_edge.loc_to;
-                if (match_edge.loc_to->is_cross_partition)
+                if (match_edge.loc_to->vb >= 0)
                     std:: cout << "  -  CROSS_PARTITION";
                 std::cout << std::endl <<"      loc_from: " << match_edge.loc_from;
-                if (match_edge.loc_from->is_cross_partition)
+                if (match_edge.loc_from->vb >= 0)
                     std:: cout << "  -  CROSS_PARTITION";
                 std::cout << std::endl;
             }
@@ -445,7 +455,9 @@ GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_matches(GraphFil
         re1.region->add_match(re2.region, re1.edge);
         res += shatter_blossom_and_extract_matches(re1.region);
     }
-#if !defined(USE_THREADS)
+#ifdef USE_THREADS
+    region->owner_arena->del(region);
+#else
     flooder.region_arena.del(region);
 #endif
     return subblossom;
@@ -462,7 +474,10 @@ MatchingResult Mwpm::shatter_blossom_and_extract_matches(GraphFillRegion *region
             // No shattering required, so just return MatchingResult from this match.
             MatchingResult res = {
                 region->match.edge.obs_mask, region->radius.y_intercept() + region->match.region->radius.y_intercept()};
-#if !defined(USE_THREADS)
+#ifdef USE_THREADS
+            region->match.region->owner_arena->del(region->match.region);
+            region->owner_arena->del(region);
+#else
             flooder.region_arena.del(region->match.region);
             flooder.region_arena.del(region);
 #endif
@@ -472,7 +487,9 @@ MatchingResult Mwpm::shatter_blossom_and_extract_matches(GraphFillRegion *region
         // Region with no blossom children matched to boundary
         // No shattering required, so just return MatchingResult from this match.
         MatchingResult res = {region->match.edge.obs_mask, region->radius.y_intercept()};
-#if !defined(USE_THREADS)
+#ifdef USE_THREADS
+        region->owner_arena->del(region);
+#else
         flooder.region_arena.del(region);
 #endif
         return res;
@@ -509,7 +526,9 @@ GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_match_edges(
         re1.region->add_match(re2.region, re1.edge);
         shatter_blossom_and_extract_match_edges(re1.region, match_edges);
     }
-#if !defined(USE_THREADS)
+#ifdef USE_THREADS
+    region->owner_arena->del(region);
+#else
     flooder.region_arena.del(region);
 #endif
     return subblossom;
@@ -525,7 +544,10 @@ void Mwpm::shatter_blossom_and_extract_match_edges(GraphFillRegion *region, std:
             // Neither region nor matched region have blossom children
             // No shattering required, so just return MatchingResult from this match.
             match_edges.push_back(region->match.edge);
-#if !defined(USE_THREADS)
+#ifdef USE_THREADS
+            region->match.region->owner_arena->del(region->match.region);
+            region->owner_arena->del(region);
+#else
             flooder.region_arena.del(region->match.region);
             flooder.region_arena.del(region);
 #endif
@@ -535,7 +557,9 @@ void Mwpm::shatter_blossom_and_extract_match_edges(GraphFillRegion *region, std:
         // Region with no blossom children matched to boundary
         // No shattering required, so just return MatchingResult from this match.
         match_edges.push_back(region->match.edge);
-#if !defined(USE_THREADS)
+#ifdef USE_THREADS
+        region->owner_arena->del(region);
+#else
         flooder.region_arena.del(region);
 #endif
         return;
@@ -552,6 +576,9 @@ void Mwpm::shatter_blossom_and_extract_match_edges(GraphFillRegion *region, std:
 
 void Mwpm::create_detection_event(DetectorNode *node) {
     auto region = flooder.region_arena.alloc_default_constructed();
+#ifdef USE_THREADS
+    region->owner_arena = &flooder.region_arena;
+#endif
     auto alt_tree_node = node_arena.alloc_unconstructed();
     new (alt_tree_node) AltTreeNode(region);
     region->alt_tree_node = alt_tree_node;
@@ -603,29 +630,14 @@ void Mwpm::extract_paths_from_match_edges(
 
 #ifdef USE_THREADS
 // Prepare the flooder to solve task
-void Mwpm::prepare_for_task(int shot, Task* t) {
+void Mwpm::prepare_for_task(Task* t, int shot, std::vector<int> node_mask) {
     flooder.current_shot = shot;
-    // flooder.current_task = t->task_id;
     task = t;
-    // active_partitions.clear();
-    // active_partitions.insert(t->p);
-    // if (!task->is_fusion) {
-    //     if (DEBUG)
-    //         std::cout << "  DEBUG: Thread " << tid << " solver preparing to solve partition "
-    //                   << t->p << std::endl;
-    //     for (DetectorNode& node : flooder.graph.nodes)
-    //         if (node.partition == t->p && !node.is_cross_partition)
-    //             node.is_active = tid;
-    // } else {
-    //     // active_partitions.insert(t->pv);
-    //     if (DEBUG)
-    //         std::cout << "  DEBUG: Thread " << tid << " solver preparing for task "
-    //                   << t->p << " and " << t->pv << std::endl;
-    //     for (DetectorNode& node : flooder.graph.nodes)
-    //         if ((node.partition == t->p && !node.is_cross_partition) ||
-    //             (node.partition == t->pv))
-    //             node.is_active = tid;
-    // }
+    if (t->is_fusion) {
+        for (auto index : node_mask) {
+            flooder.graph.nodes[index].shot_marker = shot;
+        }
+    }
 }
 #endif
 

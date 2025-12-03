@@ -31,12 +31,9 @@
 #include <shmem.h>
 #endif
 
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
 #include "../config_parallel.h"
 #include "../diagram/mwpm_diagram.h"
-#endif
-
-#ifdef USE_THREADS
 #include <omp.h>
 #include <chrono>
 // ===============
@@ -52,11 +49,11 @@ int main_predict(int argc, const char **argv) {
             "--out_format",
             "--dem",
             "--enable_correlations"
-#if defined(ENABLE_FUSION)
+#ifdef USE_THREADS
 // ===============
             , "--rounds_per_partition",
             "--draw_frames",
-            "--parallel"
+            "--use_threads"
 // ===============
 #endif
         },
@@ -75,15 +72,11 @@ int main_predict(int argc, const char **argv) {
     bool append_obs = stim::find_bool_argument("--in_includes_appended_observables", argc, argv);
     bool enable_correlations = stim::find_bool_argument("--enable_correlations", argc, argv);
 
-#if defined(ENABLE_FUSION)
+#ifdef USE_THREADS
 // ===============
     config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
-#if defined(USE_THREADS) || defined(USE_SHMEM)
-    bool parallel = stim::find_bool_argument("--parallel", argc, argv);
-#else
-    bool parallel = false;
-#endif
+    bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);
 // ===============
 #endif
 
@@ -98,67 +91,72 @@ int main_predict(int argc, const char **argv) {
 
     pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
 
+#ifdef USE_THREADS
+    auto decoding_unit = pm::detector_error_model_to_decoding_unit(
+        dem,
+        num_buckets,
+        /*ensure_search_flooder_included=*/enable_correlations,
+        /*enable_correlations=*/enable_correlations);
+    decoding_unit.build_tasks_for_round_partitioning();
+#else
     auto mwpm = pm::detector_error_model_to_mwpm(
         dem,
         num_buckets,
         /*ensure_search_flooder_included=*/enable_correlations,
         /*enable_correlations=*/enable_correlations);
+#endif
 
 #ifdef USE_THREADS
 // ===============
-    int num_threads = omp_get_max_threads();
-    if (num_threads > mwpm.flooder.graph.num_partitions) {
-        omp_set_num_threads(mwpm.flooder.graph.num_partitions);
-        num_threads = mwpm.flooder.graph.num_partitions;
+    int num_threads = decoding_unit.partitions.size();
+    int max_threads = omp_get_max_threads();
+    if (num_threads > max_threads) {
+        num_threads = max_threads;
     }
-    // pm::tasks.resize(static_cast<size_t>(mwpm.flooder.graph.num_partitions));
-    // pm::partitions_task_id.resize(static_cast<size_t>(mwpm.flooder.graph.num_partitions));
-    build_thread_solvers(
-        mwpm,
+    omp_set_num_threads(num_threads); // For one decoding unit at a time...
+    decoding_unit.build_solvers(
         /*ensure_search_flooder_included=*/enable_correlations,
         /*enable_correlations=*/enable_correlations,
         num_threads
     );
-    pm::init_tasks(mwpm.flooder.graph.num_partitions);
+    auto &mwpm = *decoding_unit.solvers[0];
     
-    auto coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
-    mwpm.coords = coords;
-    for (auto &s : pm::solvers)
-        s->coords = coords;
+    if (draw_frames) {
+        auto coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
+        for (auto &s : decoding_unit.solvers)
+            s->coords = coords;
+    }
 
     // pm::init_tasks(num_threads, mwpm.flooder.graph.num_partitions);
     // pm::init_task_queues(num_threads, mwpm.flooder.graph.num_partitions);
-#elif defined(ENABLE_FUSION)
-    mwpm.coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
-// ===============
 #endif
 
     stim::SparseShot sparse_shot;
     sparse_shot.clear();
     pm::ExtendedMatchingResult res(mwpm.flooder.graph.num_observables);
 
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
 // ===============
-    pm::setup_output_dirs(draw_frames, parallel);
+    pm::setup_output_dirs(draw_frames, use_threads);
     if (DEBUG) {
         output_detector_nodes(mwpm, true);
     }
 // ===============
 #endif
 
-#if defined(USE_THREADS) && !defined(USE_SHMEM)
+#ifdef USE_THREADS
 // ===============
     int i = 0;
     
-    using std::chrono::high_resolution_clock;
+    using std::chrono::steady_clock;
     using std::chrono::duration_cast;
     using std::chrono::duration;
     using std::chrono::milliseconds;
 
-    auto t1 = high_resolution_clock::now();
+    auto t1 = steady_clock::now();
     while (reader->start_and_read_entire_record(sparse_shot)) {
-        if (parallel)
-            pm::decode_detection_events_in_parallel(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
+        if (use_threads)
+            pm::decode_detection_events_using_threads(decoding_unit, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
         else
             pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
         for (size_t k = 0; k < num_obs; k++) {
@@ -169,14 +167,12 @@ int main_predict(int argc, const char **argv) {
         res.reset();
         i++;
     }
-    auto t2 = high_resolution_clock::now();
 
+    auto t2 = steady_clock::now();
     /* Getting number of milliseconds as an integer. */
     auto ms_int = duration_cast<milliseconds>(t2 - t1);
-
     /* Getting number of milliseconds as a double. */
     duration<double, std::milli> ms_double = t2 - t1;
-
     std::cout << "Decoding time: " << ms_double.count() << "ms\n";
 
 #elif defined(USE_SHMEM)
@@ -359,8 +355,6 @@ int pm::main(int argc, const char **argv) {
 #ifdef USE_SHMEM
 // ===============
             shmem_init();
-            if (DEBUG)
-                std::cout << "DEBUG: PE " << shmem_my_pe() << " is running main_predict" << std::endl;
 // ===============
 #endif
             int status = main_predict(argc, argv);

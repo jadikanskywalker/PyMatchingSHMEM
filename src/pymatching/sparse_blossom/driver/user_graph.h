@@ -28,6 +28,10 @@
 #include "pymatching/sparse_blossom/search/search_graph.h"
 #include "stim.h"
 
+#ifdef USE_THREADS
+#include "pymatching/sparse_blossom/driver/parallel/decoding_unit.h"
+#endif
+
 namespace pm {
 
 const pm::weight_int NUM_DISTINCT_WEIGHTS = 1 << (sizeof(pm::weight_int) * 8 - 8);
@@ -52,19 +56,10 @@ class UserNode {
     size_t index_of_neighbor(size_t node) const;
     std::vector<UserNeighbor> neighbors;  /// The node's neighbors.
     bool is_boundary;
-#ifdef ENABLE_FUSION
-// ===============
-    // Optional structural metadata from the DEM for partitioning/layout.
-    //   Feilds are set from DETECTOR instruction coordinates.
-    //   Convention: round corresponds to the last DEM coordinate,
-    bool has_coords = false;
-    long round = -1;         // measurement round
-    double pos_x = 0.0;      // spatial x
-    double pos_y = 0.0;      // spatial y
-    long partition = -1;     // assigned partition
-    long vb = -1; // cross_partition nodes have edges to nodes in lower partitions
-    // std::set<std::tuple<size_t,long >> virtual_neighbors; 
-// ===============
+#ifdef USE_THREADS
+    double x, y, round;
+    int p = -1;
+    int vb = -1;
 #endif
 };
 
@@ -79,9 +74,11 @@ class UserGraph {
     std::set<size_t> boundary_nodes;
     bool loaded_from_dem_without_correlations = false;
 
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
 // ===============
-    long num_partitions;
+    std::vector<std::vector<int>> partitions;
+    std::vector<std::vector<int>> virtual_boundaries;
+    std::vector<std::vector<int>> virtual_boundary_partitions; // for each vb, list of partitions it connects
 // ===============
 #endif
 
@@ -135,12 +132,12 @@ class UserGraph {
         const BoundaryEdgeCallable& boundary_edge_func);
 #ifdef USE_THREADS
 // ===============
-    std::shared_ptr<pm::MatchingGraph> to_matching_graph(pm::weight_int num_distinct_weights);
-    std::shared_ptr<MatchingGraph> to_decoding_unit(pm::weight_int num_distinct_weights);
+    // std::shared_ptr<pm::MatchingGraph> to_matching_graph(pm::weight_int num_distinct_weights);
+    DecodingUnit to_decoding_unit(pm::weight_int num_distinct_weights);
 // ===============
-#else
-    pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);
 #endif
+    pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);
+
     pm::SearchGraph to_search_graph(pm::weight_int num_distinct_weights);
     pm::Mwpm to_mwpm(pm::weight_int num_distinct_weights, bool ensure_search_graph_included);
     void update_mwpm();
@@ -152,6 +149,10 @@ class UserGraph {
     void get_nodes_on_shortest_path_from_source(size_t src, size_t dst, std::vector<size_t>& out_nodes);
     void populate_implied_edge_weights(
         std::map<std::pair<size_t, size_t>, std::map<std::pair<size_t, size_t>, double>>& joint_probabilites);
+
+#ifdef USE_THREADS
+    void partition_nodes_by_round(const stim::DetectorErrorModel& dem);
+#endif
 
    private:
     pm::Mwpm _mwpm;
@@ -235,14 +236,10 @@ UserGraph detector_error_model_to_user_graph(
 #ifdef ENABLE_FUSION
 // ===============
 /// Annotates UserGraph nodes with coordinates from the DEM, if available.
-std::set<long> annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g);
-
-/// Partitions the UserGraph into chunks of M rounds
-///   Virtual node rule: for any cross-partition edge, the node in the higher partition is virtual.
-void partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds);
+// std::set<long> annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g);
 
 // Partitions 2d UserGraph by splitting vertically
-void partition_nodes_2d_vertical_split(pm::UserGraph& g, std::set<long> rounds);
+// void partition_nodes_2d_vertical_split(pm::UserGraph& g, std::set<long> rounds);
 // ===============
 #endif
 

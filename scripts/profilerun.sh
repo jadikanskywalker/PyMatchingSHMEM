@@ -6,8 +6,7 @@
 # module load intel-oneapi-compilers
 # module load intel-oneapi-mpi
 
-rm -rf logs/vtune_result.*
-rm logs/vtune_test_topdown.csv
+rm -r run/logs/
 
 export SHMEM_OFI_PROVIDER=ofi_rxm
 
@@ -48,8 +47,8 @@ fi
 
 stim gen \
     --rounds=$rounds \
-    --distance=7 \
-    --after_clifford_depolarization=0.001 \
+    --distance=21 \
+    --after_clifford_depolarization=0.01 \
     --code surface_code \
     --task rotated_memory_x \
     > circuit.stim
@@ -136,7 +135,7 @@ if [ $ppn -le 0 ]
         --out predicted_obs_flips__with_shmem.01 \
         --out_format 01 \
         --rounds_per_partition $M \
-        --parallel \
+        --use_threads \
         > log_parallel.out
 else
     oshrun --hostfile hostfile.txt -N $ppn \

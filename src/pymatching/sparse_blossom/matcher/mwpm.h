@@ -52,9 +52,7 @@ struct Mwpm {
 #endif
 
 #ifdef USE_THREADS
-    Task* task;
-    // Set of active partitions. Should have 1 for partition solving, 2 for fusing
-    // std::set<long> active_partitions;
+    Task* task{ nullptr };
 #endif
 
     Mwpm();
@@ -96,13 +94,7 @@ struct Mwpm {
 #ifdef USE_THREADS
     // Removes matchings to virtual boundaries, turning matched regions into alternating trees
     void unmatch_virtual_boundaries_between_partitions();
-    // Sets up internal variables for single partition solving
-    // void prepare_for_solve_partition(int tid, Task* task);
-    // Sets up internal variables for fusion
-    //   Assumes the flooder has intermediate solution states for p1 and p2, including:
-    //     - matched GraphFillRegions
-    //     - DetectorNode ephermeral states
-    void prepare_for_task(int shot, Task* task);
+    void prepare_for_task(Task* task, int shot, std::vector<int> node_mask);
 #endif
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_matches(GraphFillRegion* region, MatchingResult& res);
     MatchingResult shatter_blossom_and_extract_matches(GraphFillRegion* region);

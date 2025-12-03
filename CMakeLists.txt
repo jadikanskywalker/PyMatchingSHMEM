@@ -23,7 +23,7 @@ endif()
 
 if(ENABLE_FUSION)
     if(_enable_fusion_forced_by_shmem)
-        message(STATUS "ENABLE_FUSION enabled (required by USE_SHMEM)")
+        message(STATUS "ENABLE_FUSION enabled (required by USE_THREADS & USE_SHMEM)")
     else()
         message(STATUS "Compiling with ENABLE_FUSION enabled")
     endif()
@@ -93,6 +93,13 @@ set(SOURCE_FILES_NO_MAIN
         src/pymatching/sparse_blossom/driver/user_graph.cc
         src/pymatching/rand/rand_gen.cc
         )
+
+# Add decoding_unit.cc only if USE_THREADS=ON
+if(USE_THREADS)
+    list(APPEND SOURCE_FILES_NO_MAIN
+        src/pymatching/sparse_blossom/driver/parallel/decoding_unit.cc
+    )
+endif()
 
 set(TEST_FILES
         src/pymatching/sparse_blossom/driver/namespaced_main.test.cc

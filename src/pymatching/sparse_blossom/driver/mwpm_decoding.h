@@ -21,7 +21,7 @@
 
 #ifdef USE_THREADS
 #include <memory>
-#include "pymatching/sparse_blossom/driver/parallel/decoding_task.h"
+#include "pymatching/sparse_blossom/driver/parallel/decoding_unit.h"
 #endif
 
 namespace pm {
@@ -57,6 +57,14 @@ Mwpm detector_error_model_to_mwpm(
     pm::weight_int num_distinct_weights,
     bool ensure_search_flooder_included = false,
     bool enable_correlations = false);
+
+#ifdef USE_THREADS
+DecodingUnit detector_error_model_to_decoding_unit(
+    const stim::DetectorErrorModel& detector_error_model,
+    pm::weight_int num_distinct_weights,
+    bool ensure_search_flooder_included = false,
+    bool enable_correlations = false);
+#endif
 
 MatchingResult decode_detection_events_for_up_to_64_observables(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, bool edge_correlations);
@@ -100,37 +108,11 @@ void output_detection_events(pm::Mwpm& mwpm, const std::vector<uint64_t>& detect
 #endif
 
 #ifdef USE_THREADS
-void output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, int shot, bool parallel=false);
-void draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int shot, int frame_number, bool parallel=false, int thread=-1);
-// ===============
-// Initially, a task is created for each partition and tasks are
-//   assigned to thread partition%num_threads.
-// Fusion collapses tasks leftward. If p3 & p4 are fused, p4 is
-//   added to p3's task and p4's task is marked FINISHED.
-// extern std::vector<Task> tasks;
-// extern std::vector<int> partitions_task_id; // Convenience store of which task own each partition
-// extern std::vector<std::queue<int>> partition_task_queues;
-// extern std::vector<std::deque<int>> fusion_task_deques;
-// Stable per-thread solver instances. Use shared_ptr to manage lifetime safely across threads.
-//
-// extern WorkStealingDeque task_deque;
-extern std::vector<Task> tasks;
-extern std::vector<long> step_sizes;
-extern std::vector<std::shared_ptr<Mwpm>> solvers;
-// Build and assign one solver per thread from a DEM, storing stable instances and wiring `solvers`.
-void build_thread_solvers(
-    pm::Mwpm& mwpm,
-    bool ensure_search_flooder_included,
-    bool enable_correlations,
-    int num_threads);
-void init_tasks(int num_partitions);
-// void reset_tasks(int num_threads, int num_partitions);
-// void init_task_queues(int num_threads, int num_partitions);
-#endif
+void output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, bool parallel=false);
+void draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int frame_number, bool parallel=false, int thread=-1);
 
-#if defined(USE_THREADS) || defined(USE_SHMEM)
-void decode_detection_events_in_parallel(
-    pm::Mwpm& mwpm,
+void decode_detection_events_using_threads(
+    DecodingUnit unit,
     const std::vector<uint64_t>& detection_events,
     uint8_t* obs_begin_ptr,
     pm::total_weight_int& weight,

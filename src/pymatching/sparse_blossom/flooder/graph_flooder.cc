@@ -98,58 +98,11 @@ GraphFlooder::GraphFlooder(GraphFlooder &&flooder) noexcept
 
 #ifdef USE_THREADS
 // ===============
-inline bool GraphFlooder::is_active(DetectorNode *node) const {
-    if (node->is_cross_partition && node->shot_marker != current_shot) {
+inline bool GraphFlooder::is_active(const DetectorNode *node) const {
+    if (node->vb >= 0 && node->shot_marker != current_shot) {
         return false;
     }
     return true;
-    // if (current_shot == node->shot_marker && current_task == node->task_marker) {
-    //     return node->is_active;
-    // } else {
-    //     if (!node->is_cross_partition) {
-    //         node->is_active = true;
-    //     } else if (/* node is cross partition && */ !fusing) {
-    //         node->is_active = false;
-    //     } else /* node is cross partition and fusing */ {
-    //         node->is_active = true;
-    //         for (int vb_node : node->vbs) {
-    //             bool found = false;
-    //             for (int vb_fusing : vbs) {
-    //                 if (vb_node < vb_fusing) {
-    //                     break;
-    //                 } else if (vb_node == vb_fusing) {
-    //                     found = true;
-    //                     break;
-    //                 }
-    //             }
-    //             if (!found) {
-    //                 node->is_active = false;
-    //                 break;
-    //             }
-    //         }
-    //         if (DEBUG) {
-    //             std::cout << "  DEBUG: T" << omp_get_thread_num() << " setting node " << node << " is_active = " << node->is_active << std::endl
-    //                       << "    vbs: ";
-    //             for (int vb : vbs) std::cout << vb;
-    //             std::cout << ";  node->vbs: ";
-    //             for (int vb : node->vbs) std::cout << vb;
-    //             std::cout << std::endl;
-    //         }
-    //     }
-    //     node->shot_marker = current_shot;
-    //     node->task_marker = current_task;
-    //     return node->is_active;
-    // }
-    // Warn if another thread owns this node and it's not cross-partition
-    // if (node->is_active >= 0) {
-    //     std::cout << "  ERROR: node " << node << " is active in different thread" << std::endl
-    //               << "    current_tid: " << current_tid << "  node->is_active: " << node->is_active
-    //               << "  node->is_cross_partition: " << node->is_cross_partition << std::endl;
-    // }
-}
-#elif defined(ENABLE_FUSION)
-inline bool is_active(DetectorNode *node) {
-    return node->is_active >= 0;
 }
 // ===============
 #endif
@@ -194,7 +147,7 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_g
 #ifdef ENABLE_FUSION
 // ===============
         if (!is_active(neighbor)) {// skip inactive neighbors
-            if (!neighbor->is_cross_partition)
+            if (!(neighbor->vb >= 0))
                 std::cout << "    NOTE2: neighbor inactive not cross partition (not growing)" << std::endl;
             continue;
         }
@@ -245,10 +198,10 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growi
 // ===============
         // Treat virtual nodes like boundary
         if (!is_active(neighbor)) {
-            if (!neighbor->is_cross_partition) {
+            if (!(neighbor->vb >= 0)) {
                 std::cout << "    NOTE3: neighbor inactive not cross partition (growing)" << std::endl
-                          << "      node: " << &detector_node << "  " << "  partition: " << detector_node.partition
-                          << "  is_active: " << detector_node.is_active << "  is_cross_partition: " << detector_node.is_cross_partition
+                          << "      node: " << &detector_node << "  " << "  vb: " << detector_node.vb
+                          << "  shot_marker: " << detector_node.shot_marker << "  flooder.current_shot: " << current_shot
                           << std::endl;
 
             }
@@ -470,6 +423,9 @@ MwpmEvent GraphFlooder::do_blossom_shattering(GraphFillRegion &region) {
 
 GraphFillRegion *GraphFlooder::create_blossom(std::vector<RegionEdge> &contained_regions) {
     auto blossom_region = region_arena.alloc_default_constructed();
+#ifdef USE_THREADS
+    blossom_region->owner_arena = &region_arena;
+#endif
     blossom_region->radius = VaryingCT::growing_varying_with_zero_distance_at_time(queue.cur_time);
     blossom_region->blossom_children = std::move(contained_regions);
     for (auto &region_edge : blossom_region->blossom_children) {
@@ -572,7 +528,7 @@ MwpmEvent GraphFlooder::do_look_at_node_event(DetectorNode &node) {
 #ifdef ENABLE_FUSION
 // ===============
         else if (!is_active(node.neighbors[next.first])) { // treat virtual nodes like boundary
-            if (!node.neighbors[next.first]->is_cross_partition) {
+            if (!(node.neighbors[next.first]->vb >= 0)) {
                 std::cout << "ERROR: do_region_hit_virtual_boundary_interaction -> node not cross-partition" << std::endl;
             }
             return do_region_hit_virtual_boundary_interaction(node, next.first);

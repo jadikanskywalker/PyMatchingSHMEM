@@ -14,7 +14,7 @@ else
     ppn=$1
     nthreads=$2
     shots=$3
-    rounds=$4
+    rounds=$(($4-1))
     M=$5
 fi
 
@@ -55,7 +55,7 @@ fi
 
 stim gen \
     --rounds=$rounds \
-    --distance=7 \
+    --distance=21 \
     --after_clifford_depolarization=0.001 \
     --code surface_code \
     --task rotated_memory_x \
@@ -124,7 +124,7 @@ if [ $ppn -le 0 ]
         --out predicted_obs_flips__with_shmem.01 \
         --out_format 01 \
         --rounds_per_partition $M \
-        --parallel \
+        --use_threads \
         > log_parallel.out
 else
     oshrun --hostfile hostfile.txt -N $ppn \

@@ -69,12 +69,8 @@ class DetectorNode {
 
 #ifdef ENABLE_FUSION
 // ===============
-    // long partition;  // partition of node
     // bool is_cross_partition; // whether node connect to directly lower partitions
-    bool is_cross_partition;
-    int vb;
-    // std::vector<int> vbs; // birtual boundaries this node belongs to
-    // bool is_active = true; // tid of what threads this belongs to
+    int vb = -1; // if node is cross partition, virtual boundary it belongs to
     int shot_marker = -1;
 // ===============
 #endif
