@@ -26,15 +26,18 @@ enum Status { BUSY, FREE };
 
 struct Task {
 private:
-    std::atomic<Status> status{ Status::FREE };
-    int shot_marker{ -1 };
+    std::atomic<int> status{ 0 };
+    // int shot_marker{ -1 };
 
 public:
     const int task_id;
-    const bool is_fusion;
     // id of partition to solve or virtual boundary to fuse
     const int part;
+    const bool is_fusion;
 
+    const int vb_left, vb_right; // DEPENDENT ON ROUND PARTITIONING
+
+    int child_bit;
     Task* left_child{ nullptr };
     Task* right_child{ nullptr };
     Task* parent{ nullptr };
@@ -45,17 +48,26 @@ public:
     // Default construct with safe initial values.
     // Task() = default;
     // Task(int task_id, long partition) : task_id(task_id), p(partition), pv(partition), leftmost_p(partition), rightmost_p(partition) {};
-    Task(int task_id, int partition) : task_id(task_id), part(partition), is_fusion(false) {}
+    Task(int task_id, int partition) : task_id(task_id), part(partition), is_fusion(false),
+        vb_left(partition-1),  vb_right(partition) // DEPENDENT ON ROUND PARTITIONING
+    {
+    }
     Task(int task_id, int vb, Task* left_child, Task* right_child) 
-     : task_id(task_id), part(vb), left_child(left_child), right_child(right_child), is_fusion(true) {
+     : task_id(task_id), part(vb), left_child(left_child), right_child(right_child), is_fusion(true),
+        vb_left(left_child->vb_left), vb_right(right_child->vb_right) // DEPENDENT ON ROUND PARTITIONING
+    {
         left_child->parent = this;
+        left_child->child_bit = 1;
         right_child->parent = this;
-     }
+        right_child->child_bit = 2;
+    }
     // Non-copyable due to atomic members.
     Task(const Task&) = delete;
     Task& operator=(const Task&) = delete;
     Task(Task&& other) noexcept
-     : task_id(other.task_id), part(other.part), is_fusion(other.is_fusion) {
+     : task_id(other.task_id), part(other.part), is_fusion(other.is_fusion),
+        vb_left(other.vb_left), vb_right(other.vb_right)
+    {
         status.store(other.status.load());
     }
     Task& operator=(Task&& other) noexcept {
@@ -69,53 +81,54 @@ public:
         regions_matched_to_virtual_boundary.clear();
         if (is_fusion) {
             for (auto& region : left_child->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == part)
-                    regions_to_unmatch.emplace_back(region);
+                if (region->match.edge.loc_to->vb == part)
+                    regions_to_unmatch.push_back(region);
                 else
-                    regions_matched_to_virtual_boundary.emplace_back(region);
+                    regions_matched_to_virtual_boundary.push_back(region);
             }
             for (auto& region : right_child->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == part)
-                    regions_to_unmatch.emplace_back(region);
+                if (region->match.edge.loc_to->vb == part)
+                    regions_to_unmatch.push_back(region);
                 else
-                    regions_matched_to_virtual_boundary.emplace_back(region);
+                    regions_matched_to_virtual_boundary.push_back(region);
             }
-            left_child->reset();
-            right_child->reset();
         }
     };
 
     /* Sychnorization Methods */
     void mark_solved(int shot) {
-        shot_marker = shot;
-        status.store(FREE, std::memory_order_release);
+        // shot_marker = shot;
+        status.store(0, std::memory_order_release);
     }
 
-    bool is_solved(int shot) {
-        return shot_marker == shot;
-    }
+    // bool is_solved(int shot) {
+    //     return shot_marker == shot;
+    // }
 
     // For fusion task, checks if child tasks are solved
-    bool is_ready(int shot) {
-        if (is_fusion) {
-            return (left_child->is_solved(shot) && right_child->is_solved(shot));
-        } else {
-            return shot_marker < shot;
-        }
-    }
+    // bool is_ready(int shot) {
+    //     if (is_fusion) {
+    //         return (left_child->is_solved(shot) && right_child->is_solved(shot));
+    //     } else {
+    //         return true;
+    //     //     return shot_marker < shot;
+    //     }
+    // }
 
     // Only child tasks should try to steal their parent
     // Child tasks must mark themselves as SOLVED before trying to steal
-    bool try_to_steal(int shot) {
-        if (!is_ready(shot)) {
-            return false;
-        }
-        Status expected = FREE;
-        return status.compare_exchange_strong(expected, BUSY, std::memory_order_acq_rel);
+    bool try_to_steal_leaf(int shot) {
+        int expected = 0;
+        return status.compare_exchange_strong(expected, 1, std::memory_order_acq_rel);
     }
 
-    void reset() {
-        // ++shot_marker;
+    bool try_to_steal_parent() {
+        int old = parent->status.fetch_or(child_bit, std::memory_order_acq_rel);
+        if ((old | child_bit) == 3) {
+            return old != 3;
+        } else {
+            return false;
+        }
     }
 };
 

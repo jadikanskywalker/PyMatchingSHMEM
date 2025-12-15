@@ -19,7 +19,7 @@
 #include "pymatching/sparse_blossom/flooder/graph_fill_region.h"
 #include "pymatching/sparse_blossom/matcher/alternating_tree.h"
 
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
 #include "../config_parallel.h"
 #endif
 
@@ -75,7 +75,7 @@ void Mwpm::handle_tree_hitting_boundary(const RegionHitBoundaryEventData &event)
     flooder.set_region_frozen(*event.region);
 }
 
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
 void Mwpm::handle_tree_hitting_virtual_boundary(const RegionHitVirtualBoundaryEventData &event) {
     auto node = event.region->alt_tree_node;
     node->become_root();
@@ -85,9 +85,12 @@ void Mwpm::handle_tree_hitting_virtual_boundary(const RegionHitVirtualBoundaryEv
     // Now match the event region to the boundary and freeze
     event.region->match = Match{nullptr, event.edge};
     flooder.set_region_frozen(*event.region);
-#ifdef USE_THREADS
+
+    // Defensive: ensure the event region no longer references an AltTreeNode.
+    // In rare interleavings, the root may not have had its pointer nulled by shattering.
+    event.region->alt_tree_node = nullptr;
+
     task->regions_matched_to_virtual_boundary.push_back(event.region);
-#endif
 
     if (DEBUG) {
         std::cout << "  DEBUG: tree hitting virtual boundary" << std::endl
@@ -101,7 +104,7 @@ void Mwpm::handle_tree_hitting_boundary_match(
     GraphFillRegion *unmatched_region,
     GraphFillRegion *matched_region,
     const CompressedEdge &unmatched_to_matched_edge) {
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
     if (DEBUG) {
         std::cout << "  DEBUG: tree hitting boundary match" << std::endl
                   << "    matched_region: " << matched_region << std::endl
@@ -117,12 +120,11 @@ void Mwpm::handle_tree_hitting_boundary_match(
     shatter_descendants_into_matches_and_freeze(*alt_tree_node);
 }
 
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
 void Mwpm::handle_tree_hitting_virtual_boundary_match(
     GraphFillRegion *unmatched_region,
     GraphFillRegion *matched_region,
     const CompressedEdge &unmatched_to_matched_edge) {
-#ifdef ENABLE_FUSION
     if (DEBUG) {
         std::cout << "  DEBUG: tree hitting virtual boundary match" << std::endl
                   << "    matched_region: " << matched_region << std::endl
@@ -134,21 +136,22 @@ void Mwpm::handle_tree_hitting_virtual_boundary_match(
         std::cout << "    matched_region->match.edge.loc_to: " << matched_region->match.edge.loc_to << std::endl
                   << "    matched_region->match.edge.loc_from: " << matched_region->match.edge.loc_from << std::endl;
     }
-#endif
     auto &alt_tree_node = unmatched_region->alt_tree_node;
     unmatched_region->add_match(matched_region, unmatched_to_matched_edge);
     flooder.set_region_frozen(*unmatched_region);
     alt_tree_node->become_root();
     shatter_descendants_into_matches_and_freeze(*alt_tree_node);
-    // matched_region no longer matched to virtual boundary,
-    // remove it fromtask->regions_matched_to_virtual_boundary
-#ifdef USE_THREADS
-    auto it = std::find(task->regions_matched_to_virtual_boundary.begin(),
-                        task->regions_matched_to_virtual_boundary.end(), matched_region);
-    if (it != task->regions_matched_to_virtual_boundary.end()) {
-        task->regions_matched_to_virtual_boundary.erase(it);
+    // Defensive: ensure no lingering alt-tree back-references remain.
+    unmatched_region->alt_tree_node = nullptr;
+    matched_region->alt_tree_node = nullptr;
+    // matched_region no longer matched to virtual boundary
+    for (int i=0; i < task->regions_matched_to_virtual_boundary.size(); ++i) {
+        if (task->regions_matched_to_virtual_boundary[i] == matched_region) {
+            task->regions_matched_to_virtual_boundary[i] = task->regions_matched_to_virtual_boundary.back();
+            task->regions_matched_to_virtual_boundary.pop_back();
+            break;
+        }
     }
-#endif
 }
 #endif
 
@@ -366,7 +369,7 @@ void Mwpm::handle_region_hit_region(const MwpmEvent event) {
                 handle_tree_hitting_virtual_boundary_match(d.region2, d.region1, d.edge.reversed());
             }
 #else
-            handle_tree_hitting_boundary_match(d.region2, d.region1, d.edge);
+            handle_tree_hitting_boundary_match(d.region2, d.region1, d.edge.reversed());
 #endif
         }
     }
@@ -379,7 +382,7 @@ void Mwpm::process_event(const MwpmEvent &event) {
         case REGION_HIT_BOUNDARY:
             handle_tree_hitting_boundary(event.region_hit_boundary_event_data);
             break;
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
         case REGION_HIT_VIRTUAL_BOUNDARY:
             handle_tree_hitting_virtual_boundary(event.region_hit_virtual_boundary_event_data);
             break;
@@ -400,7 +403,7 @@ void Mwpm::unmatch_virtual_boundaries_between_partitions() {
     if (!task || !task->is_fusion)
         return;
     if (DEBUG)
-        std::cout << "  DEBUG: unmatching regions_one" << std::endl;
+        std::cout << "  DEBUG: unmatching regions_to_unmatch" << std::endl;
     for (GraphFillRegion *matched_region: task->regions_to_unmatch) {
         CompressedEdge match_edge = matched_region->match.edge;
         // TODO: FIX THIS IF
@@ -630,14 +633,16 @@ void Mwpm::extract_paths_from_match_edges(
 
 #ifdef USE_THREADS
 // Prepare the flooder to solve task
-void Mwpm::prepare_for_task(Task* t, int shot, std::vector<int> node_mask) {
+void Mwpm::prepare_for_task(Task* t, int shot) {
     flooder.current_shot = shot;
+    flooder.vb_left = t->vb_left; // DEPENDENT ON ROUND PARTITIONING
+    flooder.vb_right = t->vb_right; // DEPENDENT ON ROUND PARTITIONING
     task = t;
-    if (t->is_fusion) {
-        for (auto index : node_mask) {
-            flooder.graph.nodes[index].shot_marker = shot;
-        }
-    }
+    // if (t->is_fusion) {
+    //     for (auto index : node_mask) {
+    //         flooder.graph.nodes[index].shot_marker = shot;
+    //     }
+    // }
 }
 #endif
 

@@ -14,32 +14,14 @@
 #include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
 #include "pymatching/sparse_blossom/driver/parallel/decoding_unit.h"
 
-// Build per-thread solvers directly from a DEM by constructing a UserGraph once
-// and producing independent Mwpm instances via to_mwpm for each thread.
-// (Assumes first mwpm has already been built)
-void DecodingUnit::build_solvers(
-    bool ensure_search_flooder_included,
-    bool enable_correlations,
-    int num_threads) {
-    if (num_threads < 1)
-        return;
-    if (ensure_search_flooder_included || enable_correlations)
-        throw std::invalid_argument("Correlations and SearchFlooder are not yet supported with threads");
-    solvers.clear();
-    solvers.reserve(static_cast<size_t>(num_threads));
-    for (int t = 0; t < num_threads; ++t) {
-        // Each solver shares the same MatchingGraph via shared_ptr.
-        solvers.emplace_back(std::make_shared<pm::Mwpm>(pm::GraphFlooder(graph_ptr)));
-        solvers[t]->flooder.sync_negative_weight_observables_and_detection_events();
-    }
-}
+#include <omp.h>
 
 // Builds balanced fusion tree assuming ruond-based partitioning
 void DecodingUnit::build_tasks_for_round_partitioning() {
     if (DEBUG) {
         std::cout << "DEBUG: initializing tasks" << std::endl;
     }
-    int num_partitions = partitions.size();
+    // int num_partitions = partitions.size();
     // Build a full fusion tree: at most ~2*N tasks. Reserve to keep element addresses stable.
     tasks = std::make_shared<std::vector<Task>>();
     // step_sizes.clear();
@@ -100,10 +82,79 @@ void DecodingUnit::build_tasks_for_round_partitioning() {
         std::cout << "DEBUG:" << std::endl;
         for (Task& t : *tasks) {
             std::cout << "--part: " << t.part << std::endl
+                      << "  vb_left: " << t.vb_left << std::endl
+                      << "  vb_right: " << t.vb_right << std::endl
                       << "  is_fusion: " << t.is_fusion << std::endl
+                      << "  child_bit: " << t.child_bit << std::endl
                       << "  left_child: " << t.left_child << std::endl
                       << "  right_child: " << t.right_child << std::endl
                       << "  parent: " << t.parent << std::endl;
         }
+    }
+}
+
+// Build per-thread solvers directly from a DEM by constructing a UserGraph once
+// and producing independent Mwpm instances via to_mwpm for each thread.
+// (Assumes first mwpm has already been built)
+void DecodingUnit::build_solvers(
+    bool ensure_search_flooder_included,
+    bool enable_correlations,
+    int num_threads) {
+    if (num_threads < 1)
+        return;
+    if (ensure_search_flooder_included || enable_correlations)
+        throw std::invalid_argument("Correlations and SearchFlooder are not yet supported with threads");
+    solvers.clear();
+    solvers.reserve(static_cast<size_t>(num_threads));
+    for (int t = 0; t < num_threads; ++t) {
+        // Each solver shares the same MatchingGraph via shared_ptr.
+        solvers.emplace_back(std::make_shared<pm::Mwpm>(pm::GraphFlooder(graph_ptr)));
+        solvers[t]->flooder.sync_negative_weight_observables_and_detection_events();
+    }
+}
+
+// Assumes round-based partitioning and ascending detection_events
+void DecodingUnit::partition_detection_events(const std::vector<uint64_t>& detection_events) {
+    hits.clear();
+    for (auto det : detection_events) {
+        int part_id = node_part_id[det];
+        if (part_id >= 0) { // partition
+            hits.partition_hits[part_id].push_back(det);
+        } else {
+            hits.virtual_boundary_hits[-1*part_id-1].push_back(det);
+        }
+    }
+    if (DEBUG) {
+        int i = 0;
+        for (auto part : hits.partition_hits) {
+            std::cout << "Part" << i << " hits: ";
+            for (int det : part) {
+                std::cout << det << "  ";
+            }
+            std::cout << std::endl;
+            i++;
+        }
+        for (auto part : hits.virtual_boundary_hits) {
+            std::cout << "VB" << i << " hits: ";
+            for (int det : part) {
+                std::cout << det << "  ";
+            }
+            std::cout << std::endl;
+            i++;
+        }
+    }
+}
+
+void DecodingUnit::solve_task(Task* task, int tid, int shot, int draw_frames) {
+    task->setup();
+    pm::Mwpm& solver = *solvers[tid];
+    solver.prepare_for_task(task, shot);
+    if (DEBUG && tid==0) {
+        output_detector_nodes(solver, true);
+    }
+    auto& hitsref = (task->is_fusion) ? hits.virtual_boundary_hits[task->part] : hits.partition_hits[task->part];
+    pm::process_timeline_until_completion(solver, hitsref, draw_frames, true, tid);
+    if (DEBUG && tid==0) {
+        output_solution_state(solver, hitsref, true);
     }
 }

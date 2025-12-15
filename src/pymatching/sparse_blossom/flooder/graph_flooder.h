@@ -69,6 +69,7 @@ struct GraphFlooder {
 
 #ifdef USE_THREADS
     int current_shot=-1;
+    int vb_left, vb_right;
 #endif
 
     GraphFlooder();
@@ -93,7 +94,7 @@ struct GraphFlooder {
     MwpmEvent do_region_shrinking(GraphFillRegion& shrinking_region);
     pm::MwpmEvent do_neighbor_interaction(DetectorNode& src, size_t src_to_dst_index, DetectorNode& dst);
     pm::MwpmEvent do_region_hit_boundary_interaction(DetectorNode& node);
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
     // Treat a specific neighbor edge as a boundary (used for virtual boundaries between partitions)
     pm::MwpmEvent do_region_hit_virtual_boundary_interaction(DetectorNode& node, size_t edge_index);
 #endif

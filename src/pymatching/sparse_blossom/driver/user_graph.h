@@ -76,9 +76,11 @@ class UserGraph {
 
 #ifdef USE_THREADS
 // ===============
-    std::vector<std::vector<int>> partitions;
+    std::vector<int> node_part_id;
+    int num_partitions;
+//     std::vector<std::vector<int>> partitions;
     std::vector<std::vector<int>> virtual_boundaries;
-    std::vector<std::vector<int>> virtual_boundary_partitions; // for each vb, list of partitions it connects
+//     std::vector<std::vector<int>> virtual_boundary_partitions; // for each vb, list of partitions it connects
 // ===============
 #endif
 
@@ -133,7 +135,7 @@ class UserGraph {
 #ifdef USE_THREADS
 // ===============
     // std::shared_ptr<pm::MatchingGraph> to_matching_graph(pm::weight_int num_distinct_weights);
-    DecodingUnit to_decoding_unit(pm::weight_int num_distinct_weights);
+    std::vector<DecodingUnit> to_decoding_units(pm::weight_int num_distinct_weights);
 // ===============
 #endif
     pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);
@@ -233,7 +235,7 @@ UserGraph detector_error_model_to_user_graph(
     bool enable_correlations,
     pm::weight_int num_distinct_weights);
 
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
 // ===============
 /// Annotates UserGraph nodes with coordinates from the DEM, if available.
 // std::set<long> annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g);

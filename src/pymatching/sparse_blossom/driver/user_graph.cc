@@ -17,7 +17,7 @@
 #include "pymatching/rand/rand_gen.h"
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
 
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
 #include "../config_parallel.h"
 #endif
 
@@ -270,7 +270,7 @@ double pm::UserGraph::max_abs_weight() {
 }
 
 #ifdef USE_THREADS
-DecodingUnit pm::UserGraph::to_decoding_unit(pm::weight_int num_distinct_weights) {
+std::vector<DecodingUnit> pm::UserGraph::to_decoding_units(pm::weight_int num_distinct_weights) {
     std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
     pm::MatchingGraph& matching_graph = *matching_graph_ptr;
     double normalising_constant = to_matching_or_search_graph_helper(
@@ -304,9 +304,11 @@ DecodingUnit pm::UserGraph::to_decoding_unit(pm::weight_int num_distinct_weights
         }
     }
 
-    DecodingUnit unit(matching_graph_ptr, partitions, virtual_boundaries, virtual_boundary_partitions);
+    std::vector<DecodingUnit> units;
 
-    return unit;
+    units.emplace_back(matching_graph_ptr, node_part_id, num_partitions, virtual_boundaries.size());
+
+    return units;
 }
 #endif
 
@@ -364,7 +366,7 @@ pm::SearchGraph pm::UserGraph::to_search_graph(pm::weight_int num_distinct_weigh
 
     search_graph.convert_implied_weights(normalizing_constant);
 
-// #ifdef ENABLE_FUSION
+// #ifdef USE_THREADS
 // // ===============
 //     // Propagate partition and virtual metadata
 //     search_graph.num_partitions = num_partitions;
@@ -572,7 +574,7 @@ pm::UserGraph pm::detector_error_model_to_user_graph(
             });
         user_graph.loaded_from_dem_without_correlations = true;
     }
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
 // ===============
     // Default to partition nodes by round
     user_graph.partition_nodes_by_round(detector_error_model);
@@ -621,14 +623,15 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
     // M rounds per partition
     int M = config_parallel::M;
     // partition nodes
-    partitions.clear();
-    partitions.push_back((std::vector<int>){});
+    // partitions.clear();
+    // partitions.push_back((std::vector<int>){});
+    node_part_id.resize(num_nodes);
     virtual_boundaries.clear();
     virtual_boundaries.push_back((std::vector<int>){});
-    virtual_boundary_partitions.clear();
-    virtual_boundary_partitions.push_back((std::vector<int>){});
+    // virtual_boundary_partitions.clear();
+    // virtual_boundary_partitions.push_back((std::vector<int>){});
     int p = 0;
-    int vb = 0;
+    int vb = 1;
     double last_round = -1;
     bool p_or_vb = true; // true = p, false = vb
     int round_counter = 0;
@@ -650,28 +653,28 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
             round_counter++;
             if (round_counter == M) {
                 ++p;
-                partitions.push_back((std::vector<int>){});
+                // partitions.push_back((std::vector<int>){});
                 p_or_vb = false; // boundary
-                virtual_boundary_partitions[vb] = (std::vector<int>){(int)last_round, (int)coors[round_coor]};
+                // virtual_boundary_partitions[vb] = (std::vector<int>){(int)last_round, (int)coors[round_coor]};
             } else if (round_counter > M) {
                 round_counter = 0;
                 ++vb;
                 virtual_boundaries.push_back((std::vector<int>){});
-                virtual_boundary_partitions.push_back((std::vector<int>){});
-                p_or_vb = true;
+                // virtual_boundary_partitions.push_back((std::vector<int>){});
+                p_or_vb = true; // partition
             }
             last_round = coors[round_coor];
         }
         if (p_or_vb){
-            partitions[p].emplace_back(n);
+            node_part_id[n] = p;
         } else {
-            virtual_boundaries[vb].emplace_back(n);
+            node_part_id[n] = -vb;
+            virtual_boundaries[vb-1].push_back(n);
         }
     }
+    num_partitions = p+1;
 }
-#endif
 
-#ifdef ENABLE_FUSION
 // ===============
 // std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g) {
 //     // Query coordinates from stim. Map: det_id -> vector<double> of coords.

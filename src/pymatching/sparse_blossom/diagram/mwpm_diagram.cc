@@ -227,7 +227,7 @@ struct StateHelper {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
 #ifdef USE_THREADS
-            if (n.vb >= 0 && n.shot_marker != mwpm.flooder.current_shot) continue;
+            if (n.vb >= 0 && (n.vb <= mwpm.flooder.vb_left || n.vb >= mwpm.flooder.vb_right)) continue;
 #endif
             GraphFillRegion *r = n.region_that_arrived;
             while (r != nullptr) {
@@ -263,7 +263,7 @@ struct StateHelper {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
 #ifdef USE_THREADS
-            if (n.vb >= 0 && n.shot_marker != mwpm.flooder.current_shot)
+            if (n.vb >= 0 && (n.vb <= mwpm.flooder.vb_left || n.vb >= mwpm.flooder.vb_right))
                 continue;
 #endif
             if (n.region_that_arrived_top == nullptr) {

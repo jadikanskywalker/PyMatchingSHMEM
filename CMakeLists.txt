@@ -3,31 +3,12 @@ project(PyMatching2)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Feature flags
-# ENABLE_FUSION: enables partition-aware/fusion behavior in flooder/matcher
-#   USE_THREADS: enables OpenMP runtime paths and requires ENABLE_FUSION
-#     USE_SHMEM: enables OpenSHMEM runtime paths and requires ENABLE_FUSION,
-#                  can by combined with USE_THREADS for hybrid runs
-option(ENABLE_FUSION "Enable partition-aware/fusion behavior in flooder/matcher" OFF)
-option(USE_THREADS "Enable OpenMP runtime (requires ENABLE_FUSION)" OFF)
-option(USE_SHMEM "Enable OpenSHMEM runtime (requires ENABLE_FUSION)" ON)
+#   USE_THREADS: enables OpenMP runtime paths
+#     USE_SHMEM: enables OpenSHMEM runtime paths
+#                can by combined with USE_THREADS for hybrid runs
+option(USE_THREADS "Enable OpenMP runtime" ON)
+option(USE_SHMEM "Enable OpenSHMEM runtime" OFF)
 
-# Enforce dependency: USE_SHMEM implies ENABLE_FUSION
-set(_enable_fusion_forced_by_shmem OFF)
-if(USE_THREADS AND NOT ENABLE_FUSION)
-    set(ENABLE_FUSION ON)
-    set(_enable_fusion_forced_by_shmem ON)
-elseif(USE_SHMEM AND NOT ENABLE_FUSION)
-    set(ENABLE_FUSION ON)
-    set(_enable_fusion_forced_by_shmem ON)
-endif()
-
-if(ENABLE_FUSION)
-    if(_enable_fusion_forced_by_shmem)
-        message(STATUS "ENABLE_FUSION enabled (required by USE_THREADS & USE_SHMEM)")
-    else()
-        message(STATUS "Compiling with ENABLE_FUSION enabled")
-    endif()
-endif()
 if(USE_THREADS)
     message(STATUS "Compiling with USE_THREADS enabled")
     find_package(OpenMP REQUIRED)
@@ -73,6 +54,7 @@ endif ()
 
 set(SOURCE_FILES_NO_MAIN
         src/pymatching/sparse_blossom/driver/namespaced_main.cc
+        src/pymatching/sparse_blossom/driver/helpers/fast_b8_reader.cc
         src/pymatching/sparse_blossom/driver/mwpm_decoding.cc
         src/pymatching/sparse_blossom/flooder/graph.cc
         src/pymatching/sparse_blossom/flooder/detector_node.cc
@@ -97,6 +79,7 @@ set(SOURCE_FILES_NO_MAIN
 # Add decoding_unit.cc only if USE_THREADS=ON
 if(USE_THREADS)
     list(APPEND SOURCE_FILES_NO_MAIN
+        src/pymatching/sparse_blossom/driver/parallel/decoding_set.cc
         src/pymatching/sparse_blossom/driver/parallel/decoding_unit.cc
     )
 endif()
@@ -146,9 +129,6 @@ target_compile_options(pymatching PRIVATE ${ARCH_OPT})
 if (NOT (MSVC))
     target_link_options(pymatching PRIVATE -pthread ${ARCH_OPT})
 endif ()
-if(ENABLE_FUSION)
-    target_compile_definitions(pymatching PRIVATE ENABLE_FUSION)
-endif()
 if(USE_THREADS)
     target_compile_definitions(pymatching PRIVATE USE_THREADS)
     target_link_libraries(pymatching OpenMP::OpenMP_CXX)
@@ -168,9 +148,6 @@ if (NOT (MSVC))
 else ()
     target_link_options(pymatching_tests PRIVATE -fsanitize=address -fsanitize=undefined -coverage)
 endif ()
-if(ENABLE_FUSION)
-    target_compile_definitions(pymatching_tests PRIVATE ENABLE_FUSION)
-endif()
 if(USE_THREADS)
     target_compile_definitions(pymatching_tests PRIVATE USE_THREADS)
     target_link_libraries(pymatching_tests OpenMP::OpenMP_CXX)
@@ -185,9 +162,6 @@ target_compile_options(pymatching_perf PRIVATE ${ARCH_OPT})
 if (NOT (MSVC))
     target_link_options(pymatching_perf PRIVATE -pthread -O3)
 endif ()
-if(ENABLE_FUSION)
-    target_compile_definitions(pymatching_perf PRIVATE ENABLE_FUSION)
-endif()
 if(USE_THREADS)
     target_compile_definitions(pymatching_perf PRIVATE USE_THREADS)
     target_link_libraries(pymatching_perf OpenMP::OpenMP_CXX)
@@ -203,9 +177,6 @@ target_include_directories(libpymatching PUBLIC src)
 target_compile_options(libpymatching PRIVATE ${ARCH_OPT} -fPIC)
 if(NOT(MSVC))
     target_link_options(libpymatching PRIVATE -pthread -O3)
-endif()
-if(ENABLE_FUSION)
-    target_compile_definitions(libpymatching PUBLIC ENABLE_FUSION)
 endif()
 if(USE_THREADS)
     target_compile_definitions(libpymatching PRIVATE USE_THREADS)
@@ -226,9 +197,6 @@ IF(EXISTS ${CMAKE_CURRENT_LIST_DIR}/pybind11/CMakeLists.txt)
     pybind11_add_module(_cpp_pymatching ${PYTHON_API_FILES} ${SOURCE_FILES_NO_MAIN})
     target_link_libraries(_cpp_pymatching PRIVATE libstim)
     target_compile_options(_cpp_pymatching PRIVATE ${ARCH_OPT})
-    if(ENABLE_FUSION)
-        target_compile_definitions(_cpp_pymatching PRIVATE ENABLE_FUSION)
-    endif()
     if(USE_THREADS)
         target_compile_definitions(_cpp_pymatching PRIVATE USE_THREADS)
         target_link_libraries(_cpp_pymatching PRIVATE OpenMP::OpenMP_CXX)

@@ -49,6 +49,15 @@ inline void ExtendedMatchingResult::reset() {
     weight = 0;
 }
 
+#ifdef USE_THREADS
+void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events,
+    bool draw_frames=false, bool parallel=false, int tid=-1);
+MatchingResult shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
+    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events);
+void shatter_blossoms_for_all_detection_events_and_extract_match_edges(
+    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events);
+#endif
+
 void fill_bit_vector_from_obs_mask(pm::obs_int obs_mask, uint8_t* obs_begin_ptr, size_t num_observables);
 obs_int bit_vector_to_obs_mask(const std::vector<uint8_t>& bit_vector);
 
@@ -59,7 +68,7 @@ Mwpm detector_error_model_to_mwpm(
     bool enable_correlations = false);
 
 #ifdef USE_THREADS
-DecodingUnit detector_error_model_to_decoding_unit(
+std::vector<DecodingUnit> detector_error_model_to_decoding_units(
     const stim::DetectorErrorModel& detector_error_model,
     pm::weight_int num_distinct_weights,
     bool ensure_search_flooder_included = false,
@@ -80,7 +89,7 @@ void decode_detection_events(
     uint8_t* obs_begin_ptr,
     pm::total_weight_int& weight,
     bool edge_correlations
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
     , int shot = 0,
     bool draw_frames = false
 #endif
@@ -101,26 +110,23 @@ void decode_detection_events_to_edges(
 void decode_detection_events_to_edges_with_edge_correlations(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, std::vector<int64_t>& edges);
  
-#ifdef ENABLE_FUSION
+#ifdef USE_THREADS
 void setup_output_dirs(bool draw_frames, bool parallel=false);
 void output_detector_nodes(pm::Mwpm& mwpm, bool parallel=false);
 void output_detection_events(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, int shot, bool parallel=false);
-#endif
-
-#ifdef USE_THREADS
 void output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, bool parallel=false);
 void draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int frame_number, bool parallel=false, int thread=-1);
 
-void decode_detection_events_using_threads(
-    DecodingUnit unit,
-    const std::vector<uint64_t>& detection_events,
-    uint8_t* obs_begin_ptr,
-    pm::total_weight_int& weight,
-    bool edge_correlations,
-    int shot,
-    bool draw_frames);
-#endif
+// void decode_detection_events_using_threads(
+//     DecodingUnit unit,
+//     const std::vector<uint64_t>& detection_events,
+//     uint8_t* obs_begin_ptr,
+//     pm::total_weight_int& weight,
+//     bool edge_correlations,
+//     int shot,
+//     bool draw_frames);
 // ===============
+#endif
 } // namespace pm
 
 #endif  // PYMATCHING2_MWPM_DECODING_H

@@ -9,9 +9,17 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem-per-cpu=2G
 
-p_dec=001
+if [ $# -le 2 ]
+  then
+    echo "Args: [d] [p_dec] [shots]"
+    exit 1
+else
+    d=$1
+    p_dec=$2
+    shots=$3
+fi
 
-source ~/.bash_profile1000
+source ~/.bash_profile
 conda activate pymatching
 
 if [ ! -d "bench$p_dec" ]
@@ -23,28 +31,14 @@ cd bench$p_dec
 
 rm *.01 circuit.stim *.b8 *.dem *.out
 
-# if [ -d "out_parallel" ]
-#   then
-#     rm out_parallel -r
-# fi
-# if [ -d "out_serial" ]
-#   then
-#     rm out_serial -r
-# fi
-# if [ -d "out_frames" ]
-#   then
-#     rm out_frames -r
-# fi
-shots=100000
-rounds=119
-threads=(2 3 4 6 8)
-M=(60 40 30 20 15)
+rounds=128
+threads=(2 4 8 16)
+M=(64 32 16 8)
 code=surface_code
 task=rotated_memory_x
-d=21
 p=0.$p_dec
 
-serial_build=~/PyMatching/pymatching
+serial_build=~/PyMatchingSHMEM/build/pymatching
 threads_build=~/PyMatchingSHMEM/build_threads/pymatching
 
 stim gen \
@@ -81,26 +75,17 @@ end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
 echo "0: $parallel_time seconds"
 
-for i in {0..4}; do
-    stim gen \
-        --rounds=$rounds \
-        --distance=$d \
-        --after_clifford_depolarization=$p \
-        --code $code \
-        --task $task \
-        > circuit.stim
-    stim analyze_errors \
-        --decompose_errors \
-        --fold_loops \
-        --in circuit.stim \
-        > error_model.dem
-    stim detect \
-        --in circuit.stim \
-        --shots $shots \
-        --obs_out actual_obs_flips.01 \
-        --obs_out_format 01 \
-        --out detection_events.b8 \
-        --out_format b8
+export OMP_PLACES=cores
+export OMP_PROC_BIND=close
+
+for ((i=0; i<${#threads[@]}; i++ )); do
+    # stim detect \
+    #     --in circuit.stim \
+    #     --shots $shots \
+    #     --obs_out actual_obs_flips.01 \
+    #     --obs_out_format 01 \
+    #     --out detection_events.b8 \
+    #     --out_format b8
 
     thisThreads=${threads[$i]}
     thisM=${M[$i]}
@@ -108,7 +93,7 @@ for i in {0..4}; do
     export OMP_NUM_THREADS=$thisThreads
 
     start_parallel=$(date +%s)
-    srun --cpu-bind=cores -n 1 $threads_build predict \
+    $threads_build predict \
         --dem error_model.dem \
         --in detection_events.b8 \
         --in_format b8 \

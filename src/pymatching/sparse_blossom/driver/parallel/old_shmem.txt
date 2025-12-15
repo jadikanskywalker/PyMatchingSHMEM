@@ -1,0 +1,56 @@
+    int mype = shmem_my_pe();
+    if (DEBUG && mype==0) {
+        std::cout << "DEBUG: PE " << mype << " dem.count_detectors() : " << dem.count_detectors() << std::endl;
+        output_detector_nodes(mwpm, parallel);
+    }
+
+    // Hits buffers
+    long *hits_size = (long *)shmem_malloc(sizeof(long));
+    uint64_t *hits = (uint64_t *)shmem_malloc(dem.count_detectors() * sizeof(uint64_t));
+    // Start processing shots
+    int i = 0;
+    while (true) {
+        // PE 0 reads the shot
+        if (mype == 0) {
+            if (reader->start_and_read_entire_record(sparse_shot)) {
+                *hits_size = (long) sparse_shot.hits.size();
+                // Copy hits into buffer
+                for (size_t i = 0; i < *hits_size; ++i)
+                    hits[i] = sparse_shot.hits[i];
+            } else {
+                *hits_size = -1;
+            }
+        }
+        shmem_barrier_all();
+        // Broadcast hits size
+        shmem_long_broadcast(SHMEM_TEAM_WORLD, hits_size, hits_size, 1, 0);
+        if (*hits_size < 0) {
+            shmem_barrier_all();
+            shmem_free(hits_size);
+            shmem_free(hits);
+            // no more shots
+            break;
+        }
+        shmem_barrier_all();
+        // Broadcast hits data
+        shmem_uint64_broadcast(SHMEM_TEAM_WORLD, hits, hits, *hits_size, 0);
+        // Populate sparse_shot.hits from buffer
+        if (mype != 0) {
+            sparse_shot.hits.assign(hits, hits + *hits_size);
+        }
+        // Decode shot
+        if (parallel)
+            pm::decode_detection_events_in_parallel(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
+        else
+            pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
+        if (mype == 0) {
+            for (size_t k = 0; k < num_obs; k++) {
+                writer->write_bit(res.obs_crossed[k]);
+            }
+            writer->write_end();
+        }
+
+        sparse_shot.clear();
+        res.reset();
+        i++;
+    }

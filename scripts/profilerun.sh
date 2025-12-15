@@ -6,9 +6,11 @@
 # module load intel-oneapi-compilers
 # module load intel-oneapi-mpi
 
+collect=hotspots
+
 rm -r run/logs/
 
-export SHMEM_OFI_PROVIDER=ofi_rxm
+# export SHMEM_OFI_PROVIDER=ofi_rxm
 
 if [ $# -le 4 ]
   then
@@ -46,9 +48,9 @@ fi
 
 
 stim gen \
-    --rounds=$rounds \
+    --rounds=$(($rounds-1)) \
     --distance=21 \
-    --after_clifford_depolarization=0.01 \
+    --after_clifford_depolarization=0.001 \
     --code surface_code \
     --task rotated_memory_x \
     > circuit.stim
@@ -81,14 +83,13 @@ echo "Starting serial run..."
 start_serial=$(date +%s)
 if [ $ppn -le 0 ]
   then
-    vtune -collect hotspots -knob enable-stack-collection=true -r logs/serial/vtune_result \
-      ~/PyMatchingSHMEM/build_threads/pymatching predict \
+    vtune -collect $collect -knob enable-stack-collection=true -r logs/serial/vtune_result \
+      ~/PyMatchingSHMEM/build/pymatching predict \
         --dem error_model.dem \
         --in detection_events.b8 \
         --in_format b8 \
         --out predicted_obs_flips__without_shmem.01 \
         --out_format 01 \
-        --rounds_per_partition $M \
         > log_serial.out
 else
     oshrun --hostfile hostfile.txt -N $ppn \
@@ -111,15 +112,29 @@ echo wrong predictions:
 paste -d " " predicted_obs_flips__without_shmem.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
 echo
 
+vtune -report summary -r logs/serial/vtune_result/vtune_result.vtune \
+      -report-output logs/serial/vtune_report_summary.txt
+
 vtune -report top-down -r logs/serial/vtune_result/vtune_result.vtune \
       -call-stack-mode all -column="CPU Time:Self","Module" -filter "Function Stack"  \
       --format csv -csv-delimiter comma -report-output logs/serial/vtune_report_topdown.csv
+
+vtune -report hotspots -r logs/serial/vtune_result/vtune_result.vtune \
+      --format csv -csv-delimiter comma \
+      -report-output logs/serial/vtune_report_hotspots.csv
+
+vtune -report callstacks -r logs/serial/vtune_result/vtune_result.vtune \
+      --format csv -csv-delimiter comma \
+      -report-output logs/serial/vtune_report_callstacks.csv
 # mat b8
+echo
 
 # Run prediction
 if [ $nthreads -gt 0 ]
   then
     export OMP_NUM_THREADS=$nthreads
+    export OMP_PLACES=cores
+    export OMP_PROC_BIND=close
 fi
 
 # Parallel run with timing
@@ -127,7 +142,7 @@ echo "Starting parallel run..."
 start_parallel=$(date +%s)
 if [ $ppn -le 0 ]
   then
-    vtune -collect hotspots -knob enable-stack-collection=true -r logs/parallel/vtune_result \
+    vtune -collect $collect -knob enable-stack-collection=true -r logs/parallel/vtune_result \
       ~/PyMatchingSHMEM/build_threads/pymatching predict \
         --dem error_model.dem \
         --in detection_events.b8 \
@@ -153,9 +168,21 @@ end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
 echo "Parallel run completed in $parallel_time seconds."
 
+
+vtune -report summary -r logs/parallel/vtune_result/vtune_result.vtune \
+      -report-output logs/parallel/vtune_report_summary.txt
+
 vtune -report top-down -r logs/parallel/vtune_result/vtune_result.vtune \
       -call-stack-mode all -column="CPU Time:Self","Module" -filter "Function Stack"  \
       --format csv -csv-delimiter comma -report-output logs/parallel/vtune_report_topdown.csv
+
+vtune -report hotspots -r logs/parallel/vtune_result/vtune_result.vtune \
+      --format csv -csv-delimiter comma \
+      -report-output logs/parallel/vtune_report_hotspots.csv
+
+vtune -report callstacks -r logs/parallel/vtune_result/vtune_result.vtune \
+      --format csv -csv-delimiter comma -group-by thread \
+      -report-output logs/parallel/vtune_report_callstacks.csv
 # mat b8
 
 # Check work
