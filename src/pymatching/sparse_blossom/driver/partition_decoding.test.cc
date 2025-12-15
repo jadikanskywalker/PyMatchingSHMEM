@@ -19,7 +19,7 @@
 
 #include "gtest/gtest.h"
 
-#include "pymatching/sparse_blossom/config_shmem.h"
+#include "pymatching/sparse_blossom/config_parallel.h"
 #include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
 #include "pymatching/sparse_blossom/driver/user_graph.h"
 #include "pymatching/sparse_blossom/flooder/graph.h"

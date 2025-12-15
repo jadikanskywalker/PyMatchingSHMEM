@@ -2,8 +2,17 @@ cmake_minimum_required(VERSION 3.4...3.18)
 project(PyMatching2)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# Option to enable OpenSHMEM code paths across the sparse_blossom sources.
-option(USE_SHMEM "Enable OpenSHMEM-related code (defines USE_SHMEM)" ON)
+# Feature flags
+#   USE_THREADS: enables OpenMP runtime paths
+#     USE_SHMEM: enables OpenSHMEM runtime paths
+#                can by combined with USE_THREADS for hybrid runs
+option(USE_THREADS "Enable OpenMP runtime" ON)
+option(USE_SHMEM "Enable OpenSHMEM runtime" OFF)
+
+if(USE_THREADS)
+    message(STATUS "Compiling with USE_THREADS enabled")
+    find_package(OpenMP REQUIRED)
+endif()
 if(USE_SHMEM)
     message(STATUS "Compiling with USE_SHMEM enabled")
 endif()
@@ -45,6 +54,7 @@ endif ()
 
 set(SOURCE_FILES_NO_MAIN
         src/pymatching/sparse_blossom/driver/namespaced_main.cc
+        src/pymatching/sparse_blossom/driver/helpers/fast_b8_reader.cc
         src/pymatching/sparse_blossom/driver/mwpm_decoding.cc
         src/pymatching/sparse_blossom/flooder/graph.cc
         src/pymatching/sparse_blossom/flooder/detector_node.cc
@@ -65,6 +75,14 @@ set(SOURCE_FILES_NO_MAIN
         src/pymatching/sparse_blossom/driver/user_graph.cc
         src/pymatching/rand/rand_gen.cc
         )
+
+# Add decoding_unit.cc only if USE_THREADS=ON
+if(USE_THREADS)
+    list(APPEND SOURCE_FILES_NO_MAIN
+        src/pymatching/sparse_blossom/driver/parallel/decoding_set.cc
+        src/pymatching/sparse_blossom/driver/parallel/decoding_unit.cc
+    )
+endif()
 
 set(TEST_FILES
         src/pymatching/sparse_blossom/driver/namespaced_main.test.cc
@@ -111,6 +129,10 @@ target_compile_options(pymatching PRIVATE ${ARCH_OPT})
 if (NOT (MSVC))
     target_link_options(pymatching PRIVATE -pthread ${ARCH_OPT})
 endif ()
+if(USE_THREADS)
+    target_compile_definitions(pymatching PRIVATE USE_THREADS)
+    target_link_libraries(pymatching OpenMP::OpenMP_CXX)
+endif()
 if(USE_SHMEM)
     target_compile_definitions(pymatching PRIVATE USE_SHMEM)
 endif()
@@ -126,6 +148,10 @@ if (NOT (MSVC))
 else ()
     target_link_options(pymatching_tests PRIVATE -fsanitize=address -fsanitize=undefined -coverage)
 endif ()
+if(USE_THREADS)
+    target_compile_definitions(pymatching_tests PRIVATE USE_THREADS)
+    target_link_libraries(pymatching_tests OpenMP::OpenMP_CXX)
+endif()
 if(USE_SHMEM)
     target_compile_definitions(pymatching_tests PRIVATE USE_SHMEM)
 endif()
@@ -136,6 +162,10 @@ target_compile_options(pymatching_perf PRIVATE ${ARCH_OPT})
 if (NOT (MSVC))
     target_link_options(pymatching_perf PRIVATE -pthread -O3)
 endif ()
+if(USE_THREADS)
+    target_compile_definitions(pymatching_perf PRIVATE USE_THREADS)
+    target_link_libraries(pymatching_perf OpenMP::OpenMP_CXX)
+endif()
 if(USE_SHMEM)
     target_compile_definitions(pymatching_perf PRIVATE USE_SHMEM)
 endif()
@@ -147,6 +177,10 @@ target_include_directories(libpymatching PUBLIC src)
 target_compile_options(libpymatching PRIVATE ${ARCH_OPT} -fPIC)
 if(NOT(MSVC))
     target_link_options(libpymatching PRIVATE -pthread -O3)
+endif()
+if(USE_THREADS)
+    target_compile_definitions(libpymatching PRIVATE USE_THREADS)
+    target_link_libraries(libpymatching OpenMP::OpenMP_CXX)
 endif()
 if(USE_SHMEM)
     target_compile_definitions(libpymatching PUBLIC USE_SHMEM)
@@ -163,6 +197,10 @@ IF(EXISTS ${CMAKE_CURRENT_LIST_DIR}/pybind11/CMakeLists.txt)
     pybind11_add_module(_cpp_pymatching ${PYTHON_API_FILES} ${SOURCE_FILES_NO_MAIN})
     target_link_libraries(_cpp_pymatching PRIVATE libstim)
     target_compile_options(_cpp_pymatching PRIVATE ${ARCH_OPT})
+    if(USE_THREADS)
+        target_compile_definitions(_cpp_pymatching PRIVATE USE_THREADS)
+        target_link_libraries(_cpp_pymatching PRIVATE OpenMP::OpenMP_CXX)
+    endif()
     if(USE_SHMEM)
         target_compile_definitions(_cpp_pymatching PRIVATE USE_SHMEM)
     endif()

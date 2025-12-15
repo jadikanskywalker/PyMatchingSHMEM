@@ -16,6 +16,10 @@
 
 #include <fstream>
 
+#ifdef USE_THREADS
+#include <omp.h>
+#endif
+
 using namespace pm;
 
 std::pair<std::vector<std::pair<float, float>>, std::vector<std::pair<float, float>>>
@@ -217,8 +221,14 @@ struct StateHelper {
 
     std::set<GraphFillRegion *> find_all_regions() {
         std::set<GraphFillRegion *> regions;
+#ifdef USE_THREADS
+        int tid = omp_get_thread_num();
+#endif
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
+#ifdef USE_THREADS
+            if (n.vb >= 0 && (n.vb <= mwpm.flooder.vb_left || n.vb >= mwpm.flooder.vb_right)) continue;
+#endif
             GraphFillRegion *r = n.region_that_arrived;
             while (r != nullptr) {
                 regions.insert(r);
@@ -252,6 +262,10 @@ struct StateHelper {
     void draw_pending_collisions() {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
+#ifdef USE_THREADS
+            if (n.vb >= 0 && (n.vb <= mwpm.flooder.vb_left || n.vb >= mwpm.flooder.vb_right))
+                continue;
+#endif
             if (n.region_that_arrived_top == nullptr) {
                 continue;
             }

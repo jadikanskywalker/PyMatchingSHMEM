@@ -17,8 +17,8 @@
 #include "pymatching/rand/rand_gen.h"
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
 
-#ifdef USE_SHMEM
-#include "../config_shmem.h"
+#ifdef USE_THREADS
+#include "../config_parallel.h"
 #endif
 
 namespace {
@@ -269,6 +269,49 @@ double pm::UserGraph::max_abs_weight() {
     return max_abs_weight;
 }
 
+#ifdef USE_THREADS
+std::vector<DecodingUnit> pm::UserGraph::to_decoding_units(pm::weight_int num_distinct_weights) {
+    std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
+    pm::MatchingGraph& matching_graph = *matching_graph_ptr;
+    double normalising_constant = to_matching_or_search_graph_helper(
+        num_distinct_weights,
+        [&](size_t u,
+            size_t v,
+            pm::signed_weight_int weight,
+            const std::vector<size_t>& observables,
+            const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
+            matching_graph.add_edge(u, v, weight, observables, implied_weights_for_other_edges);
+        },
+        [&](size_t u,
+            pm::signed_weight_int weight,
+            const std::vector<size_t>& observables,
+            const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
+            matching_graph.add_boundary_edge(u, weight, observables, implied_weights_for_other_edges);
+        });
+
+    matching_graph.normalising_constant = normalising_constant;
+    if (boundary_nodes.size() > 0) {
+        matching_graph.is_user_graph_boundary_node.clear();
+        matching_graph.is_user_graph_boundary_node.resize(nodes.size(), false);
+        for (auto& i : boundary_nodes)
+            matching_graph.is_user_graph_boundary_node[i] = true;
+    }
+    matching_graph.convert_implied_weights(normalising_constant);
+
+    for (int vb=0; vb < virtual_boundaries.size(); ++vb) {
+        for (int index : virtual_boundaries[vb]) {
+            matching_graph.nodes[index].vb = vb;
+        }
+    }
+
+    std::vector<DecodingUnit> units;
+
+    units.emplace_back(matching_graph_ptr, node_part_id, num_partitions, virtual_boundaries.size());
+
+    return units;
+}
+#endif
+
 pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_weights) {
     pm::MatchingGraph matching_graph(nodes.size(), _num_observables);
 
@@ -298,21 +341,6 @@ pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_w
 
     matching_graph.convert_implied_weights(normalising_constant);
 
-#ifdef USE_SHMEM
-// ===============
-    // Propagate partition and virtual metadata
-    // matching_graph.partition_of_node.resize(nodes.size(), -1);
-    // matching_graph.is_virtual_node.resize(nodes.size(), false);
-    matching_graph.num_partitions = num_partitions;
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        // matching_graph.partition_of_node[i] = static_cast<int32_t>(nodes[i].partition);
-        // matching_graph.is_virtual_node[i] = nodes[i].is_virtual;
-        matching_graph.nodes[i].partition = nodes[i].partition;
-        matching_graph.nodes[i].is_cross_partition = nodes[i].is_cross_partition;
-    }
-// ===============
-#endif
-
     return matching_graph;
 }
 
@@ -338,7 +366,7 @@ pm::SearchGraph pm::UserGraph::to_search_graph(pm::weight_int num_distinct_weigh
 
     search_graph.convert_implied_weights(normalizing_constant);
 
-// #ifdef USE_SHMEM
+// #ifdef USE_THREADS
 // // ===============
 //     // Propagate partition and virtual metadata
 //     search_graph.num_partitions = num_partitions;
@@ -546,11 +574,10 @@ pm::UserGraph pm::detector_error_model_to_user_graph(
             });
         user_graph.loaded_from_dem_without_correlations = true;
     }
-#ifdef USE_SHMEM
+#ifdef USE_THREADS
 // ===============
-    // Annotate user nodes with DEM-provided coordinates and virtual node infomation for partitioning.
-    const auto& rounds = annotate_nodes_with_dem_coordinates(detector_error_model, user_graph);
-    partition_nodes_by_round(user_graph, rounds);
+    // Default to partition nodes by round
+    user_graph.partition_nodes_by_round(detector_error_model);
 // ===============
 #endif
     return user_graph;
@@ -585,77 +612,118 @@ void pm::UserGraph::populate_implied_edge_weights(
     }
 }
 
-#ifdef USE_SHMEM
-// ===============
-std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g) {
+#ifdef USE_THREADS
+void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem) {
     // Query coordinates from stim. Map: det_id -> vector<double> of coords.
     std::set<uint64_t> all_dets;
-    all_dets.clear();
-    for (uint64_t k = 0; k < dem.count_detectors(); ++k)
-        all_dets.insert(k);
+    size_t num_nodes = nodes.size();
+    for (uint64_t k = 0; k < num_nodes; ++k)
+        all_dets.emplace_hint(all_dets.end(), k);
     std::map<uint64_t, std::vector<double>> coords_map = dem.get_detector_coordinates(all_dets);
-    // Annotate UserNodes
-    std::set<long> rounds;
-    std::set<long> x;
-    std::set<long> y;
-    for (size_t k = 0; k < g.nodes.size(); ++k) {
-        auto it = coords_map.find(k);
+    // M rounds per partition
+    int M = config_parallel::M;
+    // partition nodes
+    // partitions.clear();
+    // partitions.push_back((std::vector<int>){});
+    node_part_id.resize(num_nodes);
+    virtual_boundaries.clear();
+    virtual_boundaries.push_back((std::vector<int>){});
+    // virtual_boundary_partitions.clear();
+    // virtual_boundary_partitions.push_back((std::vector<int>){});
+    int p = 0;
+    int vb = 1;
+    double last_round = -1;
+    bool p_or_vb = true; // true = p, false = vb
+    int round_counter = 0;
+    for (int n=0; n<num_nodes; ++n) {
+        auto it = coords_map.find(n);
         if (it == coords_map.end()) {
             // No coordinates available; leave defaults.
             continue;
         }
         const auto& coors = it->second;
-        pm::UserNode& node = g.nodes[k];
-        node.has_coords = true;
-        // Store coordinates
-        node.pos_x = coors[0];
-        node.pos_y = coors[1];
-        node.round = (long)lround(coors[coors.size()-1]);
-        rounds.insert(node.round);
-        x.insert(node.pos_x);
-        y.insert(node.pos_y);
-    }
-    if (DEBUG)
-        std::cout << "X: " << *x.begin() << " to " << *x.rbegin() << std::endl
-                  << "Y: " << *y.begin() << " to " << *y.rbegin() << std::endl
-                  << "Z: " << *rounds.begin() << " to " << *rounds.rbegin() << std::endl;
-    return rounds;
-}
-
-
-void pm::partition_nodes_by_round(pm::UserGraph& g, std::set<long> rounds) {
-    // M rounds per partition
-    int M = config_shmem::M;
-    g.num_partitions = (long)((long(rounds.size()) / config_shmem::M) + 1); // num partitions
-    if (DEBUG)
-        std::cout << "  M : " << M << "; num_rounds : " << rounds.size() << "; num_partitions : " << g.num_partitions << std::endl;
-    // partition nodes
-    for (auto& n : g.nodes) {
-        if (n.has_coords)
-            n.partition = (n.round / M);
-    }
-    // mark virtual nodes
-    for (const auto& e : g.edges) {
-        if (e.node1 == SIZE_MAX || e.node2 == SIZE_MAX) continue; // ignore boundary edges
-        const auto& n1 = g.nodes[e.node1];
-        const auto& n2 = g.nodes[e.node2];
-        if (!n1.has_coords || !n2.has_coords) continue; // need rounds
-        if (n1.partition == n2.partition) continue; // not a cross-partition edge
-        else if (n1.partition > n2.partition) { // n1 in higher partition
-            g.nodes[e.node1].is_cross_partition = true; // mark higher partition node as virtual
-            // g.nodes[e.node2].virtual_neighbors.insert(std::make_tuple(e.node1, n1.round)); // save virtual neighbor in lower round node
-        } else { // n2 in higher partition
-            g.nodes[e.node2].is_cross_partition = true; // mark higher partition node as virtual
-            // g.nodes[e.node1].virtual_neighbors.insert(std::make_tuple(e.node2, n2.round)); // save virtual neighbor in lower round node
+        if (coors.empty()) {
+            // No coordinate data; skip annotation.
+            throw std::invalid_argument("Detector node " + std::to_string(it->first) + " has no coords");
+        }
+        // Assign to p or vb
+        size_t round_coor = coors.size() - 1;
+        nodes[n].round = coors[round_coor];
+        if (coors[round_coor] > last_round) {
+            round_counter++;
+            if (round_counter == M) {
+                ++p;
+                // partitions.push_back((std::vector<int>){});
+                p_or_vb = false; // boundary
+                // virtual_boundary_partitions[vb] = (std::vector<int>){(int)last_round, (int)coors[round_coor]};
+            } else if (round_counter > M) {
+                round_counter = 0;
+                ++vb;
+                virtual_boundaries.push_back((std::vector<int>){});
+                // virtual_boundary_partitions.push_back((std::vector<int>){});
+                p_or_vb = true; // partition
+            }
+            last_round = coors[round_coor];
+        }
+        if (p_or_vb){
+            node_part_id[n] = p;
+        } else {
+            node_part_id[n] = -vb;
+            virtual_boundaries[vb-1].push_back(n);
         }
     }
+    num_partitions = p+1;
 }
 
-void pm::partition_nodes_2d_vertical_split(pm::UserGraph& g, std::set<long> rounds) {
-    g.num_partitions = 2;
+// ===============
+// std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g) {
+//     // Query coordinates from stim. Map: det_id -> vector<double> of coords.
+//     std::set<uint64_t> all_dets;
+//     size_t num_nodes = g.nodes.size();
+//     for (uint64_t k = 0; k < num_nodes; ++k)
+//         all_dets.emplace_hint(all_dets.end(), k);
+//     std::map<uint64_t, std::vector<double>> coords_map = dem.get_detector_coordinates(all_dets);
+//     // Annotate UserNodes
+//     std::set<long> rounds;
+//     std::set<long> x;
+//     std::set<long> y;
+//     for (size_t k = 0; k < g.nodes.size(); ++k) {
+//         auto it = coords_map.find(k);
+//         if (it == coords_map.end()) {
+//             // No coordinates available; leave defaults.
+//             continue;
+//         }
+//         const auto& coors = it->second;
+//         if (coors.empty()) {
+//             // No coordinate data; skip annotation.
+//             throw std::invalid_argument("Detector node " + std::to_string(it->first) + " has no coords");
+//         }
+//         pm::UserNode& node = g.nodes[k];
+//         node.has_coords = true;
+//         // Store coordinates if available
+//         if (coors.size() >= 2) {
+//             node.pos_x = coors[0];
+//             node.pos_y = coors[1];
+//         } else {
+//             // Only one coordinate present; leave x/y defaults
+//             node.pos_x = coors[0];
+//         }
+//         // Use the last value as the round index
+//         node.round = (long)lround(coors.back());
+//         rounds.insert(node.round);
+//         x.insert(node.pos_x);
+//         y.insert(node.pos_y);
+//     }
+//     if (DEBUG)
+//         std::cout << "X: " << *x.begin() << " to " << *x.rbegin() << std::endl
+//                   << "Y: " << *y.begin() << " to " << *y.rbegin() << std::endl
+//                   << "Z: " << *rounds.begin() << " to " << *rounds.rbegin() << std::endl;
+//     return rounds;
+// }
 
-    
-}
+// void pm::partition_nodes_2d_vertical_split(pm::UserGraph& g, std::set<long> rounds) {
+//     throw std::invalid_argument("partition_nodes_2d_vertical_split: not yet implemented");
+// }
 
 // ===============
 #endif

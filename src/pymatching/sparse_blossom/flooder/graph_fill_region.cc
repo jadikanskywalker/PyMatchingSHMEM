@@ -34,7 +34,11 @@ GraphFillRegion::GraphFillRegion(GraphFillRegion &&other)
       shrink_event_tracker(std::move(other.shrink_event_tracker)),
       match(std::move(other.match)),
       blossom_children(std::move(other.blossom_children)),
-      shell_area(std::move(other.shell_area)) {
+      shell_area(std::move(other.shell_area))
+#ifdef USE_THREADS
+      , owner_arena(other.owner_arena)
+#endif
+    {
 }
 
 bool GraphFillRegion::tree_equal(const GraphFillRegion &other) const {

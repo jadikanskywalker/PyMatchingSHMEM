@@ -26,11 +26,22 @@
 #include "pymatching/sparse_blossom/tracker/flood_check_event.h"
 #include "pymatching/sparse_blossom/tracker/radix_heap_queue.h"
 
+#ifdef USE_THREADS
+#include <memory>
+#endif
+
 namespace pm {
 
 struct GraphFlooder {
     /// The graph of detector nodes that is being flooded.
+#ifdef USE_THREADS
+// ===============
+    std::shared_ptr<MatchingGraph> graph_ptr;
+    MatchingGraph& graph;
+// ===============
+#else
     MatchingGraph graph;
+#endif
     /// Tracks the next thing that will occur as flooding proceeds.
     /// The events are "tentative" because processing an event may remove another,
     /// for example if a region stops growing due to colliding with another region
@@ -52,19 +63,22 @@ struct GraphFlooder {
     std::vector<size_t> negative_weight_observables;
     /// Observable mask corresponding to the observables that would be flipped if an error occurred on every edge that
     /// has a negative weight. Only used for fewer than 64 (=sizeof(pm::obs_int)*8) observables.
-    pm::obs_int negative_weight_obs_mask;
+    pm::obs_int negative_weight_obs_mask{ 0 };
     /// The sum of the edge weights of all edges with negative edge weights.
-    pm::total_weight_int negative_weight_sum;
+    pm::total_weight_int negative_weight_sum{ 0 };
 
-#ifdef USE_SHMEM
-// ===============
-    // Set of active partitions. Should have 1 for partition solving, 2 for fusing
-    std::set<long> active_partitions;
-    std::vector<GraphFillRegion *> regions_matched_to_virtual_boundary;
-// ===============
+#ifdef USE_THREADS
+    int current_shot=-1;
+    int vb_left, vb_right;
 #endif
 
     GraphFlooder();
+#ifdef USE_THREADS
+// ===============
+    // Construct with a shared graph pointer (shared across solvers)
+    explicit GraphFlooder(std::shared_ptr<MatchingGraph> graph);
+// ===============
+#endif
     explicit GraphFlooder(MatchingGraph graph);
     GraphFlooder(GraphFlooder&&) noexcept;
     MwpmEvent run_until_next_mwpm_notification();
@@ -80,26 +94,27 @@ struct GraphFlooder {
     MwpmEvent do_region_shrinking(GraphFillRegion& shrinking_region);
     pm::MwpmEvent do_neighbor_interaction(DetectorNode& src, size_t src_to_dst_index, DetectorNode& dst);
     pm::MwpmEvent do_region_hit_boundary_interaction(DetectorNode& node);
-#ifdef USE_SHMEM
+#ifdef USE_THREADS
     // Treat a specific neighbor edge as a boundary (used for virtual boundaries between partitions)
     pm::MwpmEvent do_region_hit_virtual_boundary_interaction(DetectorNode& node, size_t edge_index);
 #endif
     static MwpmEvent do_degenerate_implosion(const GraphFillRegion& region);
     static MwpmEvent do_blossom_shattering(GraphFillRegion& region);
     bool dequeue_decision(pm::FloodCheckEvent ev);
+#ifdef USE_THREADS
+    std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_growing_top_region(
+        const DetectorNode &detector_node, VaryingCT rad1) const;
+    std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growing_top_region(
+        const DetectorNode &detector_node, const VaryingCT &rad1) const;
+#endif
     std::pair<size_t, pm::cumulative_time_int> find_next_event_at_node_returning_neighbor_index_and_time(
         const DetectorNode& detector_node) const;
     pm::MwpmEvent do_look_at_node_event(DetectorNode& node);
 
-#ifdef USE_SHMEM
-    void update_active_nodes();
-    // Sets up internal variables for single partition solving
-    void prepare_for_solve_partition(long p);
-    // Sets up internal variables for fusion
-    //   Assumes the flooder has intermediate solution states for p1 and p2, including:
-    //     - matched GraphFillRegions
-    //     - DetectorNode ephermeral states
-    void prepare_for_fuse_partitions(long p1, long p2);
+#ifdef USE_THREADS
+// ===============
+    bool is_active(const DetectorNode *node) const;
+// ===============
 #endif
 
     pm::FloodCheckEvent dequeue_valid();
@@ -108,6 +123,6 @@ struct GraphFlooder {
     void sync_negative_weight_observables_and_detection_events();
 };
 
-}  // namespace pm
+} // namespace pm
 
 #endif  // PYMATCHING2_GRAPH_FLOODER_H

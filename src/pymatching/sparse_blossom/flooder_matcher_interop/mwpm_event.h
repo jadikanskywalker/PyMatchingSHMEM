@@ -52,7 +52,7 @@ struct RegionHitBoundaryEventData {
 };
 std::ostream &operator<<(std::ostream &out, const RegionHitBoundaryEventData &ev);
 
-#ifdef USE_SHMEM
+#ifdef USE_THREADS
 struct RegionHitVirtualBoundaryEventData {
     /// The growing region that hit the virtual boundary.
     GraphFillRegion *region;
@@ -81,7 +81,7 @@ struct BlossomShatterEventData {
 std::ostream &operator<<(std::ostream &out, const BlossomShatterEventData &ev);
 
 enum MwpmEventType : uint8_t { NO_EVENT, REGION_HIT_REGION, REGION_HIT_BOUNDARY,
-#ifdef USE_SHMEM
+#ifdef USE_THREADS
     REGION_HIT_VIRTUAL_BOUNDARY,
 #endif
     BLOSSOM_SHATTER };
@@ -99,7 +99,7 @@ struct MwpmEvent {
     union {
         RegionHitRegionEventData region_hit_region_event_data;
         RegionHitBoundaryEventData region_hit_boundary_event_data;
-#ifdef USE_SHMEM
+#ifdef USE_THREADS
         RegionHitVirtualBoundaryEventData region_hit_virtual_boundary_event_data;
 #endif
         BlossomShatterEventData blossom_shatter_event_data;
@@ -110,7 +110,7 @@ struct MwpmEvent {
     MwpmEvent();
     MwpmEvent(RegionHitRegionEventData region_hit_region_event_data);      // NOLINT(google-explicit-constructor)
     MwpmEvent(RegionHitBoundaryEventData region_hit_boundary_event_data);  // NOLINT(google-explicit-constructor)
-#ifdef USE_SHMEM
+#ifdef USE_THREADS
     MwpmEvent(RegionHitVirtualBoundaryEventData region_hit_virtual_boundary_event_data);  // NOLINT(google-explicit-constructor)
 #endif
     MwpmEvent(BlossomShatterEventData blossom_shatter_event_data);         // NOLINT(google-explicit-constructor)

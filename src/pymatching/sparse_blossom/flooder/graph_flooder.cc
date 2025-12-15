@@ -19,11 +19,49 @@
 #include "pymatching/sparse_blossom/flooder_matcher_interop/varying.h"
 #include "pymatching/sparse_blossom/matcher/alternating_tree.h"
 
-#ifdef USE_SHMEM
-#include "../config_shmem.h"
+#ifdef USE_THREADS
+#include "../config_parallel.h"
+#include <memory>
+#include <omp.h>
 #endif
 
 using namespace pm;
+
+#ifdef USE_THREADS
+// ===============
+GraphFlooder::GraphFlooder()
+    : graph_ptr(std::make_shared<MatchingGraph>()),
+      graph(*graph_ptr),
+      negative_weight_obs_mask(0),
+      negative_weight_sum(0) {}
+
+GraphFlooder::GraphFlooder(std::shared_ptr<MatchingGraph> graph)
+    : graph_ptr(graph), graph(*graph_ptr), negative_weight_obs_mask(0), negative_weight_sum(0) {
+}
+
+GraphFlooder::GraphFlooder(MatchingGraph graph_val)
+    : graph_ptr(std::make_shared<MatchingGraph>(std::move(graph_val))),
+      graph(*graph_ptr),
+      negative_weight_obs_mask(0),
+      negative_weight_sum(0) {
+}
+
+GraphFlooder::GraphFlooder(GraphFlooder &&flooder) noexcept
+    : graph_ptr(std::move(flooder.graph_ptr)),
+      graph(*graph_ptr),
+      queue(std::move(flooder.queue)),
+      region_arena(std::move(flooder.region_arena)),
+      match_edges(std::move(flooder.match_edges)),
+      negative_weight_detection_events(std::move(flooder.negative_weight_detection_events)),
+      negative_weight_observables(std::move(flooder.negative_weight_observables)),
+      negative_weight_obs_mask(flooder.negative_weight_obs_mask),
+      negative_weight_sum(flooder.negative_weight_sum) {
+}
+// ===============
+#else
+GraphFlooder::GraphFlooder()
+    : negative_weight_obs_mask(0),
+      negative_weight_sum(0) {}
 
 GraphFlooder::GraphFlooder(MatchingGraph graph)
     : graph(std::move(graph)), negative_weight_obs_mask(0), negative_weight_sum(0) {
@@ -39,20 +77,31 @@ GraphFlooder::GraphFlooder(GraphFlooder &&flooder) noexcept
       negative_weight_obs_mask(flooder.negative_weight_obs_mask),
       negative_weight_sum(flooder.negative_weight_sum) {
 }
+#endif
 
-#ifdef USE_SHMEM
-inline void debug_validate_region_nodes(const GraphFillRegion& r, const std::vector<DetectorNode>& nodes, std::set<long> active_parts) {
-    for (DetectorNode *p : r.shell_area) {
-        if (p == nullptr) continue;
-        size_t i = static_cast<size_t>(p - &nodes[0]);
-        if (i >= nodes.size())
-            std::cout << "  ERROR: shell_area nodes out of bounds" << std::endl;
-        if (&nodes[i] != p)
-            std::cout << "  ERROR: could not reference shell_area node" << std::endl;
-        if (!p->is_active)
-            std::cout << "  ERROR: inactive node added to shell_area" << std::endl;
-    }
+// #ifdef USE_THREADS
+// inline void debug_validate_region_nodes(const GraphFillRegion& r, const std::vector<DetectorNode>& nodes, std::set<long> active_parts) {
+//     for (DetectorNode *p : r.shell_area) {
+//         if (p == nullptr) continue;
+//         size_t i = static_cast<size_t>(p - &nodes[0]);
+//         if (i >= nodes.size())
+//             std::cout << "  ERROR: shell_area nodes out of bounds" << std::endl;
+//         if (&nodes[i] != p)
+//             std::cout << "  ERROR: could not reference shell_area node" << std::endl;
+//         if (!(p->is_active == omp_get_thread_num()))
+//             std::cout << "  ERROR: inactive node added to shell_area" << std::endl;
+//     }
+// }
+// #endif
+
+#ifdef USE_THREADS
+// ===============
+inline bool GraphFlooder::is_active(const DetectorNode *node) const {
+    if (node->vb < 0)
+        return true;
+    return (node->vb > vb_left && node->vb < vb_right); // DEPENDENT ON ROUND PARTITIONING
 }
+// ===============
 #endif
 
 void GraphFlooder::do_region_created_at_empty_detector_node(GraphFillRegion &region, DetectorNode &detector_node) {
@@ -62,17 +111,23 @@ void GraphFlooder::do_region_created_at_empty_detector_node(GraphFillRegion &reg
     detector_node.region_that_arrived_top = &region;
     detector_node.wrapped_radius_cached = 0;
     region.shell_area.push_back(&detector_node);
-#ifdef USE_SHMEM
-    if (DEBUG) {
-        // std::cout << "    region created at detector node " << &detector_node << std::endl;
-        debug_validate_region_nodes(region, graph.nodes, active_partitions);
-    }
-#endif
+// #ifdef USE_THREADS
+//     if (DEBUG) {
+//         // std::cout << "    region created at detector node " << &detector_node << std::endl;
+//         debug_validate_region_nodes(region, graph.nodes, active_partitions);
+//     }
+// #endif
     reschedule_events_at_detector_node(detector_node);
 }
 
+
+#ifdef USE_THREADS
+std::pair<size_t, cumulative_time_int> GraphFlooder::find_next_event_at_node_not_occupied_by_growing_top_region(
+    const DetectorNode &detector_node, VaryingCT rad1) const {
+#else
 std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_growing_top_region(
     const DetectorNode &detector_node, VaryingCT rad1) {
+#endif
     cumulative_time_int best_time = std::numeric_limits<cumulative_time_int>::max();
     size_t best_neighbor = SIZE_MAX;
 
@@ -86,10 +141,13 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_g
 
         auto neighbor = detector_node.neighbors[i];
 
-#ifdef USE_SHMEM
+#ifdef USE_THREADS
 // ===============
-        if (!neighbor->is_active) // skip inactive neighbors
+        if (!is_active(neighbor)) {// skip inactive neighbors
+            if (!(neighbor->vb >= 0))
+                std::cout << "    NOTE2: neighbor inactive not cross partition (not growing)" << std::endl;
             continue;
+        }
 // ===============
 #endif
 
@@ -106,8 +164,13 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_g
     return {best_neighbor, best_time};
 }
 
+#ifdef USE_THREADS
+std::pair<size_t, cumulative_time_int> GraphFlooder::find_next_event_at_node_occupied_by_growing_top_region(
+    const DetectorNode &detector_node, const VaryingCT &rad1) const {
+#else
 std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growing_top_region(
     const DetectorNode &detector_node, const VaryingCT &rad1) {
+#endif
     cumulative_time_int best_time = std::numeric_limits<cumulative_time_int>::max();
     size_t best_neighbor = SIZE_MAX;
     size_t start = 0;
@@ -128,17 +191,25 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growi
 
         auto neighbor = detector_node.neighbors[i];
 
-#ifdef USE_SHMEM
+#ifdef USE_THREADS
 // ===============
-        // treat virtual nodes like boundary
-        if (!neighbor->is_active) {
+        // Treat virtual nodes like boundary
+        if (!is_active(neighbor)) {
+            if (!(neighbor->vb >= 0)) {
+                std::cout << "    NOTE3: neighbor inactive not cross partition (growing)" << std::endl
+                          << "      node: " << &detector_node << "    vb: " << detector_node.vb
+                          << "      vb_left: " << vb_left << "    vb_right: " << vb_right
+                        //   << "  shot_marker: " << detector_node.shot_marker << "  flooder.current_shot: " << current_shot
+                          << std::endl;
+
+            }
             auto collision_time = weight - rad1.y_intercept();
             if (collision_time < best_time) {
                 best_time = collision_time;
                 best_neighbor = i;
             }
         }
-        // treat active nodes like normal
+        // Treat active nodes like normal
 // ===============
 #endif
 
@@ -174,8 +245,14 @@ std::pair<size_t, cumulative_time_int> GraphFlooder::find_next_event_at_node_ret
 }
 
 void GraphFlooder::reschedule_events_at_detector_node(DetectorNode &detector_node) {
-    if (!detector_node.is_active)
+#ifdef USE_THREADS
+// ===============
+    if (!is_active(&detector_node)) {
+        std::cout << "    NOTE: reschedule called on inactive node" << std::endl;
         return;
+    }
+// ===============
+#endif
     auto x = find_next_event_at_node_returning_neighbor_index_and_time(detector_node);
     if (x.first == SIZE_MAX) {
         detector_node.node_event_tracker.set_no_desired_event();
@@ -206,9 +283,11 @@ void GraphFlooder::schedule_tentative_shrink_event(GraphFillRegion &region) {
 
 void GraphFlooder::do_region_arriving_at_empty_detector_node(
     GraphFillRegion &region, DetectorNode &empty_node, const DetectorNode &from_node, size_t from_to_empty_index) {
-#ifdef USE_SHMEM
-        if (!empty_node.is_active)
-            std::cout << "ERROR: do_region_arriving_at_empty_detector_node -> empty_node is inactive" << std::endl;
+#ifdef USE_THREADS
+// ===============
+    if (!is_active(&empty_node))
+        std::cout << "ERROR: do_region_arriving_at_empty_detector_node -> empty_node is inactive" << std::endl;
+// ===============
 #endif
     empty_node.observables_crossed_from_source =
         (from_node.observables_crossed_from_source ^ from_node.neighbor_observables[from_to_empty_index]);
@@ -218,9 +297,9 @@ void GraphFlooder::do_region_arriving_at_empty_detector_node(
     empty_node.region_that_arrived_top = region.blossom_parent_top;
     empty_node.wrapped_radius_cached = empty_node.compute_wrapped_radius();
     region.shell_area.push_back(&empty_node);
-#ifdef USE_SHMEM
-    if (DEBUG) debug_validate_region_nodes(region, graph.nodes, active_partitions);
-#endif
+// #ifdef USE_THREADS
+//     if (DEBUG) debug_validate_region_nodes(region, graph.nodes, active_partitions);
+// #endif
     reschedule_events_at_detector_node(empty_node);
 }
 
@@ -228,16 +307,20 @@ MwpmEvent GraphFlooder::do_region_shrinking(GraphFillRegion &region) {
     if (region.shell_area.empty()) {
         return do_blossom_shattering(region);
     } else if (region.shell_area.size() == 1 && region.blossom_children.empty()) {
-#ifdef USE_SHMEM
-        if (!(*region.shell_area.begin())->is_active)
+#ifdef USE_THREADS
+// ===============
+        if (!is_active(*region.shell_area.begin()))
             std::cout << "ERROR: do_region_shrinking -> do_generate_implosion on inactive shell_area[0]" << std::endl;
+// ===============
 #endif
         return do_degenerate_implosion(region);
     } else {
         auto leaving_node = region.shell_area.back();
-#ifdef USE_SHMEM
-        if (!leaving_node->is_active)
+#ifdef USE_THREADS
+// ===============
+        if (!is_active(leaving_node))
             std::cout << "ERROR: do_region_shrinking -> leaving inactive node" << std::endl;
+// ===============
 #endif
         region.shell_area.pop_back();
         leaving_node->region_that_arrived = nullptr;
@@ -277,12 +360,14 @@ MwpmEvent GraphFlooder::do_neighbor_interaction(DetectorNode &src, size_t src_to
 MwpmEvent GraphFlooder::do_region_hit_boundary_interaction(DetectorNode &node) {
     // Drop stale events that fired after shrinking/reset.
     if (node.reached_from_source == nullptr || node.region_that_arrived_top == nullptr) {
-#ifdef USE_SHMEM
+#ifdef USE_THREADS
+// ===============
         if (DEBUG) {
             std::cout << "  DEBUG: drop stale boundary event at node " << &node
                       << " rfs=" << node.reached_from_source
                       << " top=" << node.region_that_arrived_top << std::endl;
         }
+// ===============
 #endif
         return MwpmEvent::no_event();
     }
@@ -292,7 +377,7 @@ MwpmEvent GraphFlooder::do_region_hit_boundary_interaction(DetectorNode &node) {
             node.reached_from_source, nullptr, node.observables_crossed_from_source ^ node.neighbor_observables[0]}};
 }
 
-#ifdef USE_SHMEM
+#ifdef USE_THREADS
 // ===============
 MwpmEvent GraphFlooder::do_region_hit_virtual_boundary_interaction(DetectorNode &node, size_t virtual_neighbor_index) {
     if (node.reached_from_source == nullptr || node.region_that_arrived_top == nullptr) {
@@ -336,6 +421,9 @@ MwpmEvent GraphFlooder::do_blossom_shattering(GraphFillRegion &region) {
 
 GraphFillRegion *GraphFlooder::create_blossom(std::vector<RegionEdge> &contained_regions) {
     auto blossom_region = region_arena.alloc_default_constructed();
+#ifdef USE_THREADS
+    blossom_region->owner_arena = &region_arena;
+#endif
     blossom_region->radius = VaryingCT::growing_varying_with_zero_distance_at_time(queue.cur_time);
     blossom_region->blossom_children = std::move(contained_regions);
     for (auto &region_edge : blossom_region->blossom_children) {
@@ -435,11 +523,11 @@ MwpmEvent GraphFlooder::do_look_at_node_event(DetectorNode &node) {
         if (node.neighbors[next.first] == nullptr) {
             return do_region_hit_boundary_interaction(node);
         }
-#ifdef USE_SHMEM
+#ifdef USE_THREADS
 // ===============
-        else if (!node.neighbors[next.first]->is_active) { // treat virtual nodes like boundary
-            if (!node.neighbors[next.first]->is_cross_partition) {
-                std::cout << "ERROR: do_region_hit_virtual_boundary_interaction -> node not cross partition" << std::endl;
+        else if (!is_active(node.neighbors[next.first])) { // treat virtual nodes like boundary
+            if (!(node.neighbors[next.first]->vb >= 0)) {
+                std::cout << "ERROR: do_region_hit_virtual_boundary_interaction -> node not cross-partition" << std::endl;
             }
             return do_region_hit_virtual_boundary_interaction(node, next.first);
         }
@@ -463,18 +551,22 @@ MwpmEvent GraphFlooder::do_look_at_node_event(DetectorNode &node) {
 MwpmEvent GraphFlooder::process_tentative_event_returning_mwpm_event(FloodCheckEvent tentative_event) {
     switch (tentative_event.tentative_event_type) {
         case LOOK_AT_NODE: {
-#ifdef USE_SHMEM
-            if (!tentative_event.data_look_at_node->is_active)
+#ifdef USE_THREADS
+// ===============
+            if (!is_active(tentative_event.data_look_at_node))
                 std::cout << "ERROR: look at node event for inactive node" << std::endl
                           << "  node: " << tentative_event.data_look_at_node << std::endl; 
+// ===============
 #endif
             return do_look_at_node_event(*tentative_event.data_look_at_node);
         }
         case LOOK_AT_SHRINKING_REGION: {
-#ifdef USE_SHMEM
-            if (tentative_event.data_look_at_shrinking_region->shell_area.size() > 0 && !(*tentative_event.data_look_at_shrinking_region->shell_area.begin())->is_active)
+#ifdef USE_THREADS
+// ===============
+            if (tentative_event.data_look_at_shrinking_region->shell_area.size() > 0 && !is_active(*tentative_event.data_look_at_shrinking_region->shell_area.begin()))
                 std::cout << "ERROR: shrinking region event for inactive source node" << std::endl
                           << "  shell_area[0]: " << *tentative_event.data_look_at_shrinking_region->shell_area.begin() << std::endl; 
+// ===============
 #endif
             return do_region_shrinking(*tentative_event.data_look_at_shrinking_region);
         }
@@ -516,30 +608,31 @@ void GraphFlooder::sync_negative_weight_observables_and_detection_events() {
     negative_weight_sum = graph.negative_weight_sum;
 }
 
-GraphFlooder::GraphFlooder() : negative_weight_obs_mask(0), negative_weight_sum(0) {
-}
+#ifdef USE_THREADS
+// ===============
+// Prepare the flooder to solve a single partition
+// void GraphFlooder::prepare_for_solve_partition(int tid, long p) {
+//     active_partitions.clear();
+//     active_partitions.insert(p);
+//     for (DetectorNode& node : graph.nodes)
+//         if (node.partition == p && !node.is_cross_partition)
+//             node.is_active = tid;
+//     current_tid = tid;
+// }
 
-#ifdef USE_SHMEM
-void GraphFlooder::update_active_nodes() {
-    if (active_partitions.size() == 1)
-        for (DetectorNode& node : graph.nodes)
-            node.is_active = (active_partitions.count(node.partition) && !node.is_cross_partition);
-    else if (active_partitions.size() > 1)
-        for (DetectorNode& node : graph.nodes)
-            node.is_active = (active_partitions.count(node.partition) &&
-                              (!node.is_cross_partition || node.partition == *active_partitions.rbegin()));
-}
-
-void GraphFlooder::prepare_for_solve_partition(long p) {
-    active_partitions.clear();
-    active_partitions.insert(p);
-    update_active_nodes();
-}
-
-void GraphFlooder::prepare_for_fuse_partitions(long p1, long p2) {
-    active_partitions.clear();
-    active_partitions.insert(p1);
-    active_partitions.insert(p2);
-    update_active_nodes();
-}
+// // Prepare the flooder to fuse partitions p1 and p2
+// void GraphFlooder::prepare_for_fuse_partitions(int tid, long p_without_virtuals, long p_with_virtuals) {
+//     active_partitions.clear();
+//     active_partitions.insert(p_without_virtuals);
+//     active_partitions.insert(p_with_virtuals);
+//     if (DEBUG)
+//         std::cout << "  DEBUG: Thread " << tid << " solver preparing to fuse partitions "
+//                   << p_without_virtuals << " and " << p_with_virtuals << std::endl;
+//     for (DetectorNode& node : graph.nodes)
+//         if ((node.partition == p_without_virtuals && !node.is_cross_partition) ||
+//             (node.partition == p_with_virtuals))
+//             node.is_active = tid;
+//     current_tid = tid;
+// }
+// ===============
 #endif

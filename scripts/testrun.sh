@@ -6,16 +6,15 @@
 
 # export SHMEM_OFI_PROVIDER=ofi_rxm
 
-if [ $# -le 4 ]
+if [ $# -le 3 ]
   then
-    echo "Args: [ppn] [nthreads] [shots] [rounds] [M]"
+    echo "Args: [nthreads] [shots] [rounds] [M]"
     exit 1
 else
-    ppn=$1
-    nthreads=$2
-    shots=$3
-    rounds=$4
-    M=$5
+    nthreads=$1
+    shots=$2
+    rounds=$(($3-1))
+    M=$4
 fi
 
 if [ ! -d "run" ]
@@ -25,18 +24,18 @@ fi
 
 cd run
 
-hosts=$(srun hostname | sort | uniq | paste -sd, -)
-# Function to create a hostfile with specified slots per host
-create_hostfile() {
-  local hostfile="hostfile.txt"
-  # Clear the hostfile if it exists
-  > "$hostfile"
-  # Write each host and its slots to the hostfile
-  for host in ${hosts//,/ }; do
-    echo "$host slots=$ppn" >> "$hostfile"
-  done
-}
-create_hostfile
+# hosts=$(srun hostname | sort | uniq | paste -sd, -)
+# # Function to create a hostfile with specified slots per host
+# create_hostfile() {
+#   local hostfile="hostfile.txt"
+#   # Clear the hostfile if it exists
+#   > "$hostfile"
+#   # Write each host and its slots to the hostfile
+#   for host in ${hosts//,/ }; do
+#     echo "$host slots=$ppn" >> "$hostfile"
+#   done
+# }
+# create_hostfile
 
 rm *.01 circuit.stim *.b8 *.dem
 
@@ -55,8 +54,8 @@ fi
 
 stim gen \
     --rounds=$rounds \
-    --distance=20 \
-    --after_clifford_depolarization=0.03 \
+    --distance=10 \
+    --after_clifford_depolarization=0.01 \
     --code repetition_code \
     --task memory \
     > circuit.stim
@@ -73,71 +72,70 @@ stim detect \
     --out detection_events.b8 \
     --out_format b8
 
-if [ $ppn -le 0 ]
-  then
-    ~/PyMatchingSHMEM/build_threads/pymatching predict \
-        --dem error_model.dem \
-        --in detection_events.b8 \
-        --in_format b8 \
-        --out predicted_obs_flips__without_shmem.01 \
-        --out_format 01 \
-        --rounds_per_partition $M \
-        > log_serial.out
-else
-    oshrun --hostfile hostfile.txt -N $ppn \
-        ~/PyMatchingSHMEM/build_osss/pymatching predict \
-        --dem error_model.dem \
-        --in detection_events.b8 \
-        --in_format b8 \
-        --out predicted_obs_flips__without_shmem.01 \
-        --out_format 01 \
-        --rounds_per_partition $M > log_serial.out
-fi
+echo "Starting serial run..."
+start_serial=$(date +%s)
+~/PyMatchingSHMEM/build/pymatching predict \
+    --dem error_model.dem \
+    --in detection_events.b8 \
+    --in_format b8 \
+    --out predicted_obs_flips.01 \
+    --out_format 01 \
+    > log_serial.out
+end_serial=$(date +%s)
+serial_time=$((end_serial - start_serial))
+echo "Serial run completed in $serial_time seconds."
 
 echo Serial
 echo correct predictions:
-paste -d " " predicted_obs_flips__without_shmem.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
+paste -d " " predicted_obs_flips.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
 echo wrong predictions:
-paste -d " " predicted_obs_flips__without_shmem.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
+paste -d " " predicted_obs_flips.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
 echo
 
 # Run prediction
 if [ $nthreads -gt 0 ]
   then
     export OMP_NUM_THREADS=$nthreads
+    export OMP_PLACES=cores
+    export OMP_PROC_BIND=true
 fi
 
-if [ $ppn -le 0 ]
-  then
+# Parallel run with timing
+echo "Starting parallel run..."
+start_parallel=$(date +%s)
+# if [ $ppn -le 0 ]
+#   then
     ~/PyMatchingSHMEM/build_threads/pymatching predict \
         --dem error_model.dem \
         --in detection_events.b8 \
         --in_format b8 \
-        --out predicted_obs_flips__without_shmem.01 \
+        --out predicted_obs_flips__threads.01 \
         --out_format 01 \
         --rounds_per_partition $M \
-        --parallel \
-        --draw_frames \
+        --use_threads \
         > log_parallel.out
-else
-    oshrun --hostfile hostfile.txt -N $ppn \
-      ~/PyMatchingSHMEM/build_osss/pymatching predict \
-        --dem error_model.dem \
-        --in detection_events.b8 \
-        --in_format b8 \
-        --out predicted_obs_flips__with_shmem.01 \
-        --out_format 01 \
-        --rounds_per_partition $M \
-        --parallel \
-        > log_parallel.out
-fi
+# else
+#     oshrun --hostfile hostfile.txt -N $ppn \
+#       ~/PyMatchingSHMEM/build_osss/pymatching predict \
+#         --dem error_model.dem \
+#         --in detection_events.b8 \
+#         --in_format b8 \
+#         --out predicted_obs_flips__with_shmem.01 \
+#         --out_format 01 \
+#         --rounds_per_partition $M \
+#         --parallel \
+#         > log_parallel.out
+# fi
+end_parallel=$(date +%s)
+parallel_time=$((end_parallel - start_parallel))
+echo "Parallel run completed in $parallel_time seconds."
 
 # Check work
 echo Parallel
 echo correct predictions:
-paste -d " " predicted_obs_flips__with_shmem.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
+paste -d " " predicted_obs_flips__threads.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
 echo wrong predictions:
-paste -d " " predicted_obs_flips__with_shmem.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
+paste -d " " predicted_obs_flips__threads.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
 
 echo
 echo Shots with differring predictions:
@@ -146,7 +144,7 @@ awk 'NR==FNR{a[NR]=$0; n=NR; next} {
 } END {
   if (n>FNR) { for (i=FNR+1;i<=n;i++) { print i-1; out=1 } }
   if (!out) print "no differences"
-}' predicted_obs_flips__without_shmem.01 predicted_obs_flips__with_shmem.01
+}' predicted_obs_flips.01 predicted_obs_flips__threads.01
 
 rm hostfile.txt
 cd ..

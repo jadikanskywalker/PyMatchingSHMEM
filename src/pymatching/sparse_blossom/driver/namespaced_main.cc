@@ -21,15 +21,16 @@
 #include <vector>
 
 #include "pymatching/sparse_blossom/diagram/animation_main.h"
+#include "pymatching/sparse_blossom/driver/helpers/fast_b8_reader.h"
 #include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
 #include "pymatching/sparse_blossom/driver/user_graph.h"
 #include "stim.h"
 
-#ifdef USE_SHMEM
-// ===============
-#include <shmem.h>
-#include "../config_shmem.h"
+#ifdef USE_THREADS
+#include "pymatching/sparse_blossom/driver/parallel/decoding_set.h"
+#include "../config_parallel.h"
 #include "../diagram/mwpm_diagram.h"
+#include <omp.h>
 // ===============
 #endif
 
@@ -42,12 +43,12 @@ int main_predict(int argc, const char **argv) {
             "--out",
             "--out_format",
             "--dem",
-            "--enable_correlations",
-#ifdef USE_SHMEM
+            "--enable_correlations"
+#ifdef USE_THREADS
 // ===============
-            "--rounds_per_partition",
-            "--parallel",
-            "--draw_frames"
+            , "--rounds_per_partition",
+            "--draw_frames",
+            "--use_threads"
 // ===============
 #endif
         },
@@ -66,11 +67,11 @@ int main_predict(int argc, const char **argv) {
     bool append_obs = stim::find_bool_argument("--in_includes_appended_observables", argc, argv);
     bool enable_correlations = stim::find_bool_argument("--enable_correlations", argc, argv);
 
-#ifdef USE_SHMEM
+#ifdef USE_THREADS
 // ===============
-    config_shmem::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
-    bool parallel = stim::find_bool_argument("--parallel", argc, argv);
+    config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
+    bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);
 // ===============
 #endif
 
@@ -84,79 +85,40 @@ int main_predict(int argc, const char **argv) {
     writer->begin_result_type('L');
 
     pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
+
+#ifdef USE_THREADS
+    auto decoding_units = pm::detector_error_model_to_decoding_units(
+        dem,
+        num_buckets,
+        /*ensure_search_flooder_included=*/enable_correlations,
+        /*enable_correlations=*/enable_correlations);
+    DecodingSet decoding_set(std::move(decoding_units), std::move(reader), std::move(writer), enable_correlations, draw_frames);
+    decoding_set.build_solvers(omp_get_max_threads(), dem);
+    pm::setup_output_dirs(draw_frames, use_threads);
+#else
     auto mwpm = pm::detector_error_model_to_mwpm(
         dem,
         num_buckets,
         /*ensure_search_flooder_included=*/enable_correlations,
         /*enable_correlations=*/enable_correlations);
-
+    
     stim::SparseShot sparse_shot;
     sparse_shot.clear();
     pm::ExtendedMatchingResult res(mwpm.flooder.graph.num_observables);
+#endif
 
-#ifdef USE_SHMEM
+    using std::chrono::steady_clock;
+    using std::chrono::duration_cast;
+    using std::chrono::duration;
+    using std::chrono::milliseconds;
+
+    auto t1 = steady_clock::now();
+
+#ifdef USE_THREADS
 // ===============
-    if (DEBUG) {
-        pm::setup_output_dirs(draw_frames);
-        output_detector_nodes(mwpm, parallel);
-    }
-    mwpm.coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
-
-    int mype = shmem_my_pe();
-    if (DEBUG)
-        std::cout << "DEBUG: PE " << mype << " dem.count_detectors() : " << dem.count_detectors() << std::endl;
-    long *hits_size = (long *)shmem_malloc(sizeof(long));
-    uint64_t *hits = (uint64_t *)shmem_malloc(dem.count_detectors() * sizeof(uint64_t));
-    // Start processing shots
-    int i = 0;
-    while (true) {
-        // PE 0 reads the shot
-        if (mype == 0) {
-            if (reader->start_and_read_entire_record(sparse_shot)) {
-                *hits_size = (long) sparse_shot.hits.size();
-                // Copy hits into buffer
-                for (size_t i = 0; i < *hits_size; ++i)
-                    hits[i] = sparse_shot.hits[i];
-            } else {
-                *hits_size = -1;
-            }
-        }
-        shmem_barrier_all();
-        // Broadcast hits size
-        shmem_long_broadcast(SHMEM_TEAM_WORLD, hits_size, hits_size, 1, 0);
-        if (*hits_size < 0) {
-            shmem_barrier_all();
-            shmem_free(hits_size);
-            shmem_free(hits);
-            // no more shots
-            break;
-        }
-        shmem_barrier_all();
-        // Broadcast hits data
-        shmem_uint64_broadcast(SHMEM_TEAM_WORLD, hits, hits, *hits_size, 0);
-        // Populate sparse_shot.hits from buffer
-        if (mype != 0) {
-            sparse_shot.hits.assign(hits, hits + *hits_size);
-        }
-        // Decode shot
-        if (parallel)
-            pm::decode_detection_events_in_parallel(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
-        else
-            pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations, i, draw_frames);
-        if (mype == 0) {
-            for (size_t k = 0; k < num_obs; k++) {
-                writer->write_bit(res.obs_crossed[k]);
-            }
-            writer->write_end();
-        }
-
-        sparse_shot.clear();
-        res.reset();
-        i++;
-    }
-// ===============
+    decoding_set.decode_shots();
 #else
-    while (reader->start_and_read_entire_record(sparse_shot)) {
+    while (pm::start_and_read_entire_record_buffered(*reader, sparse_shot)) {
         pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations);
         for (size_t k = 0; k < num_obs; k++) {
             writer->write_bit(res.obs_crossed[k]);
@@ -166,6 +128,14 @@ int main_predict(int argc, const char **argv) {
         res.reset();
     }
 #endif
+
+    auto t2 = steady_clock::now();
+    /* Getting number of milliseconds as an integer. */
+    auto ms_int = duration_cast<milliseconds>(t2 - t1);
+    /* Getting number of milliseconds as a double. */
+    duration<double, std::milli> ms_double = t2 - t1;
+    std::cout << "Decoding time: " << ms_double.count() << "ms\n";
+
     if (predictions_out != stdout) {
         fclose(predictions_out);
     }
@@ -277,8 +247,6 @@ int pm::main(int argc, const char **argv) {
 #ifdef USE_SHMEM
 // ===============
             shmem_init();
-            if (DEBUG)
-                std::cout << "DEBUG: PE " << shmem_my_pe() << " is running main_predict" << std::endl;
 // ===============
 #endif
             int status = main_predict(argc, argv);

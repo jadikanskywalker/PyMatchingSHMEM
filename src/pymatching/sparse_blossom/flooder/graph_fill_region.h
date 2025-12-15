@@ -22,6 +22,10 @@
 #include "pymatching/sparse_blossom/flooder_matcher_interop/varying.h"
 #include "pymatching/sparse_blossom/tracker/queued_event_tracker.h"
 
+#ifdef USE_THREADS
+#include "pymatching/sparse_blossom/arena.h"
+#endif
+
 namespace pm {
 
 class AltTreeNode;
@@ -57,6 +61,10 @@ struct GraphFillRegion {
     std::vector<pm::DetectorNode*> shell_area;
 
     void cleanup_shell_area();
+
+#ifdef USE_THREADS
+    Arena<GraphFillRegion>* owner_arena;
+#endif
 
     GraphFillRegion();
     GraphFillRegion(GraphFillRegion&&);
