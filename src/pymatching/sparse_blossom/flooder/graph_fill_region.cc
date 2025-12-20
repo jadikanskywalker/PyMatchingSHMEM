@@ -24,7 +24,12 @@ GraphFillRegion::GraphFillRegion()
       blossom_parent_top(this),
       alt_tree_node(nullptr),
       radius((0 << 2) + 1),
-      shrink_event_tracker() {
+    shrink_event_tracker()
+#ifdef USE_THREADS
+    , owner_arena(nullptr)
+    , solver_set_idx(-1)
+#endif
+{
 }
 GraphFillRegion::GraphFillRegion(GraphFillRegion &&other)
     : blossom_parent(other.blossom_parent),
@@ -36,7 +41,8 @@ GraphFillRegion::GraphFillRegion(GraphFillRegion &&other)
       blossom_children(std::move(other.blossom_children)),
       shell_area(std::move(other.shell_area))
 #ifdef USE_THREADS
-      , owner_arena(other.owner_arena)
+    , owner_arena(other.owner_arena)
+    , solver_set_idx(other.solver_set_idx)
 #endif
     {
 }
@@ -72,7 +78,11 @@ void GraphFillRegion::add_match(GraphFillRegion *region, const CompressedEdge &e
 
 void GraphFillRegion::cleanup_shell_area() {
     for (auto &detector_node : shell_area) {
+#ifdef USE_THREADS
+        detector_node->reset(solver_set_idx);
+#else
         detector_node->reset();
+#endif
     }
 }
 
@@ -81,8 +91,14 @@ void GraphFillRegion::clear_blossom_parent() {
     do_op_for_each_descendant_and_self([&](GraphFillRegion *descendant) {
         descendant->blossom_parent_top = this;
         for (DetectorNode *n : descendant->shell_area) {
+#ifdef USE_THREADS
+            auto &node_state = n->state(solver_set_idx);
+            node_state.region_that_arrived_top = this;
+            node_state.wrapped_radius_cached = n->compute_wrapped_radius(solver_set_idx);
+#else
             n->region_that_arrived_top = this;
             n->wrapped_radius_cached = n->compute_wrapped_radius();
+#endif
         }
     });
 }
@@ -92,7 +108,11 @@ void GraphFillRegion::clear_blossom_parent_ignoring_wrapped_radius() {
     do_op_for_each_descendant_and_self([&](GraphFillRegion *descendant) {
         descendant->blossom_parent_top = this;
         for (DetectorNode *n : descendant->shell_area) {
+#ifdef USE_THREADS
+            n->state(solver_set_idx).region_that_arrived_top = this;
+#else
             n->region_that_arrived_top = this;
+#endif
         }
     });
 }
@@ -102,8 +122,14 @@ void GraphFillRegion::wrap_into_blossom(GraphFillRegion *new_blossom_parent_and_
     do_op_for_each_descendant_and_self([&](GraphFillRegion *descendant) {
         descendant->blossom_parent_top = new_blossom_parent_and_top;
         for (DetectorNode *n : descendant->shell_area) {
+#ifdef USE_THREADS
+            auto &node_state = n->state(solver_set_idx);
+            node_state.region_that_arrived_top = new_blossom_parent_and_top;
+            node_state.wrapped_radius_cached = n->compute_wrapped_radius(solver_set_idx);
+#else
             n->region_that_arrived_top = new_blossom_parent_and_top;
             n->wrapped_radius_cached = n->compute_wrapped_radius();
+#endif
         }
     });
 }

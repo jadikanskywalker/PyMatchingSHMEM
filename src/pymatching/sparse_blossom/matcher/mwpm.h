@@ -49,7 +49,6 @@ struct Mwpm {
 
 #ifdef USE_THREADS
     std::pair<std::vector<std::pair<float, float>>, std::vector<std::pair<float, float>>> coords;
-
     Task* task{ nullptr };
 #endif
 

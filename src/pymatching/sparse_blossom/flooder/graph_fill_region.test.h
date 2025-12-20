@@ -28,6 +28,9 @@ struct GraphFillTestData {
     };
     RegionEdge b(int loc_from, int loc_to, std::vector<RegionEdge> edges, bool root = false) {
         auto r = arena.alloc_default_constructed();
+#ifdef USE_THREADS
+        r->solver_set_idx = 0;
+#endif
         r->blossom_children = std::move(edges);
         for (auto c : r->blossom_children) {
             c.region->wrap_into_blossom(r);

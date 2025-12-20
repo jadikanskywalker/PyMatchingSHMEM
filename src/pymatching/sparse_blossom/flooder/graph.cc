@@ -114,6 +114,11 @@ void MatchingGraph::add_boundary_edge(
 MatchingGraph::MatchingGraph(size_t num_nodes, size_t num_observables)
     : negative_weight_sum(0), num_nodes(num_nodes), num_observables(num_observables), normalising_constant(0) {
     nodes.resize(num_nodes);
+// #ifdef USE_THREADS
+//     for (int idx=0; idx < NUM_SHOTS_PER_ACTIVE_UNIT; ++idx) {
+//         ephemeral_feilds[idx].resize(num_nodes);
+//     }
+// #endif
 }
 
 MatchingGraph::MatchingGraph(size_t num_nodes, size_t num_observables, double normalising_constant)
@@ -122,6 +127,11 @@ MatchingGraph::MatchingGraph(size_t num_nodes, size_t num_observables, double no
       num_observables(num_observables),
       normalising_constant(normalising_constant) {
     nodes.resize(num_nodes);
+// #ifdef USE_THREADS
+//     for (int idx=0; idx < NUM_SHOTS_PER_ACTIVE_UNIT; ++idx) {
+//         ephemeral_feilds[idx].resize(num_nodes);
+//     }
+// #endif
 }
 
 MatchingGraph::MatchingGraph(MatchingGraph&& graph) noexcept
