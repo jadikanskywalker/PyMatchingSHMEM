@@ -15,7 +15,7 @@
 #ifndef PYMATCHING2_DECODING_UNIT_H
 #define PYMATCHING2_DECODING_UNIT_H
 
-#include "../../config_parallel.h"
+#include "pymatching/sparse_blossom/config_parallel.h"
 #include "pymatching/sparse_blossom/driver/parallel/decoding_task.h"
 
 #include <vector>
