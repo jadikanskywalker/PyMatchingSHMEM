@@ -116,63 +116,6 @@ struct StateHelper {
     const std::vector<std::pair<float, float>> &boundary_coords;
     std::ostream &out;
 
-#ifdef USE_THREADS
-    inline const DetectorNodeEphemeralFeilds &node_state(const DetectorNode &node) const {
-        return node.state(mwpm.flooder.solver_set_idx);
-    }
-#endif
-
-    inline GraphFillRegion *region_that_arrived(const DetectorNode &node) const {
-#ifdef USE_THREADS
-        return node_state(node).region_that_arrived;
-#else
-        return node.region_that_arrived;
-#endif
-    }
-
-    inline GraphFillRegion *region_that_arrived_top(const DetectorNode &node) const {
-#ifdef USE_THREADS
-        return node_state(node).region_that_arrived_top;
-#else
-        return node.region_that_arrived_top;
-#endif
-    }
-
-    inline DetectorNode *reached_from_source(const DetectorNode &node) const {
-#ifdef USE_THREADS
-        return node_state(node).reached_from_source;
-#else
-        return node.reached_from_source;
-#endif
-    }
-
-    inline VaryingCT local_radius(const DetectorNode &node) const {
-#ifdef USE_THREADS
-        return node.local_radius(mwpm.flooder.solver_set_idx);
-#else
-        return node.local_radius();
-#endif
-    }
-
-    inline cumulative_time_int local_radius_at_time_bounded(
-        const DetectorNode &node, cumulative_time_int time, const GraphFillRegion &region) const {
-#ifdef USE_THREADS
-        return node.compute_local_radius_at_time_bounded_by_region(time, region, mwpm.flooder.solver_set_idx);
-#else
-        return node.compute_local_radius_at_time_bounded_by_region(time, region);
-#endif
-    }
-
-    inline std::optional<float> stitch_radius_at_time(
-        const DetectorNode &node, cumulative_time_int time, const GraphFillRegion &region, size_t neighbor_index) const {
-#ifdef USE_THREADS
-        return node.compute_stitch_radius_at_time_bounded_by_region_towards_neighbor(
-            time, region, neighbor_index, mwpm.flooder.solver_set_idx);
-#else
-        return node.compute_stitch_radius_at_time_bounded_by_region_towards_neighbor(time, region, neighbor_index);
-#endif
-    }
-
     std::pair<float, float> neighbor_coords(const DetectorNode &src, const DetectorNode *dst) {
         size_t k = &src - &ns[0];
         if (dst != nullptr) {
@@ -195,16 +138,15 @@ struct StateHelper {
     std::vector<std::vector<std::pair<float, float>>> approximate_region_polygons(GraphFillRegion *region) {
         std::map<DetectorNode *, std::set<std::pair<float, float>>> points_by_source;
         region->do_op_for_each_node_in_total_area([&](const DetectorNode *n) {
-            auto reached = reached_from_source(*n);
-            auto &perimeter = points_by_source[reached];
-            if (local_radius_at_time_bounded(*n, t, *region) == 0) {
+            auto &perimeter = points_by_source[n->reached_from_source];
+            if (n->compute_local_radius_at_time_bounded_by_region(t, *region) == 0) {
                 perimeter.insert(coords[n - &ns[0]]);
                 return;
             }
 
             for (size_t nk = 0; nk < n->neighbor_weights.size(); nk++) {
                 auto w = n->neighbor_weights[nk];
-                auto r = stitch_radius_at_time(*n, t, *region, nk);
+                auto r = n->compute_stitch_radius_at_time_bounded_by_region_towards_neighbor(t, *region, nk);
                 if (!r.has_value()) {
                     continue;
                 }
@@ -269,7 +211,7 @@ struct StateHelper {
     void draw_unexcited_detector_nodes() {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
-            if (reached_from_source(n) != &n) {
+            if (n.reached_from_source != &n) {
                 out << " <circle cx=\"" << coords[k].first << "\" cy=\"" << coords[k].second << "\" r=\"" << 3
                     << "\" stroke=\"none"
                     << "\" fill=\"#CCC\"/>\n";
@@ -279,12 +221,15 @@ struct StateHelper {
 
     std::set<GraphFillRegion *> find_all_regions() {
         std::set<GraphFillRegion *> regions;
+#ifdef USE_THREADS
+        int tid = omp_get_thread_num();
+#endif
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
 #ifdef USE_THREADS
             if (n.vb >= 0 && (n.vb <= mwpm.flooder.vb_left || n.vb >= mwpm.flooder.vb_right)) continue;
 #endif
-            GraphFillRegion *r = region_that_arrived(n);
+            GraphFillRegion *r = n.region_that_arrived;
             while (r != nullptr) {
                 regions.insert(r);
                 r = r->blossom_parent;
@@ -306,7 +251,7 @@ struct StateHelper {
     void draw_detection_events() {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
-            if (reached_from_source(n) == &n) {
+            if (n.reached_from_source == &n) {
                 out << " <circle cx=\"" << coords[k].first << "\" cy=\"" << coords[k].second << "\" r=\"" << 3
                     << "\" stroke=\"none"
                     << "\" fill=\"red\"/>\n";
@@ -321,22 +266,22 @@ struct StateHelper {
             if (n.vb >= 0 && (n.vb <= mwpm.flooder.vb_left || n.vb >= mwpm.flooder.vb_right))
                 continue;
 #endif
-            if (region_that_arrived_top(n) == nullptr) {
+            if (n.region_that_arrived_top == nullptr) {
                 continue;
             }
             auto ev = mwpm.flooder.find_next_event_at_node_returning_neighbor_index_and_time(n);
             if (ev.first != SIZE_MAX && ev.second == t) {
-                auto r1 = local_radius(n);
+                auto r1 = n.local_radius();
                 auto m = n.neighbors[ev.first];
-                auto r2 = m == nullptr ? VaryingCT{0} : local_radius(*m);
+                auto r2 = m == nullptr ? VaryingCT{0} : m->local_radius();
                 if (!r1.colliding_with(r2)) {
                     continue;
                 }
                 if (r1.get_distance_at_time(t) + r2.get_distance_at_time(t) != n.neighbor_weights[ev.first]) {
                     continue;
                 }
-                if (m != nullptr &&
-                    (region_that_arrived_top(*m) == nullptr || region_that_arrived_top(*m) == region_that_arrived_top(n))) {
+                if (m != nullptr && (m->region_that_arrived_top == nullptr ||
+                                     m->region_that_arrived_top == n.region_that_arrived_top)) {
                     continue;
                 }
                 auto col = lerp_pos(
@@ -501,19 +446,9 @@ void pm::write_animated_decoding_svg_frames(
     for (auto &detection : detection_events) {
         mwpm.create_detection_event(&mwpm.flooder.graph.nodes[detection]);
     }
-#ifdef USE_THREADS
-    auto region_top_for_node = [&](DetectorNode &node) -> GraphFillRegion * {
-        return node.state(mwpm.flooder.solver_set_idx).region_that_arrived_top;
-    };
-#else
-    auto region_top_for_node = [&](DetectorNode &node) -> GraphFillRegion * {
-        return node.region_that_arrived_top;
-    };
-#endif
     auto check_if_done = [&]() {
         for (auto &detection : detection_events) {
-            auto *region_top = region_top_for_node(mwpm.flooder.graph.nodes[detection]);
-            if (region_top == nullptr || !region_top->radius.is_frozen()) {
+            if (!mwpm.flooder.graph.nodes[detection].region_that_arrived_top->radius.is_frozen()) {
                 return false;
             }
         }

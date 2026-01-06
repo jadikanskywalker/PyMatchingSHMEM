@@ -68,23 +68,15 @@ struct GraphFlooder {
     pm::total_weight_int negative_weight_sum{ 0 };
 
 #ifdef USE_THREADS
-    const int solver_set_idx{ -1 };
     int current_shot=-1;
     int vb_left, vb_right;
-
-    inline DetectorNodeEphemeralFeilds& node_state(DetectorNode& node) const {
-        return node.state(solver_set_idx);
-    }
-    inline const DetectorNodeEphemeralFeilds& node_state(const DetectorNode& node) const {
-        return node.state(solver_set_idx);
-    }
 #endif
 
     GraphFlooder();
 #ifdef USE_THREADS
 // ===============
     // Construct with a shared graph pointer (shared across solvers)
-    explicit GraphFlooder(std::shared_ptr<MatchingGraph> graph, int solver_set_idx);
+    explicit GraphFlooder(std::shared_ptr<MatchingGraph> graph);
 // ===============
 #endif
     explicit GraphFlooder(MatchingGraph graph);

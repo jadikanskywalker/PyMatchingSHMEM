@@ -35,21 +35,11 @@ struct PreviousWeight {
     }
 };
 
-// #ifdef USE_THREADS
-// struct EphemeralFeildsArray {
-//     std::vector<DetectorNodeEphemeralFeilds> data;
-//     int shot;
-// }
-// #endif
-
 /// A collection of detector nodes. It's expected that all detector nodes in the graph
 /// will only refer to other detector nodes within the same graph.
 class MatchingGraph {
    public:
     std::vector<DetectorNode> nodes;
-// #ifdef USE_THREADS
-//     std::array<std::vector<DetectorNodeEphemeralFeilds>, NUM_ACTIVE_SHOTS_PER_UNIT> ephemeral_feild_vectors; // Ephemeral states separated from nodes
-// #endif
     /// These are the detection events that would occur if an error occurred on every edge with a negative weight
     std::set<size_t> negative_weight_detection_events_set;
     /// These are the observables that would be flipped if an error occurred on every edge with a negative weight

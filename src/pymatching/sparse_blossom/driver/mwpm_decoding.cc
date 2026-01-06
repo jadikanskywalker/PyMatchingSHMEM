@@ -153,11 +153,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
         // if (DEBUG) std::cout << "  DEBUG: negative detection events" << std::endl;
         // First mark nodes with negative weight detection events
         for (auto& det : mwpm.flooder.negative_weight_detection_events) {
-#ifdef USE_THREADS
-            mwpm.flooder.node_state(mwpm.flooder.graph.nodes[det]).radius_of_arrival = 1;
-#else
             mwpm.flooder.graph.nodes[det].radius_of_arrival = 1;
-#endif
         }
 
         // Now add detection events for unmarked nodes
@@ -166,35 +162,20 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
                 throw std::invalid_argument(
                     "Detection event index `" + std::to_string(detection) +
                     "` is larger than any detector node index in the graph.");
-#ifdef USE_THREADS
-            auto &node_state = mwpm.flooder.node_state(mwpm.flooder.graph.nodes[detection]);
-            if (!node_state.radius_of_arrival) {
-#else
             if (!mwpm.flooder.graph.nodes[detection].radius_of_arrival) {
-#endif
                 if (detection + 1 > mwpm.flooder.graph.is_user_graph_boundary_node.size() ||
                     !mwpm.flooder.graph.is_user_graph_boundary_node[detection])
                     mwpm.create_detection_event(&mwpm.flooder.graph.nodes[detection]);
             } else {
                 // Unmark node
-#ifdef USE_THREADS
-                node_state.radius_of_arrival = 0;
-#else
                 mwpm.flooder.graph.nodes[detection].radius_of_arrival = 0;
-#endif
             }
         }
 
         for (auto& det : mwpm.flooder.negative_weight_detection_events) {
-#ifdef USE_THREADS
-            auto &node_state = mwpm.flooder.node_state(mwpm.flooder.graph.nodes[det]);
-            if (node_state.radius_of_arrival) {
-                node_state.radius_of_arrival = 0;
-#else
             if (mwpm.flooder.graph.nodes[det].radius_of_arrival) {
                 // Add a detection event if the node is still marked
                 mwpm.flooder.graph.nodes[det].radius_of_arrival = 0;
-#endif
 #ifdef USE_THREADS // Only add detection events for active non-virtual nodes
 // ===============
                 if (mwpm.flooder.graph.nodes[det].vb < 0 || (mwpm.flooder.graph.nodes[det].vb > mwpm.flooder.vb_left && mwpm.flooder.graph.nodes[det].vb < mwpm.flooder.vb_right))
@@ -278,14 +259,8 @@ shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events) {
     pm::MatchingResult res;
     for (auto& i : detection_events) {
-#ifdef USE_THREADS
-        auto &node_state = mwpm.flooder.node_state(mwpm.flooder.graph.nodes[i]);
-        if (node_state.region_that_arrived)
-            res += mwpm.shatter_blossom_and_extract_matches(node_state.region_that_arrived_top);
-#else
         if (mwpm.flooder.graph.nodes[i].region_that_arrived)
             res += mwpm.shatter_blossom_and_extract_matches(mwpm.flooder.graph.nodes[i].region_that_arrived_top);
-#endif
     }
     return res;
 }
@@ -297,15 +272,9 @@ void
 shatter_blossoms_for_all_detection_events_and_extract_match_edges(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events) {
     for (auto& i : detection_events) {
-#ifdef USE_THREADS
-        auto &node_state = mwpm.flooder.node_state(mwpm.flooder.graph.nodes[i]);
-        if (node_state.region_that_arrived)
-            mwpm.shatter_blossom_and_extract_match_edges(node_state.region_that_arrived_top, mwpm.flooder.match_edges);
-#else
         if (mwpm.flooder.graph.nodes[i].region_that_arrived)
             mwpm.shatter_blossom_and_extract_match_edges(
                 mwpm.flooder.graph.nodes[i].region_that_arrived_top, mwpm.flooder.match_edges);
-#endif
     }
 }
 
@@ -671,18 +640,17 @@ void pm::output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& dete
             out << "  -  NO DETECTION EVENT" << std::endl;
         if (parallel)
             out << "    vb: " << node->vb << std::endl;
-        const auto &state = mwpm.flooder.node_state(*node);
-        out << "    region_that_arrived: " << state.region_that_arrived << std::endl
-            << "    region_that_arrived_top: " << state.region_that_arrived_top << std::endl;
-        if (state.region_that_arrived != state.region_that_arrived_top)
-            out << "    NOTE: node.region_that_arrived != region_that_arrived_top" << std::endl;
-        out << "    wrapped_radius_cached: " << state.wrapped_radius_cached << std::endl
-            << "    reached_from_source: " << state.reached_from_source << std::endl;
-        if (state.reached_from_source != nullptr && state.reached_from_source != &(*node)) {
+        out << "    region_that_arrived: " << node->region_that_arrived << std::endl
+            << "    region_that_arrived_top: " << node->region_that_arrived_top << std::endl;
+        if (node->region_that_arrived != node->region_that_arrived_top)
+                out << "    NOTE: node.region_that_arrived != region_that_arrived_top" << std::endl;
+        out << "    wrapped_radius_cached: " << node->wrapped_radius_cached << std::endl
+            << "    reached_from_source: " << node->reached_from_source << std::endl;
+        if (node->reached_from_source != 0 && node->reached_from_source != &(*node)) {
             out << "    NOTE: node.reached_from_source != node" << std::endl;
         }
-        out << "    observables_crossed_from_source: " << state.observables_crossed_from_source << std::endl
-            << "    radius_of_arrival: " << state.radius_of_arrival << std::endl;
+        out << "    observables_crossed_from_source: " << node->observables_crossed_from_source << std::endl
+            << "    radius_of_arrival: " << node->radius_of_arrival << std::endl;
     }
     out.close();
 }

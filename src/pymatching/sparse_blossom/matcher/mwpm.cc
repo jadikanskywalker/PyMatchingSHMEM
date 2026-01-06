@@ -441,12 +441,7 @@ GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_matches(GraphFil
     for (auto &r : region->blossom_children) {
         r.region->clear_blossom_parent_ignoring_wrapped_radius();
     }
-#ifdef USE_THREADS
-    auto &loc_from_state = region->match.edge.loc_from->state(flooder.solver_set_idx);
-    auto subblossom = loc_from_state.region_that_arrived_top;
-#else
     auto subblossom = region->match.edge.loc_from->region_that_arrived_top;
-#endif
     subblossom->match = region->match;
     if (subblossom->match.region)
         subblossom->match.region->match.region = subblossom;
@@ -518,12 +513,7 @@ GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_match_edges(
     for (auto &r : region->blossom_children) {
         r.region->clear_blossom_parent_ignoring_wrapped_radius();
     }
-#ifdef USE_THREADS
-    auto &loc_from_state = region->match.edge.loc_from->state(flooder.solver_set_idx);
-    auto subblossom = loc_from_state.region_that_arrived_top;
-#else
     auto subblossom = region->match.edge.loc_from->region_that_arrived_top;
-#endif
     subblossom->match = region->match;
     if (subblossom->match.region)
         subblossom->match.region->match.region = subblossom;
@@ -591,7 +581,6 @@ void Mwpm::create_detection_event(DetectorNode *node) {
     auto region = flooder.region_arena.alloc_default_constructed();
 #ifdef USE_THREADS
     region->owner_arena = &flooder.region_arena;
-    region->solver_set_idx = flooder.solver_set_idx;
 #endif
     auto alt_tree_node = node_arena.alloc_unconstructed();
     new (alt_tree_node) AltTreeNode(region);
@@ -661,15 +650,8 @@ Mwpm::Mwpm() {
 }
 
 void Mwpm::reset() {
-    for (auto &n : flooder.graph.nodes) {
-#ifdef USE_THREADS
-        for (int solver_idx = 0; solver_idx < NUM_ACTIVE_SHOTS_PER_UNIT; ++solver_idx) {
-            n.reset(solver_idx);
-        }
-#else
+    for (auto &n : flooder.graph.nodes)
         n.reset();
-#endif
-    }
     for (auto &m : search_flooder.graph.nodes)
         m.reset();
     flooder.queue.clear();
