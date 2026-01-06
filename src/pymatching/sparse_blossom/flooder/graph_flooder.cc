@@ -36,7 +36,7 @@ GraphFlooder::GraphFlooder()
       negative_weight_sum(0) {}
 
 GraphFlooder::GraphFlooder(std::shared_ptr<MatchingGraph> graph, int solver_set_idx)
-    : graph_ptr(graph), graph(*graph_ptr), negative_weight_obs_mask(0), negative_weight_sum(0), solver_set_idx(solver_set_idx) {
+    : graph_ptr(graph), graph(*graph_ptr), negative_weight_obs_mask(0), negative_weight_sum(0), shot_rotating_idx(solver_set_idx) {
 }
 
 GraphFlooder::GraphFlooder(MatchingGraph graph_val)
@@ -56,7 +56,8 @@ GraphFlooder::GraphFlooder(GraphFlooder &&flooder) noexcept
       negative_weight_observables(std::move(flooder.negative_weight_observables)),
       negative_weight_obs_mask(flooder.negative_weight_obs_mask),
       negative_weight_sum(flooder.negative_weight_sum),
-      solver_set_idx(flooder.solver_set_idx) {
+      shot_rotating_idx(flooder.shot_rotating_idx)
+    {
 }
 // ===============
 #else
@@ -107,7 +108,7 @@ inline bool GraphFlooder::is_active(const DetectorNode *node) const {
 
 void GraphFlooder::do_region_created_at_empty_detector_node(GraphFillRegion &region, DetectorNode &detector_node) {
 #ifdef USE_THREADS
-    auto &node = node_state(detector_node);
+    auto &node = detector_node.state(shot_rotating_idx);
     node.reached_from_source = &detector_node;
     node.radius_of_arrival = 0;
     node.region_that_arrived = &region;
@@ -162,7 +163,7 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_g
 #endif
 
 #ifdef USE_THREADS
-        auto rad2 = neighbor->local_radius(solver_set_idx);
+        auto rad2 = neighbor->local_radius(shot_rotating_idx);
 #else
         auto rad2 = neighbor->local_radius();
 #endif
@@ -229,7 +230,7 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growi
 
         if (
     #ifdef USE_THREADS
-            detector_node.has_same_owner_as(*neighbor, solver_set_idx)
+            detector_node.has_same_owner_as(*neighbor, shot_rotating_idx)
     #else
             detector_node.has_same_owner_as(*neighbor)
     #endif
@@ -237,7 +238,7 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growi
             continue;
         }
     #ifdef USE_THREADS
-        auto rad2 = neighbor->local_radius(solver_set_idx);
+        auto rad2 = neighbor->local_radius(shot_rotating_idx);
     #else
         auto rad2 = neighbor->local_radius();
     #endif
@@ -260,7 +261,7 @@ std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growi
 std::pair<size_t, cumulative_time_int> GraphFlooder::find_next_event_at_node_returning_neighbor_index_and_time(
     const DetectorNode &detector_node) const {
 #ifdef USE_THREADS
-    auto rad1 = detector_node.local_radius(solver_set_idx);
+    auto rad1 = detector_node.local_radius(shot_rotating_idx);
 #else
     auto rad1 = detector_node.local_radius();
 #endif
@@ -284,13 +285,13 @@ void GraphFlooder::reschedule_events_at_detector_node(DetectorNode &detector_nod
     auto x = find_next_event_at_node_returning_neighbor_index_and_time(detector_node);
     if (x.first == SIZE_MAX) {
     #ifdef USE_THREADS
-        node_state(detector_node).node_event_tracker.set_no_desired_event();
+        detector_node.state(shot_rotating_idx).node_event_tracker.set_no_desired_event();
     #else
         detector_node.node_event_tracker.set_no_desired_event();
     #endif
     } else {
     #ifdef USE_THREADS
-        node_state(detector_node).node_event_tracker.set_desired_event(
+        detector_node.state(shot_rotating_idx).node_event_tracker.set_desired_event(
     #else
         detector_node.node_event_tracker.set_desired_event(
     #endif
@@ -308,7 +309,7 @@ void GraphFlooder::schedule_tentative_shrink_event(GraphFillRegion &region) {
         t = region.radius.time_of_x_intercept_for_shrinking();
     } else {
 #ifdef USE_THREADS
-        t = region.shell_area.back()->local_radius(solver_set_idx).time_of_x_intercept_for_shrinking();
+        t = region.shell_area.back()->local_radius(shot_rotating_idx).time_of_x_intercept_for_shrinking();
 #else
         t = region.shell_area.back()->local_radius().time_of_x_intercept_for_shrinking();
 #endif
@@ -330,15 +331,15 @@ void GraphFlooder::do_region_arriving_at_empty_detector_node(
 // ===============
 #endif
 #ifdef USE_THREADS
-    const auto &from_state = node_state(from_node);
-    auto &empty_state = node_state(empty_node);
+    const auto &from_state = from_node.state(shot_rotating_idx);
+    auto &empty_state = empty_node.state(shot_rotating_idx);
     empty_state.observables_crossed_from_source =
         (from_state.observables_crossed_from_source ^ from_node.neighbor_observables[from_to_empty_index]);
     empty_state.reached_from_source = from_state.reached_from_source;
     empty_state.radius_of_arrival = region.radius.get_distance_at_time(queue.cur_time);
     empty_state.region_that_arrived = &region;
     empty_state.region_that_arrived_top = region.blossom_parent_top;
-    empty_state.wrapped_radius_cached = empty_node.compute_wrapped_radius(solver_set_idx);
+    empty_state.wrapped_radius_cached = empty_node.compute_wrapped_radius(shot_rotating_idx);
 #else
     empty_node.observables_crossed_from_source =
         (from_node.observables_crossed_from_source ^ from_node.neighbor_observables[from_to_empty_index]);
@@ -376,7 +377,7 @@ MwpmEvent GraphFlooder::do_region_shrinking(GraphFillRegion &region) {
 #endif
         region.shell_area.pop_back();
     #ifdef USE_THREADS
-        auto &leave_state = node_state(*leaving_node);
+        auto &leave_state = leaving_node->state(shot_rotating_idx);
         leave_state.region_that_arrived = nullptr;
         leave_state.region_that_arrived_top = nullptr;
         leave_state.wrapped_radius_cached = 0;
@@ -399,8 +400,8 @@ MwpmEvent GraphFlooder::do_region_shrinking(GraphFillRegion &region) {
 
 MwpmEvent GraphFlooder::do_neighbor_interaction(DetectorNode &src, size_t src_to_dst_index, DetectorNode &dst) {
 #ifdef USE_THREADS
-    auto &src_state = node_state(src);
-    auto &dst_state = node_state(dst);
+    auto &src_state = src.state(shot_rotating_idx);
+    auto &dst_state = dst.state(shot_rotating_idx);
 #endif
     // First check if one region is moving into an empty location
     if (
@@ -458,7 +459,7 @@ MwpmEvent GraphFlooder::do_region_hit_boundary_interaction(DetectorNode &node) {
     // Drop stale events that fired after shrinking/reset.
     if (
 #ifdef USE_THREADS
-        node_state(node).reached_from_source == nullptr || node_state(node).region_that_arrived_top == nullptr
+        node.state(shot_rotating_idx).reached_from_source == nullptr || node.state(shot_rotating_idx).region_that_arrived_top == nullptr
 #else
         node.reached_from_source == nullptr || node.region_that_arrived_top == nullptr
 #endif
@@ -467,8 +468,8 @@ MwpmEvent GraphFlooder::do_region_hit_boundary_interaction(DetectorNode &node) {
 // ===============
         if (DEBUG) {
             std::cout << "  DEBUG: drop stale boundary event at node " << &node
-                      << " rfs=" << node_state(node).reached_from_source
-                      << " top=" << node_state(node).region_that_arrived_top << std::endl;
+                      << " rfs=" << node.state(shot_rotating_idx).reached_from_source
+                      << " top=" << node.state(shot_rotating_idx).region_that_arrived_top << std::endl;
         }
 // ===============
 #endif
@@ -476,11 +477,11 @@ MwpmEvent GraphFlooder::do_region_hit_boundary_interaction(DetectorNode &node) {
     }
     return RegionHitBoundaryEventData{
 #ifdef USE_THREADS
-        node_state(node).region_that_arrived_top,
+        node.state(shot_rotating_idx).region_that_arrived_top,
         CompressedEdge{
-            node_state(node).reached_from_source,
+            node.state(shot_rotating_idx).reached_from_source,
             nullptr,
-            node_state(node).observables_crossed_from_source ^ node.neighbor_observables[0]}
+            node.state(shot_rotating_idx).observables_crossed_from_source ^ node.neighbor_observables[0]}
 #else
         node.region_that_arrived_top,
         CompressedEdge{
@@ -492,24 +493,24 @@ MwpmEvent GraphFlooder::do_region_hit_boundary_interaction(DetectorNode &node) {
 #ifdef USE_THREADS
 // ===============
 MwpmEvent GraphFlooder::do_region_hit_virtual_boundary_interaction(DetectorNode &node, size_t virtual_neighbor_index) {
-    if (node_state(node).reached_from_source == nullptr || node_state(node).region_that_arrived_top == nullptr) {
+    if (node.state(shot_rotating_idx).reached_from_source == nullptr || node.state(shot_rotating_idx).region_that_arrived_top == nullptr) {
         if (DEBUG) {
             std::cout << "  DEBUG: drop stale virtual boundary event at node " << &node
-                      << " rfs=" << node_state(node).reached_from_source
-                      << " top=" << node_state(node).region_that_arrived_top << std::endl;
+                      << " rfs=" << node.state(shot_rotating_idx).reached_from_source
+                      << " top=" << node.state(shot_rotating_idx).region_that_arrived_top << std::endl;
         }
         return MwpmEvent::no_event();
     }
     if (DEBUG)
         std::cout << "  DEBUG: region hit virtual boundary" << std::endl
                   << "    node: " << &node << std::endl
-                  << "    node.reached_from_source: " << node_state(node).reached_from_source << std::endl
-                  << "    node.region_that_arrived_top: " << node_state(node).region_that_arrived << std::endl
+                  << "    node.reached_from_source: " << node.state(shot_rotating_idx).reached_from_source << std::endl
+                  << "    node.region_that_arrived_top: " << node.state(shot_rotating_idx).region_that_arrived << std::endl
                   << "    node.neighbors[virtual_neighbor_index]: " << node.neighbors[virtual_neighbor_index] << std::endl;
     return RegionHitVirtualBoundaryEventData{
-        node_state(node).region_that_arrived_top,
-        CompressedEdge{node_state(node).reached_from_source, node.neighbors[virtual_neighbor_index],
-                       node_state(node).observables_crossed_from_source ^ node.neighbor_observables[virtual_neighbor_index]}};
+        node.state(shot_rotating_idx).region_that_arrived_top,
+        CompressedEdge{node.state(shot_rotating_idx).reached_from_source, node.neighbors[virtual_neighbor_index],
+                       node.state(shot_rotating_idx).observables_crossed_from_source ^ node.neighbor_observables[virtual_neighbor_index]}};
 }
 // ===============
 #endif
@@ -528,8 +529,8 @@ MwpmEvent GraphFlooder::do_blossom_shattering(GraphFillRegion &region) {
     return BlossomShatterEventData{
         &region,
 #ifdef USE_THREADS
-    region.alt_tree_node->parent.edge.loc_from->heir_region_on_shatter(region.solver_set_idx),
-    region.alt_tree_node->inner_to_outer_edge.loc_from->heir_region_on_shatter(region.solver_set_idx)
+    region.alt_tree_node->parent.edge.loc_from->heir_region_on_shatter(region.shot_rotating_idx),
+    region.alt_tree_node->inner_to_outer_edge.loc_from->heir_region_on_shatter(region.shot_rotating_idx)
 #else
         region.alt_tree_node->parent.edge.loc_from->heir_region_on_shatter(),
         region.alt_tree_node->inner_to_outer_edge.loc_from->heir_region_on_shatter()
@@ -541,7 +542,7 @@ GraphFillRegion *GraphFlooder::create_blossom(std::vector<RegionEdge> &contained
     auto blossom_region = region_arena.alloc_default_constructed();
 #ifdef USE_THREADS
     blossom_region->owner_arena = &region_arena;
-    blossom_region->solver_set_idx = solver_set_idx;
+    blossom_region->shot_rotating_idx = shot_rotating_idx;
 #endif
     blossom_region->radius = VaryingCT::growing_varying_with_zero_distance_at_time(queue.cur_time);
     blossom_region->blossom_children = std::move(contained_regions);
@@ -563,7 +564,7 @@ bool GraphFlooder::dequeue_decision(FloodCheckEvent ev) {
         case FloodCheckEventType::LOOK_AT_NODE: {
             auto &node = *ev.data_look_at_node;
 #ifdef USE_THREADS
-            return node_state(node).node_event_tracker.dequeue_decision(ev, queue);
+            return node.state(shot_rotating_idx).node_event_tracker.dequeue_decision(ev, queue);
 #else
             return node.node_event_tracker.dequeue_decision(ev, queue);
 #endif
@@ -627,7 +628,7 @@ void GraphFlooder::set_region_shrinking(GraphFillRegion &region) {
     // No node events can occur while shrinking.
     region.do_op_for_each_node_in_total_area([&](DetectorNode *n) {
 #ifdef USE_THREADS
-        node_state(*n).node_event_tracker.set_no_desired_event();
+        n->state(shot_rotating_idx).node_event_tracker.set_no_desired_event();
 #else
         n->node_event_tracker.set_no_desired_event();
 #endif
@@ -641,7 +642,7 @@ MwpmEvent GraphFlooder::do_look_at_node_event(DetectorNode &node) {
         // along another edge, or even along the same edge at a later time (e.g. if this event isn't the *first* event
         // for the neighbor along the current edge when the neighbor is being rescheduled).
 #ifdef USE_THREADS
-        node_state(node).node_event_tracker.set_desired_event(
+        node.state(shot_rotating_idx).node_event_tracker.set_desired_event(
 #else
         node.node_event_tracker.set_desired_event(
 #endif
@@ -669,7 +670,7 @@ MwpmEvent GraphFlooder::do_look_at_node_event(DetectorNode &node) {
     } else if (next.first != SIZE_MAX) {
         // Need to revisit this node at a later time.
 #ifdef USE_THREADS
-        node_state(node).node_event_tracker.set_desired_event(
+        node.state(shot_rotating_idx).node_event_tracker.set_desired_event(
 #else
         node.node_event_tracker.set_desired_event(
 #endif

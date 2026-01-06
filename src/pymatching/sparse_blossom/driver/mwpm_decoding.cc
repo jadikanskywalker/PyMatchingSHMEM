@@ -126,6 +126,8 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
 
 #ifdef USE_THREADS
     mwpm.unmatch_virtual_boundaries_between_partitions();
+
+    const int shot_rotating_idx = mwpm.flooder.shot_rotating_idx;
 #endif
 
     if (mwpm.flooder.negative_weight_detection_events.empty()) {
@@ -154,7 +156,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
         // First mark nodes with negative weight detection events
         for (auto& det : mwpm.flooder.negative_weight_detection_events) {
 #ifdef USE_THREADS
-            mwpm.flooder.node_state(mwpm.flooder.graph.nodes[det]).radius_of_arrival = 1;
+            mwpm.flooder.graph.nodes[det].state(shot_rotating_idx).radius_of_arrival = 1;
 #else
             mwpm.flooder.graph.nodes[det].radius_of_arrival = 1;
 #endif
@@ -167,8 +169,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
                     "Detection event index `" + std::to_string(detection) +
                     "` is larger than any detector node index in the graph.");
 #ifdef USE_THREADS
-            auto &node_state = mwpm.flooder.node_state(mwpm.flooder.graph.nodes[detection]);
-            if (!node_state.radius_of_arrival) {
+            if (!mwpm.flooder.graph.nodes[detection].state(shot_rotating_idx).radius_of_arrival) {
 #else
             if (!mwpm.flooder.graph.nodes[detection].radius_of_arrival) {
 #endif
@@ -178,7 +179,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
             } else {
                 // Unmark node
 #ifdef USE_THREADS
-                node_state.radius_of_arrival = 0;
+                mwpm.flooder.graph.nodes[detection].state(shot_rotating_idx).radius_of_arrival = 0;
 #else
                 mwpm.flooder.graph.nodes[detection].radius_of_arrival = 0;
 #endif
@@ -187,9 +188,8 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
 
         for (auto& det : mwpm.flooder.negative_weight_detection_events) {
 #ifdef USE_THREADS
-            auto &node_state = mwpm.flooder.node_state(mwpm.flooder.graph.nodes[det]);
-            if (node_state.radius_of_arrival) {
-                node_state.radius_of_arrival = 0;
+            if (mwpm.flooder.graph.nodes[det].state(shot_rotating_idx).radius_of_arrival) {
+                mwpm.flooder.graph.nodes[det].state(shot_rotating_idx).radius_of_arrival = 0;
 #else
             if (mwpm.flooder.graph.nodes[det].radius_of_arrival) {
                 // Add a detection event if the node is still marked
@@ -277,11 +277,13 @@ pm::MatchingResult
 shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events) {
     pm::MatchingResult res;
+#ifdef USE_THREADS
+    const int shot_rotating_idx = mwpm.flooder.shot_rotating_idx;
+#endif
     for (auto& i : detection_events) {
 #ifdef USE_THREADS
-        auto &node_state = mwpm.flooder.node_state(mwpm.flooder.graph.nodes[i]);
-        if (node_state.region_that_arrived)
-            res += mwpm.shatter_blossom_and_extract_matches(node_state.region_that_arrived_top);
+        if (mwpm.flooder.graph.nodes[i].state(shot_rotating_idx).region_that_arrived)
+            res += mwpm.shatter_blossom_and_extract_matches(mwpm.flooder.graph.nodes[i].state(shot_rotating_idx).region_that_arrived_top);
 #else
         if (mwpm.flooder.graph.nodes[i].region_that_arrived)
             res += mwpm.shatter_blossom_and_extract_matches(mwpm.flooder.graph.nodes[i].region_that_arrived_top);
@@ -296,11 +298,14 @@ void
 #endif
 shatter_blossoms_for_all_detection_events_and_extract_match_edges(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events) {
+#ifdef USE_THREADS
+    const int shot_rotating_idx = mwpm.flooder.shot_rotating_idx;
+#endif
     for (auto& i : detection_events) {
 #ifdef USE_THREADS
-        auto &node_state = mwpm.flooder.node_state(mwpm.flooder.graph.nodes[i]);
-        if (node_state.region_that_arrived)
-            mwpm.shatter_blossom_and_extract_match_edges(node_state.region_that_arrived_top, mwpm.flooder.match_edges);
+        if (mwpm.flooder.graph.nodes[i].state(shot_rotating_idx).region_that_arrived)
+            mwpm.shatter_blossom_and_extract_match_edges(
+                mwpm.flooder.graph.nodes[i].state(shot_rotating_idx).region_that_arrived_top, mwpm.flooder.match_edges);
 #else
         if (mwpm.flooder.graph.nodes[i].region_that_arrived)
             mwpm.shatter_blossom_and_extract_match_edges(
@@ -654,6 +659,7 @@ void pm::output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& dete
                   << "    blossom_children.size(): " << region->blossom_children.size() << std::endl;
     }
     out << "DEBUG: partition 0 detector nodes: " << std::endl;
+    const int shot_rotating_idx = mwpm.flooder.shot_rotating_idx;
     for (auto node  = mwpm.flooder.graph.nodes.begin(); node != mwpm.flooder.graph.nodes.end(); ++node) {
         // if (node->partition != 0 && !node->is_virtual) continue;
         out << "  node " << &(*node);
@@ -671,7 +677,7 @@ void pm::output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& dete
             out << "  -  NO DETECTION EVENT" << std::endl;
         if (parallel)
             out << "    vb: " << node->vb << std::endl;
-        const auto &state = mwpm.flooder.node_state(*node);
+        const auto &state = node->state(shot_rotating_idx);
         out << "    region_that_arrived: " << state.region_that_arrived << std::endl
             << "    region_that_arrived_top: " << state.region_that_arrived_top << std::endl;
         if (state.region_that_arrived != state.region_that_arrived_top)

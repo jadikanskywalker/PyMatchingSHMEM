@@ -68,16 +68,16 @@ struct GraphFlooder {
     pm::total_weight_int negative_weight_sum{ 0 };
 
 #ifdef USE_THREADS
-    const int solver_set_idx{ -1 };
+    const int shot_rotating_idx{ -1 };
     int current_shot=-1;
     int vb_left, vb_right;
 
-    inline DetectorNodeEphemeralFeilds& node_state(DetectorNode& node) const {
-        return node.state(solver_set_idx);
-    }
-    inline const DetectorNodeEphemeralFeilds& node_state(const DetectorNode& node) const {
-        return node.state(solver_set_idx);
-    }
+    // inline DetectorNodeEphemeralFeilds& node_state(DetectorNode& node) const {
+    //     return node.state(shot_rotating_idx);
+    // }
+    // inline const DetectorNodeEphemeralFeilds& node_state(const DetectorNode& node) const {
+    //     return node.state(shot_rotating_idx);
+    // }
 #endif
 
     GraphFlooder();

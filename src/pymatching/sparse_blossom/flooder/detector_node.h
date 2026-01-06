@@ -65,11 +65,11 @@ class DetectorNode {
     DetectorNode() = default;
     std::array<DetectorNodeEphemeralFeilds, NUM_ACTIVE_SHOTS_PER_UNIT> ephemeral_feilds{};
 
-    inline DetectorNodeEphemeralFeilds& state(int solver_idx) {
-        return ephemeral_feilds[solver_idx];
+    inline DetectorNodeEphemeralFeilds& state(int shot_rotating_idx) {
+        return ephemeral_feilds[shot_rotating_idx];
     }
-    inline const DetectorNodeEphemeralFeilds& state(int solver_idx) const {
-        return ephemeral_feilds[solver_idx];
+    inline const DetectorNodeEphemeralFeilds& state(int shot_rotating_idx) const {
+        return ephemeral_feilds[shot_rotating_idx];
     }
 #else
     DetectorNode()
@@ -108,9 +108,9 @@ class DetectorNode {
     /// After it reached this node, how much further did the owning search region grow? Also is it currently growing?
     inline VaryingCT local_radius(
 #ifdef USE_THREADS
-        int solver_idx
+        int shot_rotating_idx
     ) const {
-        const auto& s = ephemeral_feilds[solver_idx];
+        const auto& s = ephemeral_feilds[shot_rotating_idx];
         if (s.region_that_arrived_top == nullptr) {
             return VaryingCT{0};
         }
@@ -128,7 +128,7 @@ class DetectorNode {
     /// Determines the region that owns this node which is a child of this node's top region.
     GraphFillRegion* heir_region_on_shatter(
 #ifdef USE_THREADS
-        int solver_idx
+        int shot_rotating_idx
 #endif
     ) const;
 
@@ -137,10 +137,10 @@ class DetectorNode {
     inline bool has_same_owner_as(
         const DetectorNode& other
 #ifdef USE_THREADS
-        , int solver_idx
+        , int shot_rotating_idx
     ) const {
-        return ephemeral_feilds[solver_idx].region_that_arrived_top ==
-               other.ephemeral_feilds[solver_idx].region_that_arrived_top;
+        return ephemeral_feilds[shot_rotating_idx].region_that_arrived_top ==
+               other.ephemeral_feilds[shot_rotating_idx].region_that_arrived_top;
     }
 #else
     ) const {
@@ -152,7 +152,7 @@ class DetectorNode {
     /// Doesn't free anything or propagate a signal to other objects. Just zeros the fields.
     void reset(
 #ifdef USE_THREADS
-        int solver_idx
+        int shot_rotating_idx
 #endif
     );
 
@@ -165,7 +165,7 @@ class DetectorNode {
     /// accounts for everything except the (potentially varying) top level region.
     int32_t compute_wrapped_radius(
 #ifdef USE_THREADS
-        int solver_idx
+        int shot_rotating_idx
 #endif
     ) const;
 
@@ -177,7 +177,7 @@ class DetectorNode {
         cumulative_time_int time,
         const GraphFillRegion& bounding_region
 #ifdef USE_THREADS
-        , int solver_idx
+        , int shot_rotating_idx
 #endif
     ) const;
 
@@ -203,7 +203,7 @@ class DetectorNode {
         const GraphFillRegion& bounding_region,
         size_t neighbor_index
 #ifdef USE_THREADS
-        , int solver_idx
+        , int shot_rotating_idx
 #endif
     ) const;
 
