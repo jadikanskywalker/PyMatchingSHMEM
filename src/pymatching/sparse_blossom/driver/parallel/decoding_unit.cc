@@ -105,11 +105,13 @@ void DecodingUnit::build_solvers(
     if (ensure_search_flooder_included || enable_correlations)
         throw std::invalid_argument("Correlations and SearchFlooder are not yet supported with threads");
     solvers.clear();
-    solvers.reserve(static_cast<size_t>(num_threads));
-    for (int t = 0; t < num_threads; ++t) {
-        // Each solver shares the same MatchingGraph via shared_ptr.
-        solvers.emplace_back(std::make_shared<pm::Mwpm>(pm::GraphFlooder(graph_ptr)));
-        solvers[t]->flooder.sync_negative_weight_observables_and_detection_events();
+    solvers.reserve(static_cast<size_t>(num_threads*NUM_ACTIVE_SHOTS_PER_UNIT));
+    for (int idx = 0; idx < NUM_ACTIVE_SHOTS_PER_UNIT; ++idx) {
+        for (int t = 0; t < num_threads; ++t) {
+            // Each solver shares the same MatchingGraph via shared_ptr.
+            solvers.emplace_back(std::make_shared<pm::Mwpm>(pm::GraphFlooder(graph_ptr, idx)));
+            solvers[t]->flooder.sync_negative_weight_observables_and_detection_events();
+        }
     }
 }
 

@@ -23,7 +23,34 @@
 #include "pymatching/sparse_blossom/flooder_matcher_interop/varying.h"
 #include "pymatching/sparse_blossom/tracker/queued_event_tracker.h"
 
+#ifdef USE_THREADS
+#include <array>
+#include "pymatching/sparse_blossom/config_parallel.h"
+#endif
+
 namespace pm {
+
+#ifdef USE_THREADS
+struct DetectorNodeEphemeralFeilds {
+    GraphFillRegion* region_that_arrived = nullptr;
+    GraphFillRegion* region_that_arrived_top = nullptr;
+    int32_t wrapped_radius_cached = 0;
+    DetectorNode* reached_from_source = nullptr;
+    obs_int observables_crossed_from_source = 0;
+    cumulative_time_int radius_of_arrival = 0;
+    QueuedEventTracker node_event_tracker;
+
+    void reset() {
+        region_that_arrived = nullptr;
+        region_that_arrived_top = nullptr;
+        wrapped_radius_cached = 0;
+        reached_from_source = nullptr;
+        observables_crossed_from_source = 0;
+        radius_of_arrival = 0;
+        node_event_tracker.clear();
+    }
+};
+#endif
 
 /// A detector node is a location where a detection event might occur.
 ///
@@ -34,6 +61,17 @@ namespace pm {
 /// graph and the DETECTOR annotations in a Stim circuit.
 class DetectorNode {
    public:
+#ifdef USE_THREADS
+    DetectorNode() = default;
+    std::array<DetectorNodeEphemeralFeilds, NUM_ACTIVE_SHOTS_PER_UNIT> ephemeral_feilds{};
+
+    inline DetectorNodeEphemeralFeilds& state(int solver_idx) {
+        return ephemeral_feilds[solver_idx];
+    }
+    inline const DetectorNodeEphemeralFeilds& state(int solver_idx) const {
+        return ephemeral_feilds[solver_idx];
+    }
+#else
     DetectorNode()
         : region_that_arrived(nullptr),
           region_that_arrived_top(nullptr),
@@ -42,25 +80,19 @@ class DetectorNode {
           observables_crossed_from_source(0),
           radius_of_arrival(0) {
     }
+#endif
 
+#ifndef USE_THREADS
     /// == Ephemeral fields used to track algorithmic state during matching. ==
     /// The region that reached and owns this node.
     GraphFillRegion* region_that_arrived;
-    /// The topmost region containing this node. Must be kept up to date as
-    /// the region structure changes.
     GraphFillRegion* region_that_arrived_top;
-    /// Stores the latest value of `compute_wrapped_radius` so it doesn't need to be recomputed
-    /// as much. Updated whenever region_that_arrived_top changes.
     int32_t wrapped_radius_cached;
-    /// Of the detection events within the owning region, which one is this node linked to.
     DetectorNode* reached_from_source;
-    /// Which observables are crossed, travelling from this node to the source
-    /// detection event that reached it. Must be 0 if reached_from_source == nullptr.
     obs_int observables_crossed_from_source;
-    /// This was the radius of `region_that_arrived` when it arrived at this node. Otherwise 0.
     cumulative_time_int radius_of_arrival;
-    /// Manages the next "look at me!" event for the node.
     QueuedEventTracker node_event_tracker;
+#endif
 
     /// == Permanent fields used to define the structure of the graph. ==
     std::vector<DetectorNode*> neighbors;       /// The node's neighbors.
@@ -70,30 +102,59 @@ class DetectorNode {
 #ifdef USE_THREADS
 // ===============
     int vb = -1; // if node is cross partition, virtual boundary it belongs to
-    // int shot_marker = -1;
 // ===============
 #endif
 
     /// After it reached this node, how much further did the owning search region grow? Also is it currently growing?
-    inline VaryingCT local_radius() const {
+    inline VaryingCT local_radius(
+#ifdef USE_THREADS
+        int solver_idx
+    ) const {
+        const auto& s = ephemeral_feilds[solver_idx];
+        if (s.region_that_arrived_top == nullptr) {
+            return VaryingCT{0};
+        }
+        return s.region_that_arrived_top->radius + s.wrapped_radius_cached;
+    }
+#else
+    ) const {
         if (region_that_arrived_top == nullptr) {
             return VaryingCT{0};
         }
         return region_that_arrived_top->radius + wrapped_radius_cached;
     }
+#endif
 
     /// Determines the region that owns this node which is a child of this node's top region.
-    GraphFillRegion* heir_region_on_shatter() const;
+    GraphFillRegion* heir_region_on_shatter(
+#ifdef USE_THREADS
+        int solver_idx
+#endif
+    ) const;
 
     /// Check if this node is part the same top-level region as another.
     /// Note that they may have different lower level owners that still merge into the same top level owned.
-    inline bool has_same_owner_as(const DetectorNode& other) const {
+    inline bool has_same_owner_as(
+        const DetectorNode& other
+#ifdef USE_THREADS
+        , int solver_idx
+    ) const {
+        return ephemeral_feilds[solver_idx].region_that_arrived_top ==
+               other.ephemeral_feilds[solver_idx].region_that_arrived_top;
+    }
+#else
+    ) const {
         return region_that_arrived_top == other.region_that_arrived_top;
     }
+#endif
 
     /// Zero all ephemeral fields.
     /// Doesn't free anything or propagate a signal to other objects. Just zeros the fields.
-    void reset();
+    void reset(
+#ifdef USE_THREADS
+        int solver_idx
+#endif
+    );
 
     size_t index_of_neighbor(DetectorNode* neighbor) const;
 
@@ -102,14 +163,23 @@ class DetectorNode {
     /// sum of the radius of (always frozen) not-top-level regions containing this node. It is a
     /// useful intermediate value for quickly computing the local radius of the node, because it
     /// accounts for everything except the (potentially varying) top level region.
-    int32_t compute_wrapped_radius() const;
+    int32_t compute_wrapped_radius(
+#ifdef USE_THREADS
+        int solver_idx
+#endif
+    ) const;
 
     /// It works out the local radius of the node, but bounds it to not go beyond the given bounding
     /// region. This is useful for understanding the internal structure of the blossoms.
     ///
     /// This is a utility method used to help with drawing the internal state of the algorithm.
     cumulative_time_int compute_local_radius_at_time_bounded_by_region(
-        cumulative_time_int time, const GraphFillRegion& bounding_region) const;
+        cumulative_time_int time,
+        const GraphFillRegion& bounding_region
+#ifdef USE_THREADS
+        , int solver_idx
+#endif
+    ) const;
 
     /// The 'stitch radius' is the place where ownership of an edge stops.
     ///
@@ -129,7 +199,13 @@ class DetectorNode {
     ///         to the transition point. This may be equal to 0, or equal to the full length of the
     ///         edge, or somewhere in between.
     std::optional<float> compute_stitch_radius_at_time_bounded_by_region_towards_neighbor(
-        cumulative_time_int time, const GraphFillRegion& bounding_region, size_t neighbor_index) const;
+        cumulative_time_int time,
+        const GraphFillRegion& bounding_region,
+        size_t neighbor_index
+#ifdef USE_THREADS
+        , int solver_idx
+#endif
+    ) const;
 
     std::vector<std::vector<ImpliedWeight>> neighbor_implied_weights;
 };

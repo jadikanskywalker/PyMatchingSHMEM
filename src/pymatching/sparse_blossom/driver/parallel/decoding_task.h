@@ -101,20 +101,6 @@ public:
         status.store(0, std::memory_order_release);
     }
 
-    // bool is_solved(int shot) {
-    //     return shot_marker == shot;
-    // }
-
-    // For fusion task, checks if child tasks are solved
-    // bool is_ready(int shot) {
-    //     if (is_fusion) {
-    //         return (left_child->is_solved(shot) && right_child->is_solved(shot));
-    //     } else {
-    //         return true;
-    //     //     return shot_marker < shot;
-    //     }
-    // }
-
     // Only child tasks should try to steal their parent
     // Child tasks must mark themselves as SOLVED before trying to steal
     bool try_to_steal_leaf(int shot) {
