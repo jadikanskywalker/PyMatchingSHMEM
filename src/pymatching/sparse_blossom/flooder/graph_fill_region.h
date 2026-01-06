@@ -64,7 +64,7 @@ struct GraphFillRegion {
 
 #ifdef USE_THREADS
     Arena<GraphFillRegion>* owner_arena;
-    int solver_set_idx = 0;
+    int shot_rotating_idx = 0;
 #endif
 
     GraphFillRegion();
