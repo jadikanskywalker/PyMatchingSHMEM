@@ -270,7 +270,7 @@ double pm::UserGraph::max_abs_weight() {
 }
 
 #ifdef USE_THREADS
-std::vector<DecodingUnit> pm::UserGraph::to_decoding_units(pm::weight_int num_distinct_weights) {
+pm::DecodingUnit pm::UserGraph::to_decoding_unit(pm::weight_int num_distinct_weights) {
     std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
     pm::MatchingGraph& matching_graph = *matching_graph_ptr;
     double normalising_constant = to_matching_or_search_graph_helper(
@@ -304,11 +304,9 @@ std::vector<DecodingUnit> pm::UserGraph::to_decoding_units(pm::weight_int num_di
         }
     }
 
-    std::vector<DecodingUnit> units;
+    pm::DecodingUnit unit(matching_graph_ptr, node_part_id, num_partitions, virtual_boundaries.size());
 
-    units.emplace_back(matching_graph_ptr, node_part_id, num_partitions, virtual_boundaries.size());
-
-    return units;
+    return unit;
 }
 #endif
 

@@ -51,6 +51,7 @@ public:
     Task(int task_id, int partition) : task_id(task_id), part(partition), is_fusion(false),
         vb_left(partition-1),  vb_right(partition) // DEPENDENT ON ROUND PARTITIONING
     {
+        status.store(-1, std::memory_order_release);
     }
     Task(int task_id, int vb, Task* left_child, Task* right_child) 
      : task_id(task_id), part(vb), left_child(left_child), right_child(right_child), is_fusion(true),
@@ -96,16 +97,43 @@ public:
     };
 
     /* Sychnorization Methods */
-    void mark_solved(int shot) {
-        // shot_marker = shot;
-        status.store(0, std::memory_order_release);
+    void mark_solved() {
+        if (is_fusion) {
+            status.store(0, std::memory_order_release);
+        }
     }
+
+    //qutip
 
     // Only child tasks should try to steal their parent
     // Child tasks must mark themselves as SOLVED before trying to steal
-    bool try_to_steal_leaf(int shot) {
-        int expected = 0;
-        return status.compare_exchange_strong(expected, 1, std::memory_order_acq_rel);
+    bool try_to_steal_leaf(int next) {
+        int expected = next-1;
+        return status.compare_exchange_strong(expected, next, std::memory_order_acq_rel);
+    }
+
+    Task* try_to_steal_descendent(int next) {
+        Task *t = nullptr;
+        if (!is_fusion) { // I am leaf
+            bool stolen = try_to_steal_leaf(next);
+            if (stolen) {
+                t = this;
+            }
+        } else { // Try to steal each child
+            if (status.load(std::memory_order_acquire) == 3) {
+                return nullptr;
+            }
+            t = left_child;
+            bool stolen = left_child->try_to_steal_leaf(next);
+            if (!stolen) {
+                t = right_child;
+                stolen = right_child->try_to_steal_leaf(next);
+                if (!stolen) {
+                    t = nullptr;
+                }
+            }
+        }
+        return t;
     }
 
     bool try_to_steal_parent() {

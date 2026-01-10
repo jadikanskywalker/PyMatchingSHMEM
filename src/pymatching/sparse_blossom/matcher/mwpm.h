@@ -91,7 +91,7 @@ struct Mwpm {
 #ifdef USE_THREADS
     // Removes matchings to virtual boundaries, turning matched regions into alternating trees
     void unmatch_virtual_boundaries_between_partitions();
-    void prepare_for_task(Task* task, int shot);
+    void prepare_for_task(Task* task);
 #endif
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_matches(GraphFillRegion* region, MatchingResult& res);
     MatchingResult shatter_blossom_and_extract_matches(GraphFillRegion* region);

@@ -27,7 +27,6 @@
 #include "stim.h"
 
 #ifdef USE_THREADS
-#include "pymatching/sparse_blossom/driver/parallel/decoding_set.h"
 #include "../config_parallel.h"
 #include "../diagram/mwpm_diagram.h"
 #include <omp.h>
@@ -87,13 +86,14 @@ int main_predict(int argc, const char **argv) {
     pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
 
 #ifdef USE_THREADS
-    auto decoding_units = pm::detector_error_model_to_decoding_units(
+    auto decoding_unit = pm::detector_error_model_to_decoding_unit(
         dem,
         num_buckets,
         /*ensure_search_flooder_included=*/enable_correlations,
         /*enable_correlations=*/enable_correlations);
-    DecodingSet decoding_set(std::move(decoding_units), std::move(reader), std::move(writer), enable_correlations, draw_frames);
-    decoding_set.build_solvers(omp_get_max_threads(), dem);
+    // DecodingSet decoding_set(std::move(decoding_units), std::move(reader), std::move(writer), enable_correlations, draw_frames);
+    // decoding_set.build_solvers(omp_get_max_threads(), dem);
+    decoding_unit.setup(std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
     pm::setup_output_dirs(draw_frames, use_threads);
 #else
     auto mwpm = pm::detector_error_model_to_mwpm(
@@ -116,7 +116,7 @@ int main_predict(int argc, const char **argv) {
 
 #ifdef USE_THREADS
 // ===============
-    decoding_set.decode_shots();
+    decoding_unit.decode_shots();
 #else
     while (pm::start_and_read_entire_record_buffered(*reader, sparse_shot)) {
         pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations);
