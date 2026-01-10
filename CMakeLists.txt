@@ -79,7 +79,7 @@ set(SOURCE_FILES_NO_MAIN
 # Add decoding_unit.cc only if USE_THREADS=ON
 if(USE_THREADS)
     list(APPEND SOURCE_FILES_NO_MAIN
-        src/pymatching/sparse_blossom/driver/parallel/decoding_set.cc
+        # src/pymatching/sparse_blossom/driver/parallel/decoding_set.cc
         src/pymatching/sparse_blossom/driver/parallel/decoding_unit.cc
     )
 endif()

@@ -25,13 +25,11 @@
 #include <fstream>
 #include <filesystem>
 #include "pymatching/sparse_blossom/diagram/mwpm_diagram.h"
-
-#include <atomic>
-#include <omp.h>
 // ===============
 #endif
 
 #include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
+#include "pymatching/sparse_blossom/driver/parallel/decoding_unit.h"
 
 #include "pymatching/sparse_blossom/driver/user_graph.h"
 #include <unordered_set>
@@ -100,14 +98,14 @@ pm::Mwpm pm::detector_error_model_to_mwpm(
 }
 
 #ifdef USE_THREADS
-std::vector<DecodingUnit> pm::detector_error_model_to_decoding_units(
+pm::DecodingUnit pm::detector_error_model_to_decoding_unit(
     const stim::DetectorErrorModel& detector_error_model,
     pm::weight_int num_distinct_weights,
     bool ensure_search_flooder_included,
     bool enable_correlations) {
     auto user_graph =
         pm::detector_error_model_to_user_graph(detector_error_model, enable_correlations, num_distinct_weights);
-    return user_graph.to_decoding_units(num_distinct_weights);
+    return user_graph.to_decoding_unit(num_distinct_weights);
 }
 #endif
 

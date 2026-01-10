@@ -15,28 +15,102 @@
 #ifndef PYMATCHING2_DECODING_UNIT_H
 #define PYMATCHING2_DECODING_UNIT_H
 
+#include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
+#include "pymatching/sparse_blossom/diagram/mwpm_diagram.h"
+
 #include "pymatching/sparse_blossom/config_parallel.h"
 #include "pymatching/sparse_blossom/driver/parallel/decoding_task.h"
 
 #include <vector>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
 
-namespace pm { class MatchingGraph; class Mwpm; }
+namespace pm { 
+// class MatchingGraph; class Mwpm; struct ExtendedMatchingResult; }
 
-struct DetectionEventsContainer {
+struct ShotContainer {
+    std::atomic<int> current_buffer_round{0};
+
+    stim::SparseShot sparse_shot;
+
     std::vector<std::vector<uint64_t>> partition_hits;
     std::vector<std::vector<uint64_t>> virtual_boundary_hits;
 
-    // int shot_id{ -1 };
+    pm::ExtendedMatchingResult res;
 
-    DetectionEventsContainer(int num_partitions, int num_virtual_boundaries)
-     : partition_hits(num_partitions), virtual_boundary_hits(num_virtual_boundaries) {}
+    std::vector<Task> tasks;
 
-    void clear() {
-        for (auto& hits : partition_hits) {
-            hits.clear();
+    ShotContainer(int num_partitions, int num_virtual_boundaries, int num_observables)
+     : partition_hits(num_partitions), virtual_boundary_hits(num_virtual_boundaries), res(num_observables) {}
+
+    ShotContainer(const ShotContainer&) = delete;
+    ShotContainer& operator=(const ShotContainer&) = delete;
+
+    ShotContainer(ShotContainer&& other) noexcept
+        : sparse_shot(std::move(other.sparse_shot)),
+          partition_hits(std::move(other.partition_hits)),
+          virtual_boundary_hits(std::move(other.virtual_boundary_hits)),
+          res(std::move(other.res)),
+          tasks(std::move(other.tasks)) {}
+
+    ShotContainer& operator=(ShotContainer&& other) noexcept {
+        if (this != &other) {
+            sparse_shot = std::move(other.sparse_shot);
+            partition_hits = std::move(other.partition_hits);
+            virtual_boundary_hits = std::move(other.virtual_boundary_hits);
+            res = std::move(other.res);
+            tasks = std::move(other.tasks);
         }
-        for (auto& hits : virtual_boundary_hits) {
-            hits.clear();
+        return *this;
+    }
+
+    // void ready() {
+    //     // num_partition_tasks_left = partition_hits.size();
+    //     std::unique_lock<std::mutex> lock(partition_tasks_m);
+    //     for (int i = 0; i < partition_hits.size(); ++i) {
+    //         partition_tasks.push(i);
+    //     }
+    //     lock.unlock();
+    // }
+
+    // int pop_partition_task() {
+    //     int p = -1;
+    //     std::unique_lock<std::mutex> lock(partition_tasks_m);
+    //     if (!partition_tasks.empty()) {
+    //         p = partition_tasks.front();
+    //         partition_tasks.pop();
+    //     }
+    //     lock.unlock();
+    //     return p;
+    // }
+
+    void clear();
+};
+
+struct ShotBuffer {
+    std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader;
+    std::unique_ptr<stim::MeasureRecordWriter> writer;
+
+    std::vector<ShotContainer> buffer;
+    int next_shot_buffer_id = 0;
+    std::atomic<int> last_shot_buffer_id = -1;
+
+    std::mutex m;
+    std::condition_variable cv;
+
+    // std::atomic<bool> all_shots_read{ false };
+
+    ShotBuffer(
+        std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
+        std::unique_ptr<stim::MeasureRecordWriter> writer,
+        int num_partitions,
+        int num_virtual_boundaries,
+        int num_observables
+    ) : reader(std::move(reader)), writer(std::move(writer)) {
+        buffer.reserve(static_cast<size_t>(NUM_ACTIVE_SHOTS_PER_UNIT));
+        for (int i = 0; i < NUM_ACTIVE_SHOTS_PER_UNIT; ++i) {
+            buffer.emplace_back(num_partitions, num_virtual_boundaries, num_observables);
         }
     }
 };
@@ -51,33 +125,35 @@ struct DecodingUnit {
     const std::vector<int> node_part_id;
     const int num_partitions;
     const int num_virtual_boundaries;
-    // const std::vector<std::vector<int>> partitions; 
-    // const std::vector<std::vector<int>> virtual_boundaries; // start and end index for each boundary
-    // const std::vector<std::vector<int>> virtual_boundary_partitions; // for each vb, list of partitions it connects
 
-    // Fusion tree
-    std::shared_ptr<std::vector<Task>> tasks;
-    std::vector<long> virtual_boundary_markers;
+    // Shots
+    std::shared_ptr<ShotBuffer> shot_buffer;
 
     // Solvers
+    bool enable_correlations;
+    bool draw_frames;
     std::vector<std::shared_ptr<pm::Mwpm>> solvers;
+    int num_solver_sets; // num_solvers / num_partitions
 
-    // Detection Events
-    int current_shot;
-    // int next_shot;
-    DetectionEventsContainer hits;
+    // bool all_shots_read = false;
+    bool done = false;
 
+    // Initialization Functions
     DecodingUnit(
         const std::shared_ptr<pm::MatchingGraph> graph_ptr,
         const std::vector<int> node_part_id,
         int num_partitions,
         int num_virtual_boundaries
-        // const std::vector<std::vector<int>>& partitions,
-        // const std::vector<std::vector<int>>& virtual_boundaries,
-        // const std::vector<std::vector<int>> virtual_boundary_partitions
-    ) : graph_ptr(graph_ptr), node_part_id(node_part_id), num_partitions(num_partitions), num_virtual_boundaries(num_virtual_boundaries)
-        // partitions(partitions), virtual_boundaries(virtual_boundaries), virtual_boundary_partitions(virtual_boundary_partitions)
-        , hits(num_partitions, num_virtual_boundaries) {}
+    ) : graph_ptr(graph_ptr), node_part_id(node_part_id), num_partitions(num_partitions), num_virtual_boundaries(num_virtual_boundaries) {}
+
+    void setup(
+        std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
+        std::unique_ptr<stim::MeasureRecordWriter> writer,
+        bool enable_correlations,
+        bool draw_frames,
+        int max_threads,
+        stim::DetectorErrorModel dem /* for drawing coors */
+    );
 
     void build_tasks_for_round_partitioning();
 
@@ -86,10 +162,14 @@ struct DecodingUnit {
         bool enable_correlations,
         int num_threads);
 
-    void partition_detection_events(const std::vector<uint64_t>& detection_events);
+    // Decoding Functions
+    void write_result_and_get_next_shot(int shot_buffer_id);
 
-    void solve_task(Task* task, int tid, int shot, int draw_frames);
+    void decode_shots();
+
+    void solve_task(pm::Mwpm& solver, std::vector<uint64_t>& hits, Task* task, int tid, int draw_frames, int shot_id);
 };
 
+}
 
 #endif // PYMATCHING2_DECODING_UNIT_H

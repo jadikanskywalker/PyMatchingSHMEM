@@ -501,12 +501,12 @@ MwpmEvent GraphFlooder::do_region_hit_virtual_boundary_interaction(DetectorNode 
         }
         return MwpmEvent::no_event();
     }
-    if (DEBUG)
-        std::cout << "  DEBUG: region hit virtual boundary" << std::endl
-                  << "    node: " << &node << std::endl
-                  << "    node.reached_from_source: " << node.state(shot_rotating_idx).reached_from_source << std::endl
-                  << "    node.region_that_arrived_top: " << node.state(shot_rotating_idx).region_that_arrived << std::endl
-                  << "    node.neighbors[virtual_neighbor_index]: " << node.neighbors[virtual_neighbor_index] << std::endl;
+    // if (DEBUG)
+    //     std::cout << "  DEBUG: region hit virtual boundary" << std::endl
+    //               << "    node: " << &node << std::endl
+    //               << "    node.reached_from_source: " << node.state(shot_rotating_idx).reached_from_source << std::endl
+    //               << "    node.region_that_arrived_top: " << node.state(shot_rotating_idx).region_that_arrived << std::endl
+    //               << "    node.neighbors[virtual_neighbor_index]: " << node.neighbors[virtual_neighbor_index] << std::endl;
     return RegionHitVirtualBoundaryEventData{
         node.state(shot_rotating_idx).region_that_arrived_top,
         CompressedEdge{node.state(shot_rotating_idx).reached_from_source, node.neighbors[virtual_neighbor_index],

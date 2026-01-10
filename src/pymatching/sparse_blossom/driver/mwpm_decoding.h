@@ -21,10 +21,12 @@
 
 #ifdef USE_THREADS
 #include <memory>
-#include "pymatching/sparse_blossom/driver/parallel/decoding_unit.h"
+// #include "pymatching/sparse_blossom/driver/parallel/decoding_unit.h"
 #endif
 
 namespace pm {
+
+class DecodingUnit;
 
 struct ExtendedMatchingResult {
     std::vector<uint8_t> obs_crossed;
@@ -68,7 +70,7 @@ Mwpm detector_error_model_to_mwpm(
     bool enable_correlations = false);
 
 #ifdef USE_THREADS
-std::vector<DecodingUnit> detector_error_model_to_decoding_units(
+DecodingUnit detector_error_model_to_decoding_unit(
     const stim::DetectorErrorModel& detector_error_model,
     pm::weight_int num_distinct_weights,
     bool ensure_search_flooder_included = false,

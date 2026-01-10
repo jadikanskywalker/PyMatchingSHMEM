@@ -54,8 +54,8 @@ fi
 
 stim gen \
     --rounds=$rounds \
-    --distance=10 \
-    --after_clifford_depolarization=0.01 \
+    --distance=21 \
+    --after_clifford_depolarization=0.001 \
     --code repetition_code \
     --task memory \
     > circuit.stim

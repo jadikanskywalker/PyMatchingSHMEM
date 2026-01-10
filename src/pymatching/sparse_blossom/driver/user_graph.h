@@ -135,7 +135,7 @@ class UserGraph {
 #ifdef USE_THREADS
 // ===============
     // std::shared_ptr<pm::MatchingGraph> to_matching_graph(pm::weight_int num_distinct_weights);
-    std::vector<DecodingUnit> to_decoding_units(pm::weight_int num_distinct_weights);
+    pm::DecodingUnit to_decoding_unit(pm::weight_int num_distinct_weights);
 // ===============
 #endif
     pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);
