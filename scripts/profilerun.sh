@@ -78,7 +78,6 @@ stim detect \
 #     --out_format 01 \
 #     --rounds_per_partition $M
 
-
 echo "Starting serial run..."
 start_serial=$(date +%s)
 if [ $ppn -le 0 ]
@@ -143,7 +142,7 @@ start_parallel=$(date +%s)
 if [ $ppn -le 0 ]
   then
     vtune -collect $collect -knob enable-stack-collection=true -r logs/parallel/vtune_result \
-      ~/PyMatchingSHMEM/build_threads/pymatching predict \
+      ~/PyMatchingSHMEM/build_threads_release/pymatching predict \
         --dem error_model.dem \
         --in detection_events.b8 \
         --in_format b8 \

@@ -6,7 +6,7 @@ FLAG_TYPE=${1:-fast}
 
 cd ~/PyMatchingSHMEM/
 
-rm -rf build_threads
+# rm -rf build_threads
 
 if command -v icpx >/dev/null 2>&1; then
     CC=$(command -v icx)
@@ -26,8 +26,9 @@ else
 fi
 
 if [ "$BUILD_TYPE" = "release" ]; then
+    rm -rf build_threads_release
     echo "Configuring Release build..."
-    cmake . -B build_threads \
+    cmake . -B build_threads_release \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_FLAGS_RELEASE="$RELEASE_FLAGS" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
@@ -35,7 +36,9 @@ if [ "$BUILD_TYPE" = "release" ]; then
         -DCMAKE_CXX_COMPILER="$CXX" \
         -DUSE_THREADS=ON \
         -DUSE_SHMEM=OFF
+    cd build_threads_release || exit
 elif [ "$BUILD_TYPE" = "debug" ]; then
+    rm -rf build_threads
     echo "Configuring Debug build..."
     cmake . -B build_threads \
         -DCMAKE_BUILD_TYPE=Debug \
@@ -45,11 +48,11 @@ elif [ "$BUILD_TYPE" = "debug" ]; then
         -DCMAKE_CXX_COMPILER="$CXX" \
         -DUSE_THREADS=ON \
         -DUSE_SHMEM=OFF
+    cd build_threads || exit
 else
     echo "Invalid build type: $BUILD_TYPE. Use 'debug' or 'release'."
     exit 1
 fi
 
-cd build_threads || exit
 cores=$(($(nproc)-1))
 make pymatching -j "$cores"

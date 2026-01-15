@@ -200,8 +200,7 @@ void pm::DecodingUnit::write_result_and_get_next_shot(int shot_buffer_id) {
     shot_buffer->writer->write_end();
     // --- read next shot ---
     shot.clear();
-    int last_shot_buffer_id = shot_buffer->last_shot_buffer_id.load(std::memory_order_acquire);
-    if (last_shot_buffer_id < 0) {
+    if (shot_buffer->last_shot_buffer_id < 0) {
         bool shot_read = pm::start_and_read_entire_record_buffered(*shot_buffer->reader, shot.sparse_shot);
         if (shot_read) { // partition detection events
             for (auto det : shot.sparse_shot.hits) {
@@ -212,7 +211,7 @@ void pm::DecodingUnit::write_result_and_get_next_shot(int shot_buffer_id) {
                     shot.virtual_boundary_hits[-1*part_id-1].push_back(det);
                 }
             }
-            ++shot.current_buffer_round;
+            shot.current_buffer_round++;
             // if (DEBUG) {
             //     int i = 0;
             //     std::cout << "T" << omp_get_thread_num() << " read next shot for shot buffer" << shot_buffer_id << std::endl;
@@ -234,19 +233,19 @@ void pm::DecodingUnit::write_result_and_get_next_shot(int shot_buffer_id) {
             //     }
             // }
         } else {
-            // shot_buffer->all_shots_read.store(true, std::memory_order_release);
             if (shot_buffer_id > 0) {
                 shot_buffer->last_shot_buffer_id = shot_buffer_id-1;
             } else {
                 shot_buffer->last_shot_buffer_id = NUM_ACTIVE_SHOTS_PER_UNIT-1;
             }
         }
-    } else if (last_shot_buffer_id == shot_buffer_id) {
-        done = true;
+    } else if (shot_buffer->last_shot_buffer_id == shot_buffer_id) {
+        for (int i = 0; i < NUM_ACTIVE_SHOTS_PER_UNIT; ++i) {
+            shot_buffer->buffer[i].current_buffer_round.store(-1);
+        }
     }
     // --- increment next_shot_buffer_id ---
-    ++shot_buffer->next_shot_buffer_id;
-    if (shot_buffer->next_shot_buffer_id >= NUM_ACTIVE_SHOTS_PER_UNIT) {
+    if (++shot_buffer->next_shot_buffer_id >= NUM_ACTIVE_SHOTS_PER_UNIT) {
         shot_buffer->next_shot_buffer_id = 0;
     }
     // --- release ---
@@ -258,7 +257,6 @@ void pm::DecodingUnit::decode_shots() {
     if (enable_correlations) {
         throw std::invalid_argument("Edge correlations are not yet implemented in parallel.");
     }
-    std::cout << "draw_frames=" << draw_frames << std::endl;
     size_t num_observables = graph_ptr->num_observables;
     #pragma omp parallel shared(num_observables)
     {
@@ -270,12 +268,12 @@ void pm::DecodingUnit::decode_shots() {
             std::cout << "T" << tid << " of " << num_threads << std::endl;
         }
         // Start decoding
-        int shot_id = 0;
-        int shot_buffer_round = 0; // how many times buffer has looped
         int shot_buffer_id = 0;
+        int shot_buffer_round = shot_buffer->buffer[0].current_buffer_round.load(); // how many times buffer has looped
+        int shot_id = shot_buffer_round*NUM_ACTIVE_SHOTS_PER_UNIT;
+        //
         try {
-        while (!done) {
-            pm::Mwpm& solver = *solvers[shot_buffer_id*num_threads + tid];
+        while (true) {
             if (DEBUG) {
                 t_out << std::endl << "Starting shot " << shot_id
                       << ", buffer round " << shot_buffer_round
@@ -285,25 +283,38 @@ void pm::DecodingUnit::decode_shots() {
                 std::filesystem::create_directories("out_parallel/frames/" + std::to_string(shot_id) + "/t" + std::to_string(tid));
             }
             auto& shot = shot_buffer->buffer[shot_buffer_id];
-            if (shot.current_buffer_round.load(std::memory_order_acquire) < shot_buffer_round) { // wait
-                if (DEBUG) {
-                    t_out << "Waiting for next shot" << std::endl;
-                }
-                std::unique_lock<std::mutex> lock(shot_buffer->m);
-                if (shot_buffer->last_shot_buffer_id.load(std::memory_order_acquire) >= 0) {
-                    lock.unlock();
+            int current_buffer_round = shot.current_buffer_round.load();
+            while (current_buffer_round < shot_buffer_round) { // wait
+                if (current_buffer_round < 0) {
                     break;
                 }
-                shot_buffer->cv.wait(lock);
-                int last_shot_buffer_id = shot_buffer->last_shot_buffer_id.load(std::memory_order_acquire);
-                if (DEBUG) {
-                    t_out << "Woke up, last_shot_buffer_id=" << last_shot_buffer_id << std::endl;
-                }
-                if (last_shot_buffer_id >= 0) {
-                    break;
-                }
-                lock.unlock();
+                _mm_pause();
+                current_buffer_round = shot.current_buffer_round.load();
+                // if (DEBUG) {
+                //     t_out << "Waiting for next shot" << std::endl;
+                // }
+                // std::unique_lock<std::mutex> lock(shot_buffer->m);
+                // if (shot_buffer->last_shot_buffer_id.load(std::memory_order_acquire) >= 0) {
+                //     lock.unlock();
+                //     break;
+                // }
+                // if (shot.current_buffer_round.load() < shot_buffer_round) {
+                //     shot_buffer->cv.wait(lock);
+                //     int last_shot_buffer_id = shot_buffer->last_shot_buffer_id.load(std::memory_order_acquire);
+                //     if (DEBUG) {
+                //         t_out << "Woke up, last_shot_buffer_id=" << last_shot_buffer_id << std::endl;
+                //     }
+                //     if (last_shot_buffer_id >= 0) {
+                //         lock.unlock();
+                //         break;
+                //     }
+                // }
+                // lock.unlock();
             }
+            if (current_buffer_round < 0) {
+                break;
+            }
+            pm::Mwpm& solver = *solvers[shot_buffer_id*num_threads + tid];
             Task *t = &shot.tasks[tid];
             bool stolen = t->try_to_steal_leaf(shot_buffer_round);
             while (stolen) { // Got task
@@ -315,13 +326,15 @@ void pm::DecodingUnit::decode_shots() {
                 if (t->parent) {
                     Task* sibling = (t->child_bit == 1) ? t->parent->right_child : t->parent->left_child;
                     // Try to steal parent
-                    stolen = t->try_to_steal_parent();
-                    t = t->parent;
+                    t = t->try_to_steal_parent_or_descendent(shot_buffer_round);
+                    stolen = (t != nullptr);
+                    // stolen = t->try_to_steal_parent();
+                    // t = t->parent;
                     // Try to steal sibling or descendent of sibling
-                    if (!stolen && !sibling->is_fusion) {
-                        stolen = sibling->try_to_steal_leaf(shot_buffer_round);
-                        t = sibling;
-                    }
+                    // if (!stolen && !sibling->is_fusion) {
+                    //     stolen = sibling->try_to_steal_leaf(shot_buffer_round);
+                    //     t = sibling;
+                    // }
                     if (DEBUG) {
                         if (t != nullptr) {
                             t_out << (t->is_fusion ? "  f" : "  p") << t->part << " stolen = " << stolen << std::endl;

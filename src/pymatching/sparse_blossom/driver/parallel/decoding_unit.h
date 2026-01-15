@@ -65,26 +65,6 @@ struct ShotContainer {
         return *this;
     }
 
-    // void ready() {
-    //     // num_partition_tasks_left = partition_hits.size();
-    //     std::unique_lock<std::mutex> lock(partition_tasks_m);
-    //     for (int i = 0; i < partition_hits.size(); ++i) {
-    //         partition_tasks.push(i);
-    //     }
-    //     lock.unlock();
-    // }
-
-    // int pop_partition_task() {
-    //     int p = -1;
-    //     std::unique_lock<std::mutex> lock(partition_tasks_m);
-    //     if (!partition_tasks.empty()) {
-    //         p = partition_tasks.front();
-    //         partition_tasks.pop();
-    //     }
-    //     lock.unlock();
-    //     return p;
-    // }
-
     void clear();
 };
 
@@ -94,12 +74,10 @@ struct ShotBuffer {
 
     std::vector<ShotContainer> buffer;
     int next_shot_buffer_id = 0;
-    std::atomic<int> last_shot_buffer_id = -1;
+    int last_shot_buffer_id = -1; // to mark end
 
-    std::mutex m;
+    std::mutex m; // For result writing & shot reading
     std::condition_variable cv;
-
-    // std::atomic<bool> all_shots_read{ false };
 
     ShotBuffer(
         std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
@@ -133,7 +111,7 @@ struct DecodingUnit {
     bool enable_correlations;
     bool draw_frames;
     std::vector<std::shared_ptr<pm::Mwpm>> solvers;
-    int num_solver_sets; // num_solvers / num_partitions
+    // int num_solver_sets; // num_solvers / num_partitions
 
     // bool all_shots_read = false;
     bool done = false;
