@@ -39,10 +39,10 @@ task=rotated_memory_x
 p=0.$p_dec
 
 serial_build=~/PyMatchingSHMEM/build/pymatching
-threads_build=~/PyMatchingSHMEM/build_threads/pymatching
+threads_build=~/PyMatchingSHMEM/build_threads_release/pymatching
 
 stim gen \
-    --rounds=$rounds \
+    --rounds=$(($rounds-1)) \
     --distance=$d \
     --after_clifford_depolarization=$p \
     --code $code \

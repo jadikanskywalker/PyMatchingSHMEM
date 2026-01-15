@@ -112,6 +112,20 @@ public:
         return status.compare_exchange_strong(expected, next, std::memory_order_acq_rel);
     }
 
+    Task* try_to_steal_parent_or_descendent(int next) {
+        int old = parent->status.fetch_or(child_bit, std::memory_order_acq_rel);
+        if ((old | child_bit) == 3) {
+            if (old == 3) { // got beat
+                return nullptr;
+            } else { // got parent
+                return parent;
+            }
+        }
+        // I am first to try to steal parent, try sibling
+        Task* sibling = (child_bit==1) ? parent->right_child : parent->left_child;
+        return sibling->try_to_steal_descendent(next);
+    }
+    
     Task* try_to_steal_descendent(int next) {
         Task *t = nullptr;
         if (!is_fusion) { // I am leaf
@@ -119,18 +133,13 @@ public:
             if (stolen) {
                 t = this;
             }
-        } else { // Try to steal each child
-            if (status.load(std::memory_order_acquire) == 3) {
+        } else { // Try to steal descendent
+            if (status.load(std::memory_order_acquire) > 0) { // Let other thread have it
                 return nullptr;
             }
-            t = left_child;
-            bool stolen = left_child->try_to_steal_leaf(next);
-            if (!stolen) {
-                t = right_child;
-                stolen = right_child->try_to_steal_leaf(next);
-                if (!stolen) {
-                    t = nullptr;
-                }
+            t = left_child->try_to_steal_descendent(next);
+            if (t == nullptr) {
+                t = right_child->try_to_steal_descendent(next);
             }
         }
         return t;

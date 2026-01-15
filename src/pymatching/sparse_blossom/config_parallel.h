@@ -2,7 +2,7 @@
 
 #define DEBUG 0
 
-#define NUM_ACTIVE_SHOTS_PER_UNIT 4
+#define NUM_ACTIVE_SHOTS_PER_UNIT 2
 
 #ifdef USE_THREADS
 namespace config_parallel {

@@ -56,8 +56,8 @@ stim gen \
     --rounds=$rounds \
     --distance=21 \
     --after_clifford_depolarization=0.001 \
-    --code repetition_code \
-    --task memory \
+    --code surface_code \
+    --task rotated_memory_x \
     > circuit.stim
 stim analyze_errors \
     --decompose_errors \
@@ -105,7 +105,7 @@ echo "Starting parallel run..."
 start_parallel=$(date +%s)
 # if [ $ppn -le 0 ]
 #   then
-    ~/PyMatchingSHMEM/build_threads/pymatching predict \
+    ~/PyMatchingSHMEM/build_threads_release/pymatching predict \
         --dem error_model.dem \
         --in detection_events.b8 \
         --in_format b8 \
