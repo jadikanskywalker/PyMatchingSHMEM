@@ -110,7 +110,11 @@ pm::pick_coords_for_drawing_from_dem(const stim::DetectorErrorModel &dem, float 
 /// Helper class for drawing frames.
 struct StateHelper {
     const Mwpm &mwpm;
+#ifdef USE_SHMEM
+    const pm::NodesWrapper &ns;
+#else
     const std::vector<DetectorNode> &ns;
+#endif
     const cumulative_time_int &t;
     const std::vector<std::pair<float, float>> &coords;
     const std::vector<std::pair<float, float>> &boundary_coords;

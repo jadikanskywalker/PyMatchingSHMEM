@@ -132,12 +132,14 @@ class UserGraph {
         pm::weight_int num_distinct_weights,
         const EdgeCallable& edge_func,
         const BoundaryEdgeCallable& boundary_edge_func);
-#ifdef USE_THREADS
+#ifdef USE_SHMEM
+    pm::DecodingUnit to_shmem_decoding_unit(pm::weight_int num_distinct_weights, DetectorNode *nodes_ptr);
+#elif defined(USE_THREADS)
 // ===============
-    // std::shared_ptr<pm::MatchingGraph> to_matching_graph(pm::weight_int num_distinct_weights);
     pm::DecodingUnit to_decoding_unit(pm::weight_int num_distinct_weights);
 // ===============
 #endif
+
     pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);
 
     pm::SearchGraph to_search_graph(pm::weight_int num_distinct_weights);

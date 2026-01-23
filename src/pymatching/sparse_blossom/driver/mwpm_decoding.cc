@@ -97,7 +97,22 @@ pm::Mwpm pm::detector_error_model_to_mwpm(
     return user_graph.to_mwpm(num_distinct_weights, ensure_search_flooder_included);
 }
 
-#ifdef USE_THREADS
+#ifdef USE_SHMEM
+// All PE's must call this function
+pm::DecodingUnit pm::detector_error_model_to_shmem_decoding_unit(
+    const stim::DetectorErrorModel& detector_error_model,
+    pm::weight_int num_distinct_weights,
+    bool ensure_search_flooder_included,
+    bool enable_correlations) {
+    auto user_graph =
+        pm::detector_error_model_to_user_graph(detector_error_model, enable_correlations, num_distinct_weights);
+    int num_nodes = user_graph.nodes.size();
+    /* PEs allocate detector nodes in shared memory */
+    DetectorNode *nodes_ptr = (DetectorNode*) shmem_malloc(num_nodes * sizeof(DetectorNode));
+    return user_graph.to_shmem_decoding_unit(num_distinct_weights, nodes_ptr);
+}
+
+#elif defined(USE_THREADS)
 pm::DecodingUnit pm::detector_error_model_to_decoding_unit(
     const stim::DetectorErrorModel& detector_error_model,
     pm::weight_int num_distinct_weights,
@@ -150,7 +165,6 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
         }
 
     } else {
-        // if (DEBUG) std::cout << "  DEBUG: negative detection events" << std::endl;
         // First mark nodes with negative weight detection events
         for (auto& det : mwpm.flooder.negative_weight_detection_events) {
 #ifdef USE_THREADS

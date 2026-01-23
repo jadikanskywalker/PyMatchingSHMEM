@@ -35,18 +35,32 @@ struct PreviousWeight {
     }
 };
 
-// #ifdef USE_THREADS
-// struct EphemeralFeildsArray {
-//     std::vector<DetectorNodeEphemeralFeilds> data;
-//     int shot;
-// }
-// #endif
+#ifdef USE_SHMEM
+// Enable vector-like functions for shmem nodes array
+struct NodesWrapper {
+public:
+    DetectorNode *nodes;
+    std::size_t size_;
+    inline std::size_t size() const { return size_; };
+    inline DetectorNode& operator[](std::size_t i) { return nodes[i]; }
+    inline const DetectorNode& operator[](std::size_t i) const { return nodes[i]; }
+    inline DetectorNode *begin() { return nodes; };
+    inline DetectorNode* end()   { return nodes + size_; }
+    inline const DetectorNode* begin() const { return nodes; }
+    inline const DetectorNode* end()   const { return nodes + size_; }
+};
+#endif
 
 /// A collection of detector nodes. It's expected that all detector nodes in the graph
 /// will only refer to other detector nodes within the same graph.
 class MatchingGraph {
    public:
+#ifdef USE_SHMEM
+    // nodes stored in shared memory instead of heap
+    NodesWrapper nodes;
+#else
     std::vector<DetectorNode> nodes;
+#endif
 // #ifdef USE_THREADS
 //     std::array<std::vector<DetectorNodeEphemeralFeilds>, NUM_ACTIVE_SHOTS_PER_UNIT> ephemeral_feild_vectors; // Ephemeral states separated from nodes
 // #endif

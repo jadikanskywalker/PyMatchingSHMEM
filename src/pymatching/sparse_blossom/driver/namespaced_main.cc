@@ -14,8 +14,8 @@
 
 #include "pymatching/sparse_blossom/driver/namespaced_main.h"
 
-#include <cstdlib>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <vector>
@@ -26,14 +26,20 @@
 #include "pymatching/sparse_blossom/driver/user_graph.h"
 #include "stim.h"
 
+#define OUTPUT_DECODING_TIME
+
 #ifdef USE_THREADS
+#include <omp.h>
 #include "../config_parallel.h"
 #include "../diagram/mwpm_diagram.h"
-#include <omp.h>
-// ===============
 #endif
 
-int main_predict(int argc, const char **argv) {
+#ifdef USE_SHMEM
+#include <shmem.h>
+#endif
+
+#ifndef USE_SHMEM
+int main_predict(int argc, const char** argv) {
     stim::check_for_unknown_arguments(
         {
             "--in",
@@ -44,11 +50,10 @@ int main_predict(int argc, const char **argv) {
             "--dem",
             "--enable_correlations"
 #ifdef USE_THREADS
-// ===============
-            , "--rounds_per_partition",
+            ,
+            "--rounds_per_partition",
             "--draw_frames",
-            "--use_threads"
-// ===============
+            "--use_threads",
 #endif
         },
         {},
@@ -56,9 +61,9 @@ int main_predict(int argc, const char **argv) {
         argc,
         argv);
 
-    FILE *shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
-    FILE *predictions_out = stim::find_open_file_argument("--out", stdout, "wb", argc, argv);
-    FILE *dem_file = stim::find_open_file_argument("--dem", nullptr, "r", argc, argv);
+    FILE* shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
+    FILE* predictions_out = stim::find_open_file_argument("--out", stdout, "wb", argc, argv);
+    FILE* dem_file = stim::find_open_file_argument("--dem", nullptr, "r", argc, argv);
     stim::FileFormatData shots_in_format =
         stim::find_enum_argument("--in_format", "b8", stim::format_name_to_enum_map(), argc, argv);
     stim::FileFormatData predictions_out_format =
@@ -67,7 +72,7 @@ int main_predict(int argc, const char **argv) {
     bool enable_correlations = stim::find_bool_argument("--enable_correlations", argc, argv);
 
 #ifdef USE_THREADS
-// ===============
+    // ===============
     config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
     bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);
@@ -91,31 +96,36 @@ int main_predict(int argc, const char **argv) {
         num_buckets,
         /*ensure_search_flooder_included=*/enable_correlations,
         /*enable_correlations=*/enable_correlations);
-    // DecodingSet decoding_set(std::move(decoding_units), std::move(reader), std::move(writer), enable_correlations, draw_frames);
-    // decoding_set.build_solvers(omp_get_max_threads(), dem);
-    decoding_unit.setup(std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
-    pm::setup_output_dirs(draw_frames, use_threads);
+    // DecodingSet decoding_set(std::move(decoding_units), std::move(reader), std::move(writer), enable_correlations,
+    // draw_frames); decoding_set.build_solvers(omp_get_max_threads(), dem);
+    decoding_unit.setup(
+        std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
+    if (DEBUG) {
+        pm::setup_output_dirs(draw_frames, use_threads);
+    }
 #else
     auto mwpm = pm::detector_error_model_to_mwpm(
         dem,
         num_buckets,
         /*ensure_search_flooder_included=*/enable_correlations,
         /*enable_correlations=*/enable_correlations);
-    
+
     stim::SparseShot sparse_shot;
     sparse_shot.clear();
     pm::ExtendedMatchingResult res(mwpm.flooder.graph.num_observables);
 #endif
 
-    using std::chrono::steady_clock;
-    using std::chrono::duration_cast;
+#ifdef OUTPUT_DECODING_TIME
     using std::chrono::duration;
+    using std::chrono::duration_cast;
     using std::chrono::milliseconds;
+    using std::chrono::steady_clock;
 
     auto t1 = steady_clock::now();
+#endif
 
 #ifdef USE_THREADS
-// ===============
+    // ===============
     decoding_unit.decode_shots();
 #else
     while (pm::start_and_read_entire_record_buffered(*reader, sparse_shot)) {
@@ -129,12 +139,14 @@ int main_predict(int argc, const char **argv) {
     }
 #endif
 
+#ifdef OUTPUT_DECODING_TIME
     auto t2 = steady_clock::now();
     /* Getting number of milliseconds as an integer. */
     auto ms_int = duration_cast<milliseconds>(t2 - t1);
     /* Getting number of milliseconds as a double. */
     duration<double, std::milli> ms_double = t2 - t1;
     std::cout << "Decoding time: " << ms_double.count() << "ms\n";
+#endif
 
     if (predictions_out != stdout) {
         fclose(predictions_out);
@@ -146,7 +158,97 @@ int main_predict(int argc, const char **argv) {
     return EXIT_SUCCESS;
 }
 
-int main_count_mistakes(int argc, const char **argv) {
+#else
+// main_predict (SHMEM) sets up shared memory environment
+int main_predict(int argc, const char** argv) {
+    stim::check_for_unknown_arguments(
+        {
+            "--in",
+            "--in_format",
+            "--in_includes_appended_observables",
+            "--out",
+            "--out_format",
+            "--dem",
+            "--enable_correlations",
+            "--rounds_per_partition",
+            "--draw_frames",
+            "--use_threads",
+        },
+        {},
+        "predict",
+        argc,
+        argv);
+
+    FILE* shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
+    FILE* predictions_out = stim::find_open_file_argument("--out", stdout, "wb", argc, argv);
+    FILE* dem_file = stim::find_open_file_argument("--dem", nullptr, "r", argc, argv);
+    stim::FileFormatData shots_in_format =
+        stim::find_enum_argument("--in_format", "b8", stim::format_name_to_enum_map(), argc, argv);
+    stim::FileFormatData predictions_out_format =
+        stim::find_enum_argument("--out_format", "01", stim::format_name_to_enum_map(), argc, argv);
+    bool append_obs = stim::find_bool_argument("--in_includes_appended_observables", argc, argv);
+    bool enable_correlations = stim::find_bool_argument("--enable_correlations", argc, argv);
+
+    config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
+    bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
+    bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);   
+
+    stim::DetectorErrorModel dem = stim::DetectorErrorModel::from_file(dem_file);
+    fclose(dem_file);
+
+    size_t num_obs = dem.count_observables();
+    auto reader = stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>::make(
+        shots_in, shots_in_format.id, 0, dem.count_detectors(), append_obs * num_obs);
+    auto writer = stim::MeasureRecordWriter::make(predictions_out, predictions_out_format.id);
+    writer->begin_result_type('L');
+
+    pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
+
+    auto decoding_unit = pm::detector_error_model_to_shmem_decoding_unit(
+        dem,
+        num_buckets,
+        /*ensure_search_flooder_included=*/enable_correlations,
+        /*enable_correlations=*/enable_correlations);
+    // DecodingSet decoding_set(std::move(decoding_units), std::move(reader), std::move(writer), enable_correlations,
+    // draw_frames); decoding_set.build_solvers(omp_get_max_threads(), dem);
+    decoding_unit.setup(
+        std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
+    if (DEBUG) {
+        pm::setup_output_dirs(draw_frames, use_threads);
+    }
+
+#ifdef OUTPUT_DECODING_TIME
+    using std::chrono::duration;
+    using std::chrono::duration_cast;
+    using std::chrono::milliseconds;
+    using std::chrono::steady_clock;
+
+    auto t1 = steady_clock::now();
+#endif
+
+    decoding_unit.decode_shots();
+
+#ifdef OUTPUT_DECODING_TIME
+    auto t2 = steady_clock::now();
+    /* Getting number of milliseconds as an integer. */
+    auto ms_int = duration_cast<milliseconds>(t2 - t1);
+    /* Getting number of milliseconds as a double. */
+    duration<double, std::milli> ms_double = t2 - t1;
+    std::cout << "Decoding time: " << ms_double.count() << "ms\n";
+#endif
+
+    if (predictions_out != stdout) {
+        fclose(predictions_out);
+    }
+    if (shots_in != stdin) {
+        fclose(shots_in);
+    }
+
+    return EXIT_SUCCESS;
+}
+#endif
+
+int main_count_mistakes(int argc, const char** argv) {
     stim::check_for_unknown_arguments(
         {
             "--in",
@@ -164,10 +266,10 @@ int main_count_mistakes(int argc, const char **argv) {
         argc,
         argv);
 
-    FILE *shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
-    FILE *obs_in = stim::find_open_file_argument("--obs_in", stdin, "rb", argc, argv);
-    FILE *stats_out = stim::find_open_file_argument("--out", stdout, "wb", argc, argv);
-    FILE *dem_file = stim::find_open_file_argument("--dem", nullptr, "r", argc, argv);
+    FILE* shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
+    FILE* obs_in = stim::find_open_file_argument("--obs_in", stdin, "rb", argc, argv);
+    FILE* stats_out = stim::find_open_file_argument("--out", stdout, "wb", argc, argv);
+    FILE* dem_file = stim::find_open_file_argument("--dem", nullptr, "r", argc, argv);
     stim::FileFormatData shots_in_format =
         stim::find_enum_argument("--in_format", "01", stim::format_name_to_enum_map(), argc, argv);
     stim::FileFormatData obs_in_format =
@@ -237,8 +339,8 @@ int main_count_mistakes(int argc, const char **argv) {
     return EXIT_SUCCESS;
 }
 
-int pm::main(int argc, const char **argv) {
-    const char *command = "";
+int pm::main(int argc, const char** argv) {
+    const char* command = "";
     if (argc >= 2) {
         command = argv[1];
     }
@@ -247,12 +349,9 @@ int pm::main(int argc, const char **argv) {
 #ifdef USE_SHMEM
 // ===============
             shmem_init();
-// ===============
 #endif
             int status = main_predict(argc, argv);
-
 #ifdef USE_SHMEM
-// ===============
             shmem_finalize();
 // ===============
 #endif
@@ -264,7 +363,7 @@ int pm::main(int argc, const char **argv) {
         if (strcmp(command, "animate") == 0) {
             return pm::main_animation(argc, argv);
         }
-    } catch (std::invalid_argument &ex) {
+    } catch (std::invalid_argument& ex) {
         std::cerr << ex.what() << "\n";
         return EXIT_FAILURE;
     }

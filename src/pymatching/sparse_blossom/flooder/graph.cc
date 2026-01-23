@@ -113,12 +113,9 @@ void MatchingGraph::add_boundary_edge(
 
 MatchingGraph::MatchingGraph(size_t num_nodes, size_t num_observables)
     : negative_weight_sum(0), num_nodes(num_nodes), num_observables(num_observables), normalising_constant(0) {
+#ifndef USE_SHMEM
     nodes.resize(num_nodes);
-// #ifdef USE_THREADS
-//     for (int idx=0; idx < NUM_SHOTS_PER_ACTIVE_UNIT; ++idx) {
-//         ephemeral_feilds[idx].resize(num_nodes);
-//     }
-// #endif
+#endif  
 }
 
 MatchingGraph::MatchingGraph(size_t num_nodes, size_t num_observables, double normalising_constant)
@@ -126,12 +123,9 @@ MatchingGraph::MatchingGraph(size_t num_nodes, size_t num_observables, double no
       num_nodes(num_nodes),
       num_observables(num_observables),
       normalising_constant(normalising_constant) {
+#ifndef USE_SHMEM
     nodes.resize(num_nodes);
-// #ifdef USE_THREADS
-//     for (int idx=0; idx < NUM_SHOTS_PER_ACTIVE_UNIT; ++idx) {
-//         ephemeral_feilds[idx].resize(num_nodes);
-//     }
-// #endif
+#endif
 }
 
 MatchingGraph::MatchingGraph(MatchingGraph&& graph) noexcept
@@ -175,7 +169,12 @@ void MatchingGraph::update_negative_weight_detection_events(size_t node_id) {
 namespace {
 
 ImpliedWeight convert_rule(
-    std::vector<DetectorNode>& nodes, const ImpliedWeightUnconverted& rule, const double normalising_constant) {
+#ifdef USE_SHMEM
+        NodesWrapper& nodes,
+#else
+        std::vector<DetectorNode>& nodes,
+#endif
+        const ImpliedWeightUnconverted& rule, const double normalising_constant) {
     const size_t& i = rule.node1;
     const size_t& j = rule.node2;
     weight_int* weight_pointer_i =
@@ -206,16 +205,6 @@ void MatchingGraph::convert_implied_weights(double normalising_constant) {
         }
     }
 }
-
-#ifdef USE_THREADS
-// ===============
-// void MatchingGraph::reset_active_status_for_all_nodes() {
-//     for (auto& node : nodes) {
-//         node.is_active = -1;
-//     }
-// }
-// ===============
-#endif
 
 // Reweight assuming an error has occurred on a single edge u, v. When v == -1, assumes an edge from
 // u to the boundary.
