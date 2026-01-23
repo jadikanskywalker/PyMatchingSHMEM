@@ -269,7 +269,50 @@ double pm::UserGraph::max_abs_weight() {
     return max_abs_weight;
 }
 
-#ifdef USE_THREADS
+#ifdef USE_SHMEM
+pm::DecodingUnit pm::UserGraph::to_shmem_decoding_unit(pm::weight_int num_distinct_weights, DetectorNode *nodes_ptr) {
+    pm::MatchingGraph tmp(nodes.size(), _num_observables);
+    std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
+    matching_graph_ptr->nodes.nodes = nodes_ptr;
+    matching_graph_ptr->nodes.size_ = nodes.size();
+    pm::MatchingGraph& matching_graph = *matching_graph_ptr;
+    double normalising_constant = to_matching_or_search_graph_helper(
+        num_distinct_weights,
+        [&](size_t u,
+            size_t v,
+            pm::signed_weight_int weight,
+            const std::vector<size_t>& observables,
+            const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
+            matching_graph.add_edge(u, v, weight, observables, implied_weights_for_other_edges);
+        },
+        [&](size_t u,
+            pm::signed_weight_int weight,
+            const std::vector<size_t>& observables,
+            const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
+            matching_graph.add_boundary_edge(u, weight, observables, implied_weights_for_other_edges);
+        });
+
+    matching_graph.normalising_constant = normalising_constant;
+    if (boundary_nodes.size() > 0) {
+        matching_graph.is_user_graph_boundary_node.clear();
+        matching_graph.is_user_graph_boundary_node.resize(nodes.size(), false);
+        for (auto& i : boundary_nodes)
+            matching_graph.is_user_graph_boundary_node[i] = true;
+    }
+    matching_graph.convert_implied_weights(normalising_constant);
+
+    for (int vb=0; vb < virtual_boundaries.size(); ++vb) {
+        for (int index : virtual_boundaries[vb]) {
+            matching_graph.nodes[index].vb = vb;
+        }
+    }
+
+    pm::DecodingUnit unit(matching_graph_ptr, node_part_id, num_partitions, virtual_boundaries.size());
+
+    return unit;
+}
+
+#elif defined(USE_THREADS)
 pm::DecodingUnit pm::UserGraph::to_decoding_unit(pm::weight_int num_distinct_weights) {
     std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
     pm::MatchingGraph& matching_graph = *matching_graph_ptr;
