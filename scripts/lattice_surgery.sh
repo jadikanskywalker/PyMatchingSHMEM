@@ -43,9 +43,9 @@ end_serial=$(date +%s)
 serial_time=$((end_serial - start_serial))
 echo "Serial run completed in $serial_time seconds."
 
-echo Serial
-echo correct predictions:
-paste -d " " predicted_obs_flips.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
-echo wrong predictions:
-paste -d " " predicted_obs_flips.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
-echo
+# echo Serial
+# echo correct predictions:
+# paste -d " " predicted_obs_flips.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
+# echo wrong predictions:
+# paste -d " " predicted_obs_flips.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
+# echo

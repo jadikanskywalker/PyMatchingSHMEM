@@ -1,0 +1,8 @@
+leak:ofi_rbinit
+leak:sock_tx_context_alloc
+leak:pmix_pointer_array_init
+leak:pmix_hash_fetch
+leak:pmix_gds_shmem2_fetch
+leak:hwloc__add_info
+leak:event_process_active_single_queue
+leak:shmem_runtime_init

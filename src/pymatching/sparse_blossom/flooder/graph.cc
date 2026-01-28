@@ -170,7 +170,7 @@ namespace {
 
 ImpliedWeight convert_rule(
 #ifdef USE_SHMEM
-        NodesWrapper& nodes,
+        VectorWrapper<DetectorNode>& nodes,
 #else
         std::vector<DetectorNode>& nodes,
 #endif
