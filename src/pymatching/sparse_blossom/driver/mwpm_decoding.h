@@ -72,10 +72,15 @@ Mwpm detector_error_model_to_mwpm(
 
 #ifdef USE_SHMEM
 DecodingUnit detector_error_model_to_shmem_decoding_unit(
+    void* &nodes_ptr,
+    void* &neighbors_ptr,
+    void* &neighbor_weights_ptr,
+    void* &neighbor_observables_ptr,
     const stim::DetectorErrorModel& detector_error_model,
     pm::weight_int num_distinct_weights,
     bool ensure_search_flooder_included = false,
-    bool enable_correlations = false);
+    bool enable_correlations = false
+);
 
 #elif defined(USE_THREADS)
 DecodingUnit detector_error_model_to_decoding_unit(

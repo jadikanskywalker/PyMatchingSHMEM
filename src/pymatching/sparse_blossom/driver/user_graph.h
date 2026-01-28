@@ -75,13 +75,10 @@ class UserGraph {
     bool loaded_from_dem_without_correlations = false;
 
 #ifdef USE_THREADS
-// ===============
     std::vector<int> node_part_id;
     int num_partitions;
-//     std::vector<std::vector<int>> partitions;
     std::vector<std::vector<int>> virtual_boundaries;
-//     std::vector<std::vector<int>> virtual_boundary_partitions; // for each vb, list of partitions it connects
-// ===============
+    int max_neighbors{ 0 };
 #endif
 
     UserGraph();
@@ -133,11 +130,14 @@ class UserGraph {
         const EdgeCallable& edge_func,
         const BoundaryEdgeCallable& boundary_edge_func);
 #ifdef USE_SHMEM
-    pm::DecodingUnit to_shmem_decoding_unit(pm::weight_int num_distinct_weights, DetectorNode *nodes_ptr);
+    pm::DecodingUnit to_shmem_decoding_unit(
+        pm::weight_int num_distinct_weights,
+        DetectorNode *nodes_ptr,
+        DetectorNode **neighbors_ptr,
+        weight_int *neighbor_weights_ptr,
+        obs_int *neighbor_observables_ptr);
 #elif defined(USE_THREADS)
-// ===============
     pm::DecodingUnit to_decoding_unit(pm::weight_int num_distinct_weights);
-// ===============
 #endif
 
     pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);

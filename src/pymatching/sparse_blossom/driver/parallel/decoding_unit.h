@@ -101,7 +101,7 @@ struct ShotBuffer {
 //   A decoding task involves solving a partition or fusing two solved partition along a virtual boundary
 struct DecodingUnit {
     // Graph
-    const std::shared_ptr<pm::MatchingGraph> graph_ptr;
+    std::shared_ptr<pm::MatchingGraph> graph_ptr;
 
     const std::vector<int> node_part_id;
     const int num_partitions;

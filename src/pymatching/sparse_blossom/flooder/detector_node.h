@@ -28,6 +28,10 @@
 #include "pymatching/sparse_blossom/config_parallel.h"
 #endif
 
+#ifdef USE_SHMEM
+#include "pymatching/sparse_blossom/flooder/helpers/vector_wrapper.h"
+#endif
+
 namespace pm {
 
 #ifdef USE_THREADS
@@ -63,14 +67,6 @@ class DetectorNode {
    public:
 #ifdef USE_THREADS
     DetectorNode() = default;
-    std::array<DetectorNodeEphemeralFeilds, NUM_ACTIVE_SHOTS_PER_UNIT> ephemeral_feilds{};
-
-    inline DetectorNodeEphemeralFeilds& state(int shot_rotating_idx) {
-        return ephemeral_feilds[shot_rotating_idx];
-    }
-    inline const DetectorNodeEphemeralFeilds& state(int shot_rotating_idx) const {
-        return ephemeral_feilds[shot_rotating_idx];
-    }
 #else
     DetectorNode()
         : region_that_arrived(nullptr),
@@ -80,9 +76,25 @@ class DetectorNode {
           observables_crossed_from_source(0),
           radius_of_arrival(0) {
     }
+#endif 
+#ifdef USE_SHMEM
+    // when using shmem, each neighbors array is stored in shared memory
+    DetectorNode(int max_neighbors, DetectorNode **neighbors_ptr, weight_int *neighbor_weights_ptr, obs_int *neighbor_observables_ptr)
+        : neighbors(neighbors_ptr, max_neighbors),
+          neighbor_weights(neighbor_weights_ptr, max_neighbors),
+          neighbor_observables(neighbor_observables_ptr, max_neighbors) {}
 #endif
 
-#ifndef USE_THREADS
+#ifdef USE_THREADS
+    /// == Ephemeral fields used to track algorithmic state during matching. ==
+    std::array<DetectorNodeEphemeralFeilds, NUM_ACTIVE_SHOTS_PER_UNIT> ephemeral_feilds{};
+    inline DetectorNodeEphemeralFeilds& state(int shot_rotating_idx) {
+        return ephemeral_feilds[shot_rotating_idx];
+    }
+    inline const DetectorNodeEphemeralFeilds& state(int shot_rotating_idx) const {
+        return ephemeral_feilds[shot_rotating_idx];
+    }
+#else
     /// == Ephemeral fields used to track algorithmic state during matching. ==
     /// The region that reached and owns this node.
     GraphFillRegion* region_that_arrived;
@@ -94,10 +106,16 @@ class DetectorNode {
     QueuedEventTracker node_event_tracker;
 #endif
 
+#ifdef USE_SHMEM
+    VectorWrapper<DetectorNode*> neighbors;       /// The node's neighbors.
+    VectorWrapper<weight_int> neighbor_weights;   /// Distance crossed by the edge to each neighbor.
+    VectorWrapper<obs_int> neighbor_observables;  /// Observables crossed by the edge to each neighbor.
+#else
     /// == Permanent fields used to define the structure of the graph. ==
     std::vector<DetectorNode*> neighbors;       /// The node's neighbors.
     std::vector<weight_int> neighbor_weights;   /// Distance crossed by the edge to each neighbor.
     std::vector<obs_int> neighbor_observables;  /// Observables crossed by the edge to each neighbor.
+#endif
 
 #ifdef USE_THREADS
 // ===============

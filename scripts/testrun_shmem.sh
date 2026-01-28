@@ -6,16 +6,16 @@
 
 # export SHMEM_OFI_PROVIDER=ofi_rxm
 
-# if [ $# -le 3 ]
-#   then
-#     echo "Args: [nthreads] [shots] [rounds] [M]"
-#     exit 1
-# else
-#     nthreads=$1
-#     shots=$2
-#     rounds=$(($3-1))
-#     M=$4
-# fi
+if [ $# -le 3 ]
+  then
+    echo "Args: [nthreads] [shots] [rounds] [M]"
+    exit 1
+else
+    nthreads=$1
+    shots=$2
+    rounds=$(($3-1))
+    M=$4
+fi
 
 ppn=1
 
@@ -54,7 +54,7 @@ if [ -d "out_frames" ]
     rm out_frames -r
 fi
 
-# find d=21 lattice surgery
+# need to find d=21 lattice surgery circuit
 stim gen \
     --rounds=$rounds \
     --distance=21 \
@@ -75,26 +75,6 @@ stim detect \
     --out detection_events.b8 \
     --out_format b8
 
-echo "Starting serial run..."
-start_serial=$(date +%s)
-~/PyMatchingSHMEM/build/pymatching predict \
-    --dem error_model.dem \
-    --in detection_events.b8 \
-    --in_format b8 \
-    --out predicted_obs_flips.01 \
-    --out_format 01 \
-    > log_serial.out
-end_serial=$(date +%s)
-serial_time=$((end_serial - start_serial))
-echo "Serial run completed in $serial_time seconds."
-
-echo Serial
-echo correct predictions:
-paste -d " " predicted_obs_flips.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
-echo wrong predictions:
-paste -d " " predicted_obs_flips.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
-echo
-
 # Run prediction
 if [ $nthreads -gt 0 ]
   then
@@ -103,11 +83,37 @@ if [ $nthreads -gt 0 ]
     export OMP_PROC_BIND=true
 fi
 
+echo "Starting threads run..."
+start_serial=$(date +%s)
+~/PyMatchingSHMEM/build_threads_release/pymatching predict \
+    --dem error_model.dem \
+    --in detection_events.b8 \
+    --in_format b8 \
+    --out predicted_obs_flips__threads.01 \
+    --out_format 01 \
+    --rounds_per_partition $M \
+    --use_threads \
+    > log_threads.out
+end_serial=$(date +%s)
+serial_time=$((end_serial - start_serial))
+echo "Threads run completed in $serial_time seconds."
+
+echo Threads
+echo correct predictions:
+paste -d " " predicted_obs_flips__threads.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
+echo wrong predictions:
+paste -d " " predicted_obs_flips__threads.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
+echo
+
 # Parallel run with timing
-echo "Starting parallel run..."
+export ASAN_OPTIONS=detect_leaks=0
+echo "Starting SHMEM run..."
 start_parallel=$(date +%s)
-oshrun --hostfile hostfile.txt -N $ppn \
-    ~/PyMatchingSHMEM/build_shmem/pymatching predict \
+oshrun  \
+    --map-by ppr:${ppn}:node:pe=${OMP_NUM_THREADS} \
+    --bind-to core \
+    -hostfile hostfile.txt \
+    ~/PyMatchingSHMEM/build_sos/pymatching predict \
     --dem error_model.dem \
     --in detection_events.b8 \
     --in_format b8 \
@@ -115,18 +121,18 @@ oshrun --hostfile hostfile.txt -N $ppn \
     --out_format 01 \
     --rounds_per_partition $M \
     --use_threads \
-    > log_parallel.out
+    > log_shmem.out
 
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
-echo "Parallel run completed in $parallel_time seconds."
+echo "SHMEM run completed in $parallel_time seconds."
 
 # Check work
-echo Parallel
+echo SHMEM
 echo correct predictions:
-paste -d " " predicted_obs_flips__threads.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
+paste -d " " predicted_obs_flips__shmem.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
 echo wrong predictions:
-paste -d " " predicted_obs_flips__threads.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
+paste -d " " predicted_obs_flips__shmem.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
 
 echo
 echo Shots with differring predictions:
@@ -135,7 +141,7 @@ awk 'NR==FNR{a[NR]=$0; n=NR; next} {
 } END {
   if (n>FNR) { for (i=FNR+1;i<=n;i++) { print i-1; out=1 } }
   if (!out) print "no differences"
-}' predicted_obs_flips.01 predicted_obs_flips__threads.01
+}' predicted_obs_flips__threads.01 predicted_obs_flips__shmem.01
 
 rm hostfile.txt
 cd ..

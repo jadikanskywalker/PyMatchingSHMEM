@@ -270,12 +270,26 @@ double pm::UserGraph::max_abs_weight() {
 }
 
 #ifdef USE_SHMEM
-pm::DecodingUnit pm::UserGraph::to_shmem_decoding_unit(pm::weight_int num_distinct_weights, DetectorNode *nodes_ptr) {
-    pm::MatchingGraph tmp(nodes.size(), _num_observables);
+pm::DecodingUnit pm::UserGraph::to_shmem_decoding_unit(
+    pm::weight_int num_distinct_weights,
+    DetectorNode *nodes_ptr,
+    DetectorNode **neighbors_ptr,
+    weight_int *neighbor_weights_ptr,
+    obs_int *neighbor_observables_ptr) {
     std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
-    matching_graph_ptr->nodes.nodes = nodes_ptr;
-    matching_graph_ptr->nodes.size_ = nodes.size();
     pm::MatchingGraph& matching_graph = *matching_graph_ptr;
+    // Set pointers to nodes
+    int num_nodes = nodes.size();
+    matching_graph.nodes.arr_ = nodes_ptr;
+    matching_graph.nodes.capacity_ = num_nodes;
+    // Construct nodes
+    for (int i=0; i < num_nodes; ++i) {
+        int offset = i*max_neighbors;
+        matching_graph.nodes.emplace_back(max_neighbors,
+            neighbors_ptr+offset,
+            neighbor_weights_ptr+offset,
+            neighbor_observables_ptr+offset);
+    }
     double normalising_constant = to_matching_or_search_graph_helper(
         num_distinct_weights,
         [&](size_t u,
@@ -301,6 +315,7 @@ pm::DecodingUnit pm::UserGraph::to_shmem_decoding_unit(pm::weight_int num_distin
     }
     matching_graph.convert_implied_weights(normalising_constant);
 
+    // Store vb information on DetectorNodes
     for (int vb=0; vb < virtual_boundaries.size(); ++vb) {
         for (int index : virtual_boundaries[vb]) {
             matching_graph.nodes[index].vb = vb;
@@ -616,10 +631,8 @@ pm::UserGraph pm::detector_error_model_to_user_graph(
         user_graph.loaded_from_dem_without_correlations = true;
     }
 #ifdef USE_THREADS
-// ===============
     // Default to partition nodes by round
     user_graph.partition_nodes_by_round(detector_error_model);
-// ===============
 #endif
     return user_graph;
 }
@@ -663,14 +676,9 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
     std::map<uint64_t, std::vector<double>> coords_map = dem.get_detector_coordinates(all_dets);
     // M rounds per partition
     int M = config_parallel::M;
-    // partition nodes
-    // partitions.clear();
-    // partitions.push_back((std::vector<int>){});
     node_part_id.resize(num_nodes);
     virtual_boundaries.clear();
     virtual_boundaries.push_back((std::vector<int>){});
-    // virtual_boundary_partitions.clear();
-    // virtual_boundary_partitions.push_back((std::vector<int>){});
     int p = 0;
     int vb = 1;
     double last_round = -1;
@@ -687,25 +695,27 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
             // No coordinate data; skip annotation.
             throw std::invalid_argument("Detector node " + std::to_string(it->first) + " has no coords");
         }
-        // Assign to p or vb
+        // Store round
         size_t round_coor = coors.size() - 1;
         nodes[n].round = coors[round_coor];
+        if (nodes[n].neighbors.size() > max_neighbors) {
+            max_neighbors = nodes[n].neighbors.size();
+        }
+        // Update current p/vb if necessary
         if (coors[round_coor] > last_round) {
             round_counter++;
             if (round_counter == M) {
                 ++p;
-                // partitions.push_back((std::vector<int>){});
                 p_or_vb = false; // boundary
-                // virtual_boundary_partitions[vb] = (std::vector<int>){(int)last_round, (int)coors[round_coor]};
             } else if (round_counter > M) {
                 round_counter = 0;
                 ++vb;
                 virtual_boundaries.push_back((std::vector<int>){});
-                // virtual_boundary_partitions.push_back((std::vector<int>){});
                 p_or_vb = true; // partition
             }
             last_round = coors[round_coor];
         }
+        // Assign to p or vb
         if (p_or_vb){
             node_part_id[n] = p;
         } else {

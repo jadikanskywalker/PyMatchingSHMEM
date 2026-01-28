@@ -20,16 +20,15 @@
 #endif
 #endif
 
+#include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
+
 #ifdef USE_THREADS
 #include "../config_parallel.h"
 #include <fstream>
 #include <filesystem>
 #include "pymatching/sparse_blossom/diagram/mwpm_diagram.h"
-// ===============
-#endif
-
-#include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
 #include "pymatching/sparse_blossom/driver/parallel/decoding_unit.h"
+#endif
 
 #include "pymatching/sparse_blossom/driver/user_graph.h"
 #include <unordered_set>
@@ -100,6 +99,10 @@ pm::Mwpm pm::detector_error_model_to_mwpm(
 #ifdef USE_SHMEM
 // All PE's must call this function
 pm::DecodingUnit pm::detector_error_model_to_shmem_decoding_unit(
+    void* &nodes_ptr,
+    void* &neighbors_ptr,
+    void* &neighbor_weights_ptr,
+    void* &neighbor_observables_ptr,
     const stim::DetectorErrorModel& detector_error_model,
     pm::weight_int num_distinct_weights,
     bool ensure_search_flooder_included,
@@ -107,9 +110,18 @@ pm::DecodingUnit pm::detector_error_model_to_shmem_decoding_unit(
     auto user_graph =
         pm::detector_error_model_to_user_graph(detector_error_model, enable_correlations, num_distinct_weights);
     int num_nodes = user_graph.nodes.size();
+    int neighbor_arrays_nelems = num_nodes * user_graph.max_neighbors;
     /* PEs allocate detector nodes in shared memory */
-    DetectorNode *nodes_ptr = (DetectorNode*) shmem_malloc(num_nodes * sizeof(DetectorNode));
-    return user_graph.to_shmem_decoding_unit(num_distinct_weights, nodes_ptr);
+    nodes_ptr = shmem_malloc(num_nodes * sizeof(DetectorNode));
+    neighbors_ptr = shmem_malloc(neighbor_arrays_nelems * sizeof(DetectorNode*));
+    neighbor_weights_ptr = shmem_malloc(neighbor_arrays_nelems * sizeof(weight_int));
+    neighbor_observables_ptr = shmem_malloc(neighbor_arrays_nelems * sizeof(obs_int));
+    return user_graph.to_shmem_decoding_unit(
+        num_distinct_weights,
+        (DetectorNode*) nodes_ptr,
+        (DetectorNode**) neighbors_ptr,
+        (weight_int*) neighbor_weights_ptr,
+        (obs_int*) neighbor_observables_ptr);
 }
 
 #elif defined(USE_THREADS)

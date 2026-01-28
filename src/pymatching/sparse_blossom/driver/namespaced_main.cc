@@ -161,6 +161,12 @@ int main_predict(int argc, const char** argv) {
 #else
 // main_predict (SHMEM) sets up shared memory environment
 int main_predict(int argc, const char** argv) {
+    // SHMEM memory regions
+    void* nodes_ptr;
+    void* neighbors_ptr;
+    void* neighbor_weights_ptr;
+    void* neighbor_observables_ptr;
+    // Parse args
     stim::check_for_unknown_arguments(
         {
             "--in",
@@ -205,12 +211,15 @@ int main_predict(int argc, const char** argv) {
     pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
 
     auto decoding_unit = pm::detector_error_model_to_shmem_decoding_unit(
+        nodes_ptr,
+        neighbors_ptr,
+        neighbor_weights_ptr,
+        neighbor_observables_ptr,
         dem,
         num_buckets,
         /*ensure_search_flooder_included=*/enable_correlations,
-        /*enable_correlations=*/enable_correlations);
-    // DecodingSet decoding_set(std::move(decoding_units), std::move(reader), std::move(writer), enable_correlations,
-    // draw_frames); decoding_set.build_solvers(omp_get_max_threads(), dem);
+        /*enable_correlations=*/enable_correlations
+    );
     decoding_unit.setup(
         std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
     if (DEBUG) {
@@ -243,6 +252,14 @@ int main_predict(int argc, const char** argv) {
     if (shots_in != stdin) {
         fclose(shots_in);
     }
+
+    decoding_unit.graph_ptr.reset();
+
+    // Free SHMEM memory regions
+    shmem_free(nodes_ptr);
+    shmem_free(neighbors_ptr);
+    shmem_free(neighbor_weights_ptr);
+    shmem_free(neighbor_observables_ptr);
 
     return EXIT_SUCCESS;
 }

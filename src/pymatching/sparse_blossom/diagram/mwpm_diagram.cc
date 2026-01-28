@@ -111,7 +111,7 @@ pm::pick_coords_for_drawing_from_dem(const stim::DetectorErrorModel &dem, float 
 struct StateHelper {
     const Mwpm &mwpm;
 #ifdef USE_SHMEM
-    const pm::NodesWrapper &ns;
+    const VectorWrapper<DetectorNode> &ns;
 #else
     const std::vector<DetectorNode> &ns;
 #endif
