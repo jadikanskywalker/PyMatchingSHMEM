@@ -96,43 +96,24 @@ pm::Mwpm pm::detector_error_model_to_mwpm(
     return user_graph.to_mwpm(num_distinct_weights, ensure_search_flooder_included);
 }
 
-#ifdef USE_SHMEM
-// All PE's must call this function
-pm::DecodingUnit pm::detector_error_model_to_shmem_decoding_unit(
-    void* &nodes_ptr,
-    void* &neighbors_ptr,
-    void* &neighbor_weights_ptr,
-    void* &neighbor_observables_ptr,
-    const stim::DetectorErrorModel& detector_error_model,
-    pm::weight_int num_distinct_weights,
-    bool ensure_search_flooder_included,
-    bool enable_correlations) {
-    auto user_graph =
-        pm::detector_error_model_to_user_graph(detector_error_model, enable_correlations, num_distinct_weights);
-    int num_nodes = user_graph.nodes.size();
-    int neighbor_arrays_nelems = num_nodes * user_graph.max_neighbors;
-    /* PEs allocate detector nodes in shared memory */
-    nodes_ptr = shmem_malloc(num_nodes * sizeof(DetectorNode));
-    neighbors_ptr = shmem_malloc(neighbor_arrays_nelems * sizeof(DetectorNode*));
-    neighbor_weights_ptr = shmem_malloc(neighbor_arrays_nelems * sizeof(weight_int));
-    neighbor_observables_ptr = shmem_malloc(neighbor_arrays_nelems * sizeof(obs_int));
-    return user_graph.to_shmem_decoding_unit(
-        num_distinct_weights,
-        (DetectorNode*) nodes_ptr,
-        (DetectorNode**) neighbors_ptr,
-        (weight_int*) neighbor_weights_ptr,
-        (obs_int*) neighbor_observables_ptr);
-}
-
-#elif defined(USE_THREADS)
+#ifdef USE_THREADS
 pm::DecodingUnit pm::detector_error_model_to_decoding_unit(
+#ifdef USE_SHMEM
+    void* &nodes_ephemeral_fields_ptr,
+#endif
     const stim::DetectorErrorModel& detector_error_model,
     pm::weight_int num_distinct_weights,
     bool ensure_search_flooder_included,
     bool enable_correlations) {
     auto user_graph =
         pm::detector_error_model_to_user_graph(detector_error_model, enable_correlations, num_distinct_weights);
+#ifdef USE_SHMEM
+    /* PEs allocate detector nodes in shared memory */
+    nodes_ephemeral_fields_ptr = shmem_malloc(user_graph.nodes.size() * NUM_BUFFERS_PER_UNIT * sizeof(DetectorNodeEphemeralFields));
+    return user_graph.to_decoding_unit(num_distinct_weights, (DetectorNodeEphemeralFields*) nodes_ephemeral_fields_ptr);
+#else
     return user_graph.to_decoding_unit(num_distinct_weights);
+#endif
 }
 #endif
 
@@ -152,7 +133,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
 #ifdef USE_THREADS
     mwpm.unmatch_virtual_boundaries_between_partitions();
 
-    const int shot_rotating_idx = mwpm.flooder.shot_rotating_idx;
+    const int rotating_buffer_idx = mwpm.flooder.rotating_buffer_idx;
 #endif
 
     if (mwpm.flooder.negative_weight_detection_events.empty()) {
@@ -180,7 +161,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
         // First mark nodes with negative weight detection events
         for (auto& det : mwpm.flooder.negative_weight_detection_events) {
 #ifdef USE_THREADS
-            mwpm.flooder.graph.nodes[det].state(shot_rotating_idx).radius_of_arrival = 1;
+            mwpm.flooder.graph.nodes[det].state(rotating_buffer_idx).radius_of_arrival = 1;
 #else
             mwpm.flooder.graph.nodes[det].radius_of_arrival = 1;
 #endif
@@ -193,7 +174,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
                     "Detection event index `" + std::to_string(detection) +
                     "` is larger than any detector node index in the graph.");
 #ifdef USE_THREADS
-            if (!mwpm.flooder.graph.nodes[detection].state(shot_rotating_idx).radius_of_arrival) {
+            if (!mwpm.flooder.graph.nodes[detection].state(rotating_buffer_idx).radius_of_arrival) {
 #else
             if (!mwpm.flooder.graph.nodes[detection].radius_of_arrival) {
 #endif
@@ -203,7 +184,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
             } else {
                 // Unmark node
 #ifdef USE_THREADS
-                mwpm.flooder.graph.nodes[detection].state(shot_rotating_idx).radius_of_arrival = 0;
+                mwpm.flooder.graph.nodes[detection].state(rotating_buffer_idx).radius_of_arrival = 0;
 #else
                 mwpm.flooder.graph.nodes[detection].radius_of_arrival = 0;
 #endif
@@ -212,8 +193,8 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
 
         for (auto& det : mwpm.flooder.negative_weight_detection_events) {
 #ifdef USE_THREADS
-            if (mwpm.flooder.graph.nodes[det].state(shot_rotating_idx).radius_of_arrival) {
-                mwpm.flooder.graph.nodes[det].state(shot_rotating_idx).radius_of_arrival = 0;
+            if (mwpm.flooder.graph.nodes[det].state(rotating_buffer_idx).radius_of_arrival) {
+                mwpm.flooder.graph.nodes[det].state(rotating_buffer_idx).radius_of_arrival = 0;
 #else
             if (mwpm.flooder.graph.nodes[det].radius_of_arrival) {
                 // Add a detection event if the node is still marked
@@ -302,12 +283,12 @@ shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events) {
     pm::MatchingResult res;
 #ifdef USE_THREADS
-    const int shot_rotating_idx = mwpm.flooder.shot_rotating_idx;
+    const int rotating_buffer_idx = mwpm.flooder.rotating_buffer_idx;
 #endif
     for (auto& i : detection_events) {
 #ifdef USE_THREADS
-        if (mwpm.flooder.graph.nodes[i].state(shot_rotating_idx).region_that_arrived)
-            res += mwpm.shatter_blossom_and_extract_matches(mwpm.flooder.graph.nodes[i].state(shot_rotating_idx).region_that_arrived_top);
+        if (mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived)
+            res += mwpm.shatter_blossom_and_extract_matches(mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived_top);
 #else
         if (mwpm.flooder.graph.nodes[i].region_that_arrived)
             res += mwpm.shatter_blossom_and_extract_matches(mwpm.flooder.graph.nodes[i].region_that_arrived_top);
@@ -323,13 +304,13 @@ void
 shatter_blossoms_for_all_detection_events_and_extract_match_edges(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events) {
 #ifdef USE_THREADS
-    const int shot_rotating_idx = mwpm.flooder.shot_rotating_idx;
+    const int rotating_buffer_idx = mwpm.flooder.rotating_buffer_idx;
 #endif
     for (auto& i : detection_events) {
 #ifdef USE_THREADS
-        if (mwpm.flooder.graph.nodes[i].state(shot_rotating_idx).region_that_arrived)
+        if (mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived)
             mwpm.shatter_blossom_and_extract_match_edges(
-                mwpm.flooder.graph.nodes[i].state(shot_rotating_idx).region_that_arrived_top, mwpm.flooder.match_edges);
+                mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived_top, mwpm.flooder.match_edges);
 #else
         if (mwpm.flooder.graph.nodes[i].region_that_arrived)
             mwpm.shatter_blossom_and_extract_match_edges(
@@ -683,7 +664,7 @@ void pm::output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& dete
                   << "    blossom_children.size(): " << region->blossom_children.size() << std::endl;
     }
     out << "DEBUG: partition 0 detector nodes: " << std::endl;
-    const int shot_rotating_idx = mwpm.flooder.shot_rotating_idx;
+    const int rotating_buffer_idx = mwpm.flooder.rotating_buffer_idx;
     for (auto node  = mwpm.flooder.graph.nodes.begin(); node != mwpm.flooder.graph.nodes.end(); ++node) {
         // if (node->partition != 0 && !node->is_virtual) continue;
         out << "  node " << &(*node);
@@ -701,7 +682,7 @@ void pm::output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& dete
             out << "  -  NO DETECTION EVENT" << std::endl;
         if (parallel)
             out << "    vb: " << node->vb << std::endl;
-        const auto &state = node->state(shot_rotating_idx);
+        const auto &state = node->state(rotating_buffer_idx);
         out << "    region_that_arrived: " << state.region_that_arrived << std::endl
             << "    region_that_arrived_top: " << state.region_that_arrived_top << std::endl;
         if (state.region_that_arrived != state.region_that_arrived_top)

@@ -6,7 +6,7 @@ FLAG_TYPE=${1:-fast}
 
 cd ~/PyMatchingSHMEM/
 
-# rm -rf build_shmem
+# rm -rf build_sos
 
 CC=/mnt/DISCL/home/jadhicks/sw/el9-x86_64/sos_1.5/bin/oshcc
 CXX=/mnt/DISCL/home/jadhicks/sw/el9-x86_64/sos_1.5/bin/oshc++

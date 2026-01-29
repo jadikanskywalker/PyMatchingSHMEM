@@ -113,9 +113,7 @@ void MatchingGraph::add_boundary_edge(
 
 MatchingGraph::MatchingGraph(size_t num_nodes, size_t num_observables)
     : negative_weight_sum(0), num_nodes(num_nodes), num_observables(num_observables), normalising_constant(0) {
-#ifndef USE_SHMEM
     nodes.resize(num_nodes);
-#endif  
 }
 
 MatchingGraph::MatchingGraph(size_t num_nodes, size_t num_observables, double normalising_constant)
@@ -123,9 +121,7 @@ MatchingGraph::MatchingGraph(size_t num_nodes, size_t num_observables, double no
       num_nodes(num_nodes),
       num_observables(num_observables),
       normalising_constant(normalising_constant) {
-#ifndef USE_SHMEM
     nodes.resize(num_nodes);
-#endif
 }
 
 MatchingGraph::MatchingGraph(MatchingGraph&& graph) noexcept
@@ -169,11 +165,7 @@ void MatchingGraph::update_negative_weight_detection_events(size_t node_id) {
 namespace {
 
 ImpliedWeight convert_rule(
-#ifdef USE_SHMEM
-        VectorWrapper<DetectorNode>& nodes,
-#else
         std::vector<DetectorNode>& nodes,
-#endif
         const ImpliedWeightUnconverted& rule, const double normalising_constant) {
     const size_t& i = rule.node1;
     const size_t& j = rule.node2;

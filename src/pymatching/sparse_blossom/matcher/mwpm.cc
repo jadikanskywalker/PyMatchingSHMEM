@@ -442,7 +442,7 @@ GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_matches(GraphFil
         r.region->clear_blossom_parent_ignoring_wrapped_radius();
     }
 #ifdef USE_THREADS
-    auto subblossom = region->match.edge.loc_from->state(region->shot_rotating_idx).region_that_arrived_top;
+    auto subblossom = region->match.edge.loc_from->state(region->rotating_buffer_idx).region_that_arrived_top;
 #else
     auto subblossom = region->match.edge.loc_from->region_that_arrived_top;
 #endif
@@ -518,7 +518,7 @@ GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_match_edges(
         r.region->clear_blossom_parent_ignoring_wrapped_radius();
     }
 #ifdef USE_THREADS
-    auto subblossom = region->match.edge.loc_from->state(region->shot_rotating_idx).region_that_arrived_top;
+    auto subblossom = region->match.edge.loc_from->state(region->rotating_buffer_idx).region_that_arrived_top;
 #else
     auto subblossom = region->match.edge.loc_from->region_that_arrived_top;
 #endif
@@ -589,7 +589,7 @@ void Mwpm::create_detection_event(DetectorNode *node) {
     auto region = flooder.region_arena.alloc_default_constructed();
 #ifdef USE_THREADS
     region->owner_arena = &flooder.region_arena;
-    region->shot_rotating_idx = flooder.shot_rotating_idx;
+    region->rotating_buffer_idx = flooder.rotating_buffer_idx;
 #endif
     auto alt_tree_node = node_arena.alloc_unconstructed();
     new (alt_tree_node) AltTreeNode(region);
@@ -661,7 +661,7 @@ Mwpm::Mwpm() {
 void Mwpm::reset() {
     for (auto &n : flooder.graph.nodes) {
 #ifdef USE_THREADS
-        for (int solver_idx = 0; solver_idx < NUM_ACTIVE_SHOTS_PER_UNIT; ++solver_idx) {
+        for (int solver_idx = 0; solver_idx < NUM_BUFFERS_PER_UNIT; ++solver_idx) {
             n.reset(solver_idx);
         }
 #else
@@ -672,5 +672,9 @@ void Mwpm::reset() {
         m.reset();
     flooder.queue.clear();
     node_arena.~Arena();
+#ifdef USE_SHMEM
+    flooder.region_arena.~SHMEMArena();
+#else
     flooder.region_arena.~Arena();
+#endif
 }

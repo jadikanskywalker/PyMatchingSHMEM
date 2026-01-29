@@ -24,10 +24,6 @@
 #include "pymatching/sparse_blossom/flooder/detector_node.h"
 #include "pymatching/sparse_blossom/tracker/flood_check_event.h"
 
-#ifdef USE_SHMEM
-#include "pymatching/sparse_blossom/flooder/helpers/vector_wrapper.h"
-#endif
-
 namespace pm {
 
 struct GraphFillRegion;
@@ -43,12 +39,8 @@ struct PreviousWeight {
 /// will only refer to other detector nodes within the same graph.
 class MatchingGraph {
    public:
-#ifdef USE_SHMEM
-    // nodes stored in shared memory instead of heap
-    VectorWrapper<DetectorNode> nodes;
-#else
     std::vector<DetectorNode> nodes;
-#endif
+
     /// These are the detection events that would occur if an error occurred on every edge with a negative weight
     std::set<size_t> negative_weight_detection_events_set;
     /// These are the observables that would be flipped if an error occurred on every edge with a negative weight

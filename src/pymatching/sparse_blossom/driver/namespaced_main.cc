@@ -30,6 +30,7 @@
 
 #ifdef USE_THREADS
 #include <omp.h>
+
 #include "../config_parallel.h"
 #include "../diagram/mwpm_diagram.h"
 #endif
@@ -162,10 +163,8 @@ int main_predict(int argc, const char** argv) {
 // main_predict (SHMEM) sets up shared memory environment
 int main_predict(int argc, const char** argv) {
     // SHMEM memory regions
-    void* nodes_ptr;
-    void* neighbors_ptr;
-    void* neighbor_weights_ptr;
-    void* neighbor_observables_ptr;
+    void* nodes_ephemeral_fields_ptr;
+    void* regions_ptr;
     // Parse args
     stim::check_for_unknown_arguments(
         {
@@ -197,7 +196,7 @@ int main_predict(int argc, const char** argv) {
 
     config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
-    bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);   
+    bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);
 
     stim::DetectorErrorModel dem = stim::DetectorErrorModel::from_file(dem_file);
     fclose(dem_file);
@@ -210,18 +209,13 @@ int main_predict(int argc, const char** argv) {
 
     pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
 
-    auto decoding_unit = pm::detector_error_model_to_shmem_decoding_unit(
-        nodes_ptr,
-        neighbors_ptr,
-        neighbor_weights_ptr,
-        neighbor_observables_ptr,
+    auto decoding_unit = pm::detector_error_model_to_decoding_unit(
+        nodes_ephemeral_fields_ptr,
         dem,
         num_buckets,
         /*ensure_search_flooder_included=*/enable_correlations,
-        /*enable_correlations=*/enable_correlations
-    );
-    decoding_unit.setup(
-        std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
+        /*enable_correlations=*/enable_correlations);
+    decoding_unit.setup(regions_ptr, std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
     if (DEBUG) {
         pm::setup_output_dirs(draw_frames, use_threads);
     }
@@ -253,13 +247,8 @@ int main_predict(int argc, const char** argv) {
         fclose(shots_in);
     }
 
-    decoding_unit.graph_ptr.reset();
-
     // Free SHMEM memory regions
-    shmem_free(nodes_ptr);
-    shmem_free(neighbors_ptr);
-    shmem_free(neighbor_weights_ptr);
-    shmem_free(neighbor_observables_ptr);
+    shmem_free(nodes_ephemeral_fields_ptr);
 
     return EXIT_SUCCESS;
 }
@@ -364,7 +353,7 @@ int pm::main(int argc, const char** argv) {
     try {
         if (strcmp(command, "predict") == 0) {
 #ifdef USE_SHMEM
-// ===============
+            // ===============
             shmem_init();
 #endif
             int status = main_predict(argc, argv);

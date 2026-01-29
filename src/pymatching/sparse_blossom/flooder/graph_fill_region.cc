@@ -27,7 +27,7 @@ GraphFillRegion::GraphFillRegion()
     shrink_event_tracker()
 #ifdef USE_THREADS
     , owner_arena(nullptr)
-    , shot_rotating_idx(-1)
+    , rotating_buffer_idx(-1)
 #endif
 {
 }
@@ -42,7 +42,7 @@ GraphFillRegion::GraphFillRegion(GraphFillRegion &&other)
       shell_area(std::move(other.shell_area))
 #ifdef USE_THREADS
     , owner_arena(other.owner_arena)
-    , shot_rotating_idx(other.shot_rotating_idx)
+    , rotating_buffer_idx(other.rotating_buffer_idx)
 #endif
     {
 }
@@ -79,7 +79,7 @@ void GraphFillRegion::add_match(GraphFillRegion *region, const CompressedEdge &e
 void GraphFillRegion::cleanup_shell_area() {
     for (auto &detector_node : shell_area) {
 #ifdef USE_THREADS
-        detector_node->reset(shot_rotating_idx);
+        detector_node->reset(rotating_buffer_idx);
 #else
         detector_node->reset();
 #endif
@@ -92,9 +92,9 @@ void GraphFillRegion::clear_blossom_parent() {
         descendant->blossom_parent_top = this;
         for (DetectorNode *n : descendant->shell_area) {
 #ifdef USE_THREADS
-            auto &node_state = n->state(shot_rotating_idx);
+            auto &node_state = n->state(rotating_buffer_idx);
             node_state.region_that_arrived_top = this;
-            node_state.wrapped_radius_cached = n->compute_wrapped_radius(shot_rotating_idx);
+            node_state.wrapped_radius_cached = n->compute_wrapped_radius(rotating_buffer_idx);
 #else
             n->region_that_arrived_top = this;
             n->wrapped_radius_cached = n->compute_wrapped_radius();
@@ -109,7 +109,7 @@ void GraphFillRegion::clear_blossom_parent_ignoring_wrapped_radius() {
         descendant->blossom_parent_top = this;
         for (DetectorNode *n : descendant->shell_area) {
 #ifdef USE_THREADS
-            n->state(shot_rotating_idx).region_that_arrived_top = this;
+            n->state(rotating_buffer_idx).region_that_arrived_top = this;
 #else
             n->region_that_arrived_top = this;
 #endif
@@ -123,9 +123,9 @@ void GraphFillRegion::wrap_into_blossom(GraphFillRegion *new_blossom_parent_and_
         descendant->blossom_parent_top = new_blossom_parent_and_top;
         for (DetectorNode *n : descendant->shell_area) {
 #ifdef USE_THREADS
-            auto &node_state = n->state(shot_rotating_idx);
+            auto &node_state = n->state(rotating_buffer_idx);
             node_state.region_that_arrived_top = new_blossom_parent_and_top;
-            node_state.wrapped_radius_cached = n->compute_wrapped_radius(shot_rotating_idx);
+            node_state.wrapped_radius_cached = n->compute_wrapped_radius(rotating_buffer_idx);
 #else
             n->region_that_arrived_top = new_blossom_parent_and_top;
             n->wrapped_radius_cached = n->compute_wrapped_radius();

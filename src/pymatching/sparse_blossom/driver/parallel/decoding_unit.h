@@ -89,8 +89,8 @@ struct ShotBuffer {
         int num_virtual_boundaries,
         int num_observables)
         : reader(std::move(reader)), writer(std::move(writer)) {
-        buffer.reserve(static_cast<size_t>(NUM_ACTIVE_SHOTS_PER_UNIT));
-        for (int i = 0; i < NUM_ACTIVE_SHOTS_PER_UNIT; ++i) {
+        buffer.reserve(static_cast<size_t>(NUM_BUFFERS_PER_UNIT));
+        for (int i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
             buffer.emplace_back(num_partitions, num_virtual_boundaries, num_observables);
         }
     }
@@ -130,6 +130,9 @@ struct DecodingUnit {
     }
 
     void setup(
+#ifdef USE_SHMEM
+        void* &regions_ptr,
+#endif
         std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
         std::unique_ptr<stim::MeasureRecordWriter> writer,
         bool enable_correlations,
@@ -140,7 +143,11 @@ struct DecodingUnit {
 
     void build_tasks_for_round_partitioning();
 
-    void build_solvers(bool ensure_search_flooder_included, bool enable_correlations, int num_threads);
+    void build_solvers(bool ensure_search_flooder_included, bool enable_correlations, int num_threads
+#ifdef USE_SHMEM
+        , GraphFillRegion* regions_ptr, size_t regions_nelems_per_solver
+#endif
+    );
 
     // Decoding Functions
     void write_result_and_get_next_shot(int shot_buffer_id);

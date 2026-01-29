@@ -22,9 +22,9 @@ namespace pm {
 
 int32_t DetectorNode::compute_wrapped_radius(
 #ifdef USE_THREADS
-    int shot_rotating_idx
+    int rotating_buffer_idx
 ) const {
-    const auto& s = state(shot_rotating_idx);
+    const auto& s = state(rotating_buffer_idx);
     if (s.reached_from_source == nullptr) {
         return 0;
     }
@@ -53,9 +53,9 @@ int32_t DetectorNode::compute_wrapped_radius(
 
 void DetectorNode::reset(
 #ifdef USE_THREADS
-    int shot_rotating_idx
+    int rotating_buffer_idx
 ) {
-    state(shot_rotating_idx).reset();
+    state(rotating_buffer_idx).reset();
 }
 #else
 ) {
@@ -80,12 +80,12 @@ size_t DetectorNode::index_of_neighbor(DetectorNode *target) const {
 
 GraphFillRegion *DetectorNode::heir_region_on_shatter(
 #ifdef USE_THREADS
-    int shot_rotating_idx
+    int rotating_buffer_idx
 #endif
 ) const {
 #ifdef USE_THREADS
-    GraphFillRegion *r = state(shot_rotating_idx).region_that_arrived;
-    GraphFillRegion *top = state(shot_rotating_idx).region_that_arrived_top;
+    GraphFillRegion *r = state(rotating_buffer_idx).region_that_arrived;
+    GraphFillRegion *top = state(rotating_buffer_idx).region_that_arrived_top;
 #else
     GraphFillRegion *r = region_that_arrived;
     GraphFillRegion *top = region_that_arrived_top;
@@ -103,11 +103,11 @@ cumulative_time_int DetectorNode::compute_local_radius_at_time_bounded_by_region
     cumulative_time_int time,
     const GraphFillRegion &bounding_region
 #ifdef USE_THREADS
-    , int shot_rotating_idx
+    , int rotating_buffer_idx
 #endif
 ) const {
 #ifdef USE_THREADS
-    const auto& s = state(shot_rotating_idx);
+    const auto& s = state(rotating_buffer_idx);
     if (s.region_that_arrived == nullptr) {
         return 0;
     }
@@ -171,7 +171,7 @@ std::optional<float> DetectorNode::compute_stitch_radius_at_time_bounded_by_regi
     const GraphFillRegion &bounding_region,
     size_t neighbor_index
 #ifdef USE_THREADS
-    , int shot_rotating_idx
+    , int rotating_buffer_idx
 #endif
 ) const {
     DetectorNode *neighbor = neighbors[neighbor_index];
@@ -180,7 +180,7 @@ std::optional<float> DetectorNode::compute_stitch_radius_at_time_bounded_by_regi
         time,
         bounding_region
 #ifdef USE_THREADS
-        , shot_rotating_idx
+        , rotating_buffer_idx
 #endif
         );
     if (neighbor == nullptr) {
@@ -191,7 +191,7 @@ std::optional<float> DetectorNode::compute_stitch_radius_at_time_bounded_by_regi
         time,
         bounding_region
 #ifdef USE_THREADS
-        , shot_rotating_idx
+        , rotating_buffer_idx
 #endif
         );
 
@@ -199,7 +199,7 @@ std::optional<float> DetectorNode::compute_stitch_radius_at_time_bounded_by_regi
     // state the mwpm, then the transition must be happening exactly at the local radius.
     if (r1 + r2 < max_w
 #ifdef USE_THREADS
-        || neighbor->state(shot_rotating_idx).region_that_arrived_top != state(shot_rotating_idx).region_that_arrived_top
+        || neighbor->state(rotating_buffer_idx).region_that_arrived_top != state(rotating_buffer_idx).region_that_arrived_top
 #else
         || neighbor->region_that_arrived_top != region_that_arrived_top
 #endif
@@ -208,7 +208,7 @@ std::optional<float> DetectorNode::compute_stitch_radius_at_time_bounded_by_regi
     }
     if (r1 == max_w
 #ifdef USE_THREADS
-        && *neighbor->state(shot_rotating_idx).region_that_arrived > *state(shot_rotating_idx).region_that_arrived
+        && *neighbor->state(rotating_buffer_idx).region_that_arrived > *state(rotating_buffer_idx).region_that_arrived
 #else
         && *neighbor->region_that_arrived > *region_that_arrived
 #endif
@@ -225,7 +225,7 @@ std::optional<float> DetectorNode::compute_stitch_radius_at_time_bounded_by_regi
 
     // If the edge is between the same two sources, there is no stitch.
 #ifdef USE_THREADS
-    if (state(shot_rotating_idx).reached_from_source == neighbor->state(shot_rotating_idx).reached_from_source) {
+    if (state(rotating_buffer_idx).reached_from_source == neighbor->state(rotating_buffer_idx).reached_from_source) {
 #else
     if (reached_from_source == neighbor->reached_from_source) {
 #endif

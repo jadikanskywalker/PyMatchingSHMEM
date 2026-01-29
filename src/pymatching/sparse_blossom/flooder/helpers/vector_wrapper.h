@@ -14,9 +14,9 @@
 #ifndef PYMATCHING2_VECTORWRAPPER_H
 #define PYMATCHING2_VECTORWRAPPER_H
 
-// Provides vector-like functions for an array
 #include <type_traits>
 
+// Provides vector-like functions for an array
 template <typename T> struct VectorWrapper {
 public:
     T *arr_;
