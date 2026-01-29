@@ -110,19 +110,15 @@ pm::pick_coords_for_drawing_from_dem(const stim::DetectorErrorModel &dem, float 
 /// Helper class for drawing frames.
 struct StateHelper {
     const Mwpm &mwpm;
-#ifdef USE_SHMEM
-    const VectorWrapper<DetectorNode> &ns;
-#else
     const std::vector<DetectorNode> &ns;
-#endif
     const cumulative_time_int &t;
     const std::vector<std::pair<float, float>> &coords;
     const std::vector<std::pair<float, float>> &boundary_coords;
     std::ostream &out;
 
 #ifdef USE_THREADS
-    inline const DetectorNodeEphemeralFeilds &node_state(const DetectorNode &node) const {
-        return node.state(mwpm.flooder.shot_rotating_idx);
+    inline const DetectorNodeEphemeralFields &node_state(const DetectorNode &node) const {
+        return node.state(mwpm.flooder.rotating_buffer_idx);
     }
 #endif
 
@@ -152,7 +148,7 @@ struct StateHelper {
 
     inline VaryingCT local_radius(const DetectorNode &node) const {
 #ifdef USE_THREADS
-        return node.local_radius(mwpm.flooder.shot_rotating_idx);
+        return node.local_radius(mwpm.flooder.rotating_buffer_idx);
 #else
         return node.local_radius();
 #endif
@@ -161,7 +157,7 @@ struct StateHelper {
     inline cumulative_time_int local_radius_at_time_bounded(
         const DetectorNode &node, cumulative_time_int time, const GraphFillRegion &region) const {
 #ifdef USE_THREADS
-        return node.compute_local_radius_at_time_bounded_by_region(time, region, mwpm.flooder.shot_rotating_idx);
+        return node.compute_local_radius_at_time_bounded_by_region(time, region, mwpm.flooder.rotating_buffer_idx);
 #else
         return node.compute_local_radius_at_time_bounded_by_region(time, region);
 #endif
@@ -171,7 +167,7 @@ struct StateHelper {
         const DetectorNode &node, cumulative_time_int time, const GraphFillRegion &region, size_t neighbor_index) const {
 #ifdef USE_THREADS
         return node.compute_stitch_radius_at_time_bounded_by_region_towards_neighbor(
-            time, region, neighbor_index, mwpm.flooder.shot_rotating_idx);
+            time, region, neighbor_index, mwpm.flooder.rotating_buffer_idx);
 #else
         return node.compute_stitch_radius_at_time_bounded_by_region_towards_neighbor(time, region, neighbor_index);
 #endif
@@ -507,7 +503,7 @@ void pm::write_animated_decoding_svg_frames(
     }
 #ifdef USE_THREADS
     auto region_top_for_node = [&](DetectorNode &node) -> GraphFillRegion * {
-        return node.state(mwpm.flooder.shot_rotating_idx).region_that_arrived_top;
+        return node.state(mwpm.flooder.rotating_buffer_idx).region_that_arrived_top;
     };
 #else
     auto region_top_for_node = [&](DetectorNode &node) -> GraphFillRegion * {

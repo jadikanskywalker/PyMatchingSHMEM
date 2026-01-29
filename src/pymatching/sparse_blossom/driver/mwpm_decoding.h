@@ -69,21 +69,11 @@ Mwpm detector_error_model_to_mwpm(
     bool ensure_search_flooder_included = false,
     bool enable_correlations = false);
 
-
-#ifdef USE_SHMEM
-DecodingUnit detector_error_model_to_shmem_decoding_unit(
-    void* &nodes_ptr,
-    void* &neighbors_ptr,
-    void* &neighbor_weights_ptr,
-    void* &neighbor_observables_ptr,
-    const stim::DetectorErrorModel& detector_error_model,
-    pm::weight_int num_distinct_weights,
-    bool ensure_search_flooder_included = false,
-    bool enable_correlations = false
-);
-
-#elif defined(USE_THREADS)
+#ifdef USE_THREADS
 DecodingUnit detector_error_model_to_decoding_unit(
+#ifdef USE_SHMEM
+    void* &nodes_ephemeral_fields_ptr,
+#endif
     const stim::DetectorErrorModel& detector_error_model,
     pm::weight_int num_distinct_weights,
     bool ensure_search_flooder_included = false,

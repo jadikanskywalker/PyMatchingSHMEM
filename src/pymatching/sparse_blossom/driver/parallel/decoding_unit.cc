@@ -20,6 +20,10 @@
 
 #include "pymatching/sparse_blossom/driver/helpers/fast_b8_reader.h"
 
+#ifdef USE_SHMEM
+#include <shmem.h>
+#endif
+
 void pm::ShotContainer::clear() {
     sparse_shot.clear();
     for (auto& hits : partition_hits) {
@@ -32,6 +36,9 @@ void pm::ShotContainer::clear() {
 }
 
 void pm::DecodingUnit::setup(
+#ifdef USE_SHMEM
+    void* &regions_ptr,
+#endif
     std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
     std::unique_ptr<stim::MeasureRecordWriter> writer,
     bool enable_correlations_,
@@ -43,10 +50,10 @@ void pm::DecodingUnit::setup(
     shot_buffer = std::make_shared<pm::ShotBuffer>(
         std::move(reader), std::move(writer), num_partitions, num_virtual_boundaries, graph_ptr->num_observables);
     build_tasks_for_round_partitioning();
-    // Read first NUM_ACTIVE_SHOTS_PER_UNIT shots
+    // Read first NUM_BUFFERS_PER_UNIT shots
     bool shot_read = true;
     int i;
-    for (i = 0; i < NUM_ACTIVE_SHOTS_PER_UNIT; ++i) {
+    for (i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
         shot_read = pm::start_and_read_entire_record_buffered(*shot_buffer->reader, shot_buffer->buffer[i].sparse_shot);
         if (shot_read) {  // partition shot
             for (auto det : shot_buffer->buffer[i].sparse_shot.hits) {
@@ -58,7 +65,6 @@ void pm::DecodingUnit::setup(
                 }
             }
         } else {
-            // ++i;
             break;
         }
     }
@@ -68,13 +74,28 @@ void pm::DecodingUnit::setup(
     }
     int num_threads = num_partitions;
     omp_set_num_threads(num_threads);
+#ifdef USE_SHMEM
+    // Allocate buffer for GraphFillRegion arenas
+    int shmem_buffer_size = graph_ptr->nodes.size() / num_partitions * SHMEM_ARENA_BUFFER_FACTOR;
+    if (shmem_buffer_size >= 64) {
+        shmem_buffer_size = ((shmem_buffer_size*SHMEM_ARENA_BUFFER_FACTOR)/64)*64; // make multiple of 64
+    } else {
+        shmem_buffer_size = 64;
+    }
+    regions_ptr = shmem_malloc(shmem_buffer_size * num_threads * NUM_BUFFERS_PER_UNIT * sizeof(GraphFillRegion));
+#endif
     // Setup solvers
     enable_correlations = enable_correlations_;
     draw_frames = draw_frames_;
     build_solvers(
         /*ensure_search_flooder_included=*/enable_correlations,
         /*enable_correlations=*/enable_correlations,
-        num_threads);
+        num_threads
+#ifdef USE_SHMEM
+        , (GraphFillRegion*) regions_ptr,
+        shmem_buffer_size
+#endif
+    );
     if (draw_frames) {
         auto coords = pm::pick_coords_for_drawing_from_dem(dem, 20);
         for (auto& s : solvers)
@@ -156,17 +177,25 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
 }
 
 // Build solver for each shot container for each thread
-void pm::DecodingUnit::build_solvers(bool ensure_search_flooder_included, bool enable_correlations, int num_threads) {
+void pm::DecodingUnit::build_solvers(bool ensure_search_flooder_included, bool enable_correlations, int num_threads
+#ifdef USE_SHMEM
+    , GraphFillRegion* regions_ptr, size_t regions_nelems_per_solver
+#endif
+) {
     if (num_threads < 1)
         return;
     if (ensure_search_flooder_included || enable_correlations)
         throw std::invalid_argument("Correlations and SearchFlooder are not yet supported with threads");
     solvers.clear();
-    solvers.reserve(static_cast<size_t>(num_threads * NUM_ACTIVE_SHOTS_PER_UNIT));
-    for (int idx = 0; idx < NUM_ACTIVE_SHOTS_PER_UNIT; ++idx) {
+    solvers.reserve(static_cast<size_t>(num_threads * NUM_BUFFERS_PER_UNIT));
+    for (int idx = 0; idx < NUM_BUFFERS_PER_UNIT; ++idx) {
         for (int t = 0; t < num_threads; ++t) {
             // Each solver shares the same MatchingGraph via shared_ptr.
-            solvers.emplace_back(std::make_shared<pm::Mwpm>(pm::GraphFlooder(graph_ptr, idx)));
+            solvers.emplace_back(std::make_shared<pm::Mwpm>(pm::GraphFlooder(graph_ptr, idx
+#ifdef USE_SHMEM
+                , regions_ptr + idx*regions_nelems_per_solver + t*regions_nelems_per_solver, regions_nelems_per_solver
+#endif
+            )));
             solvers[t]->flooder.sync_negative_weight_observables_and_detection_events();
         }
     }
@@ -203,40 +232,20 @@ void pm::DecodingUnit::write_result_and_get_next_shot(int shot_buffer_id) {
                 }
             }
             shot.current_buffer_round++;
-            // if (DEBUG) {
-            //     int i = 0;
-            //     std::cout << "T" << omp_get_thread_num() << " read next shot for shot buffer" << shot_buffer_id <<
-            //     std::endl; for (auto part : shot.partition_hits) {
-            //         std::cout << "Part" << i << " hits: ";
-            //         for (int det : part) {
-            //             std::cout << det << "  ";
-            //         }
-            //         std::cout << std::endl;
-            //         i++;
-            //     }
-            //     for (auto part : shot.virtual_boundary_hits) {
-            //         std::cout << "VB" << i << " hits: ";
-            //         for (int det : part) {
-            //             std::cout << det << "  ";
-            //         }
-            //         std::cout << std::endl;
-            //         i++;
-            //     }
-            // }
         } else {
             if (shot_buffer_id > 0) {
                 shot_buffer->last_shot_buffer_id = shot_buffer_id - 1;
             } else {
-                shot_buffer->last_shot_buffer_id = NUM_ACTIVE_SHOTS_PER_UNIT - 1;
+                shot_buffer->last_shot_buffer_id = NUM_BUFFERS_PER_UNIT - 1;
             }
         }
     } else if (shot_buffer->last_shot_buffer_id == shot_buffer_id) {
-        for (int i = 0; i < NUM_ACTIVE_SHOTS_PER_UNIT; ++i) {
+        for (int i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
             shot_buffer->buffer[i].current_buffer_round.store(-1);
         }
     }
     // --- increment next_shot_buffer_id ---
-    if (++shot_buffer->next_shot_buffer_id >= NUM_ACTIVE_SHOTS_PER_UNIT) {
+    if (++shot_buffer->next_shot_buffer_id >= NUM_BUFFERS_PER_UNIT) {
         shot_buffer->next_shot_buffer_id = 0;
     }
     // --- release ---
@@ -262,7 +271,7 @@ void pm::DecodingUnit::decode_shots() {
         // Start decoding
         int shot_buffer_id = 0;
         int shot_buffer_round = shot_buffer->buffer[0].current_buffer_round.load();  // how many times buffer has looped
-        int shot_id = shot_buffer_round * NUM_ACTIVE_SHOTS_PER_UNIT;
+        int shot_id = shot_buffer_round * NUM_BUFFERS_PER_UNIT;
         try {
             while (true) {
                 if (DEBUG) {
@@ -354,7 +363,7 @@ void pm::DecodingUnit::decode_shots() {
                 // Move on to next shot buffer
                 ++shot_id;
                 ++shot_buffer_id;
-                if (shot_buffer_id >= NUM_ACTIVE_SHOTS_PER_UNIT) {
+                if (shot_buffer_id >= NUM_BUFFERS_PER_UNIT) {
                     ++shot_buffer_round;
                     shot_buffer_id = 0;
                 }

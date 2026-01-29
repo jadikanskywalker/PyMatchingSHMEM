@@ -22,6 +22,10 @@
 #include "pymatching/sparse_blossom/flooder_matcher_interop/varying.h"
 #include "pymatching/sparse_blossom/tracker/queued_event_tracker.h"
 
+#ifdef USE_SHMEM
+#include "pymatching/sparse_blossom/flooder/helpers/shmem_arena.h"
+#include "pymatching/sparse_blossom/flooder/helpers/vector_wrapper.h"
+#endif
 #ifdef USE_THREADS
 #include "pymatching/sparse_blossom/arena.h"
 #endif
@@ -52,6 +56,10 @@ struct GraphFillRegion {
     /// If the region is matched, as opposed to growing/shrinking, this says what it is matched to.
     pm::Match match;
 
+// #ifdef USE_SHMEM
+//     VectorWrapper<pm::RegionEdge> blossom_children;
+//     VectorWrapper<pm::DetectorNode*> shell_area;
+// #else
     /// If this region is a blossom, these are its child regions along with the cyclic paths
     /// between the children.
     std::vector<pm::RegionEdge> blossom_children;
@@ -59,12 +67,18 @@ struct GraphFillRegion {
     /// the nodes indirectly owned by this region that are owned by the blossom children of this
     /// region (or their children or etc).
     std::vector<pm::DetectorNode*> shell_area;
+// #endif
 
     void cleanup_shell_area();
 
-#ifdef USE_THREADS
+#ifdef USE_SHMEM
+    SHMEMArena<GraphFillRegion>* owner_arena;
+#elif defined(USE_THREADS)
     Arena<GraphFillRegion>* owner_arena;
-    int shot_rotating_idx = 0;
+#endif
+
+#ifdef USE_THREADS
+    int rotating_buffer_idx = 0;
 #endif
 
     GraphFillRegion();

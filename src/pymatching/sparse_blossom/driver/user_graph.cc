@@ -269,68 +269,22 @@ double pm::UserGraph::max_abs_weight() {
     return max_abs_weight;
 }
 
+#ifdef USE_THREADS
+pm::DecodingUnit pm::UserGraph::to_decoding_unit(pm::weight_int num_distinct_weights
 #ifdef USE_SHMEM
-pm::DecodingUnit pm::UserGraph::to_shmem_decoding_unit(
-    pm::weight_int num_distinct_weights,
-    DetectorNode *nodes_ptr,
-    DetectorNode **neighbors_ptr,
-    weight_int *neighbor_weights_ptr,
-    obs_int *neighbor_observables_ptr) {
+    , DetectorNodeEphemeralFields* nodes_ephemeral_fields_ptr
+#endif
+) {
     std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
     pm::MatchingGraph& matching_graph = *matching_graph_ptr;
-    // Set pointers to nodes
-    int num_nodes = nodes.size();
-    matching_graph.nodes.arr_ = nodes_ptr;
-    matching_graph.nodes.capacity_ = num_nodes;
-    // Construct nodes
+#ifdef USE_SHMEM
+    const int num_nodes = nodes.size();
     for (int i=0; i < num_nodes; ++i) {
-        int offset = i*max_neighbors;
-        matching_graph.nodes.emplace_back(max_neighbors,
-            neighbors_ptr+offset,
-            neighbor_weights_ptr+offset,
-            neighbor_observables_ptr+offset);
-    }
-    double normalising_constant = to_matching_or_search_graph_helper(
-        num_distinct_weights,
-        [&](size_t u,
-            size_t v,
-            pm::signed_weight_int weight,
-            const std::vector<size_t>& observables,
-            const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
-            matching_graph.add_edge(u, v, weight, observables, implied_weights_for_other_edges);
-        },
-        [&](size_t u,
-            pm::signed_weight_int weight,
-            const std::vector<size_t>& observables,
-            const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
-            matching_graph.add_boundary_edge(u, weight, observables, implied_weights_for_other_edges);
-        });
-
-    matching_graph.normalising_constant = normalising_constant;
-    if (boundary_nodes.size() > 0) {
-        matching_graph.is_user_graph_boundary_node.clear();
-        matching_graph.is_user_graph_boundary_node.resize(nodes.size(), false);
-        for (auto& i : boundary_nodes)
-            matching_graph.is_user_graph_boundary_node[i] = true;
-    }
-    matching_graph.convert_implied_weights(normalising_constant);
-
-    // Store vb information on DetectorNodes
-    for (int vb=0; vb < virtual_boundaries.size(); ++vb) {
-        for (int index : virtual_boundaries[vb]) {
-            matching_graph.nodes[index].vb = vb;
+        for (int j=0; j < NUM_BUFFERS_PER_UNIT; ++j) {
+            matching_graph.nodes[i].ephemeral_fields[j] = nodes_ephemeral_fields_ptr + i + j*num_nodes;
         }
     }
-
-    pm::DecodingUnit unit(matching_graph_ptr, node_part_id, num_partitions, virtual_boundaries.size());
-
-    return unit;
-}
-
-#elif defined(USE_THREADS)
-pm::DecodingUnit pm::UserGraph::to_decoding_unit(pm::weight_int num_distinct_weights) {
-    std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
-    pm::MatchingGraph& matching_graph = *matching_graph_ptr;
+#endif
     double normalising_constant = to_matching_or_search_graph_helper(
         num_distinct_weights,
         [&](size_t u,
@@ -698,9 +652,6 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
         // Store round
         size_t round_coor = coors.size() - 1;
         nodes[n].round = coors[round_coor];
-        if (nodes[n].neighbors.size() > max_neighbors) {
-            max_neighbors = nodes[n].neighbors.size();
-        }
         // Update current p/vb if necessary
         if (coors[round_coor] > last_round) {
             round_counter++;

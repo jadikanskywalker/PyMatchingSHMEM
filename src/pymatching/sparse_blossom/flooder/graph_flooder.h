@@ -26,6 +26,9 @@
 #include "pymatching/sparse_blossom/tracker/flood_check_event.h"
 #include "pymatching/sparse_blossom/tracker/radix_heap_queue.h"
 
+#ifdef USE_SHMEM
+#include "pymatching/sparse_blossom/flooder/helpers/shmem_arena.h"
+#endif
 #ifdef USE_THREADS
 #include <memory>
 #endif
@@ -35,7 +38,7 @@ namespace pm {
 struct GraphFlooder {
     /// The graph of detector nodes that is being flooded.
 #ifdef USE_THREADS
-// ===============
+    // ===============
     std::shared_ptr<MatchingGraph> graph_ptr;
     MatchingGraph& graph;
 // ===============
@@ -51,7 +54,11 @@ struct GraphFlooder {
     /// Events are ordered by time; by when they will occur in a timeline.
     radix_heap_queue<false> queue;
 
+#ifdef USE_SHMEM
+    SHMEMArena<GraphFillRegion> region_arena;
+#else
     Arena<GraphFillRegion> region_arena;
+#endif
 
     std::vector<CompressedEdge> match_edges;
 
@@ -63,29 +70,28 @@ struct GraphFlooder {
     std::vector<size_t> negative_weight_observables;
     /// Observable mask corresponding to the observables that would be flipped if an error occurred on every edge that
     /// has a negative weight. Only used for fewer than 64 (=sizeof(pm::obs_int)*8) observables.
-    pm::obs_int negative_weight_obs_mask{ 0 };
+    pm::obs_int negative_weight_obs_mask{0};
     /// The sum of the edge weights of all edges with negative edge weights.
-    pm::total_weight_int negative_weight_sum{ 0 };
+    pm::total_weight_int negative_weight_sum{0};
 
 #ifdef USE_THREADS
-    const int shot_rotating_idx{ -1 };
-    int current_shot=-1;
+    const int rotating_buffer_idx{-1};
+    int current_shot = -1;
     int vb_left, vb_right;
-
-    // inline DetectorNodeEphemeralFeilds& node_state(DetectorNode& node) const {
-    //     return node.state(shot_rotating_idx);
-    // }
-    // inline const DetectorNodeEphemeralFeilds& node_state(const DetectorNode& node) const {
-    //     return node.state(shot_rotating_idx);
-    // }
 #endif
 
     GraphFlooder();
-#ifdef USE_THREADS
-// ===============
+
+#ifdef USE_SHMEM
+    // Construct with a shared graph pointer (shared across solvers)
+    explicit GraphFlooder(
+        std::shared_ptr<MatchingGraph> graph,
+        int solver_set_idx,
+        GraphFillRegion* shmem_buffer,
+        size_t shmem_buffer_size);
+#elif defined(USE_THREADS)
     // Construct with a shared graph pointer (shared across solvers)
     explicit GraphFlooder(std::shared_ptr<MatchingGraph> graph, int solver_set_idx);
-// ===============
 #endif
     explicit GraphFlooder(MatchingGraph graph);
     GraphFlooder(GraphFlooder&&) noexcept;
@@ -111,17 +117,17 @@ struct GraphFlooder {
     bool dequeue_decision(pm::FloodCheckEvent ev);
 #ifdef USE_THREADS
     std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_growing_top_region(
-        const DetectorNode &detector_node, VaryingCT rad1) const;
+        const DetectorNode& detector_node, VaryingCT rad1) const;
     std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growing_top_region(
-        const DetectorNode &detector_node, const VaryingCT &rad1) const;
+        const DetectorNode& detector_node, const VaryingCT& rad1) const;
 #endif
     std::pair<size_t, pm::cumulative_time_int> find_next_event_at_node_returning_neighbor_index_and_time(
         const DetectorNode& detector_node) const;
     pm::MwpmEvent do_look_at_node_event(DetectorNode& node);
 
 #ifdef USE_THREADS
-// ===============
-    bool is_active(const DetectorNode *node) const;
+    // ===============
+    bool is_active(const DetectorNode* node) const;
 // ===============
 #endif
 
@@ -131,6 +137,6 @@ struct GraphFlooder {
     void sync_negative_weight_observables_and_detection_events();
 };
 
-} // namespace pm
+}  // namespace pm
 
 #endif  // PYMATCHING2_GRAPH_FLOODER_H
