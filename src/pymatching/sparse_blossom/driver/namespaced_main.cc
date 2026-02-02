@@ -165,6 +165,8 @@ int main_predict(int argc, const char** argv) {
     // SHMEM memory regions
     void* nodes_ephemeral_fields_ptr;
     void* regions_ptr;
+    alignas(64)
+    static std::array<uint64_t, NUM_BUFFERS_PER_UNIT> atomics;
     // Parse args
     stim::check_for_unknown_arguments(
         {
@@ -215,7 +217,7 @@ int main_predict(int argc, const char** argv) {
         num_buckets,
         /*ensure_search_flooder_included=*/enable_correlations,
         /*enable_correlations=*/enable_correlations);
-    decoding_unit.setup(regions_ptr, std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
+    decoding_unit.setup(regions_ptr, atomics.data(), std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
     if (DEBUG) {
         pm::setup_output_dirs(draw_frames, use_threads);
     }

@@ -701,6 +701,9 @@ void pm::output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& dete
 void pm::draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int frame_number, bool parallel, int tid) {
     std::string out_dir = parallel ? "out_parallel/" : "out_serial/";
     std::string out_name = out_dir + "frames/" + std::to_string(mwpm.flooder.current_shot) + "/";
+#ifdef USE_SHMEM
+    out_name += "p" + std::to_string(shmem_my_pe()) + "/";
+#endif
     if (tid > -1) {
         out_name += "t" + std::to_string(tid) + "/";
     } 

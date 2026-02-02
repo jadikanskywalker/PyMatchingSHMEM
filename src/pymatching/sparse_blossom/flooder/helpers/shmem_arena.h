@@ -26,8 +26,8 @@
 template <typename T>
 struct SHMEMArena {
     // SHMEM array buffer and availability bitmap
-    std::vector<uint64_t> shmem_bitmap;  // 1 = free; 0 = taken
     T* shmem_buffer;
+    std::vector<uint64_t> shmem_bitmap;  // 1 = free; 0 = taken
     size_t shmem_buffer_size; // must be a multiple of 64
 
     // Heap fallback

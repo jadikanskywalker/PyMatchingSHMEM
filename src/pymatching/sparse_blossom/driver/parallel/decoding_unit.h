@@ -26,10 +26,14 @@
 #include "pymatching/sparse_blossom/driver/parallel/decoding_task.h"
 
 namespace pm {
-// class MatchingGraph; class Mwpm; struct ExtendedMatchingResult; }
+
+#ifdef USE_SHMEM
+#define NUM_SYNCHRONIZATION_ATOMICS 2+NUM_BUFFERS_PER_UNIT // number of atomic numbers needed for sychnronization during decoding
+#endif
 
 struct ShotContainer {
-    std::atomic<int> current_buffer_round{0};  // Used for idle thread spin-wait until new shot read
+    std::atomic<uint64_t> current_buffer_round{0};  // Used for idle thread spin-wait until new shot read
+    uint64_t current_shot;
 
     stim::SparseShot sparse_shot;
 
@@ -40,7 +44,8 @@ struct ShotContainer {
 
     std::vector<Task> tasks;  // Tasks handle dynamic fusion tree synchonization
 
-    ShotContainer(int num_partitions, int num_virtual_boundaries, int num_observables)
+    ShotContainer(
+        int num_partitions, int num_virtual_boundaries, int num_observables)
         : partition_hits(num_partitions), virtual_boundary_hits(num_virtual_boundaries), res(num_observables) {
     }
 
@@ -75,20 +80,35 @@ struct ShotBuffer {
     std::unique_ptr<stim::MeasureRecordWriter> writer;
 
     std::vector<ShotContainer> buffer;
-    int next_shot_buffer_id = 0;
-    int last_shot_buffer_id = -1;  // to mark end
+
+#ifdef USE_SHMEM
+    // Used for cross-PE synchronization
+    uint64_t* shot_container_status;
+#endif
+    int next_shot_container_id = 0;
+    int last_shot_container_id = -1;
 
     // Lock for result writing & shot reading
     std::mutex m;
     std::condition_variable cv;
 
     ShotBuffer(
+#ifdef USE_SHMEM
+        uint64_t* atomics_ptr,
+#endif
         std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
         std::unique_ptr<stim::MeasureRecordWriter> writer,
         int num_partitions,
         int num_virtual_boundaries,
         int num_observables)
-        : reader(std::move(reader)), writer(std::move(writer)) {
+        : reader(std::move(reader)), writer(std::move(writer))
+    {
+#ifdef USE_SHMEM
+        shot_container_status = atomics_ptr;
+        for (int i=0; i<NUM_BUFFERS_PER_UNIT; ++i) {
+            shot_container_status[i] = 0;
+        }
+#endif
         buffer.reserve(static_cast<size_t>(NUM_BUFFERS_PER_UNIT));
         for (int i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
             buffer.emplace_back(num_partitions, num_virtual_boundaries, num_observables);
@@ -117,6 +137,11 @@ struct DecodingUnit {
 
     bool done = false;
 
+#ifdef USE_SHMEM
+    int pid;
+    int other_pid;
+#endif
+
     // Initialization Functions
     DecodingUnit(
         const std::shared_ptr<pm::MatchingGraph> graph_ptr,
@@ -126,12 +151,13 @@ struct DecodingUnit {
         : graph_ptr(graph_ptr),
           node_part_id(node_part_id),
           num_partitions(num_partitions),
-          num_virtual_boundaries(num_virtual_boundaries) {
-    }
+          num_virtual_boundaries(num_virtual_boundaries)
+    {}
 
     void setup(
 #ifdef USE_SHMEM
         void* &regions_ptr,
+        uint64_t* atomics_ptr,
 #endif
         std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
         std::unique_ptr<stim::MeasureRecordWriter> writer,
@@ -150,11 +176,15 @@ struct DecodingUnit {
     );
 
     // Decoding Functions
-    void write_result_and_get_next_shot(int shot_buffer_id);
-
-    void decode_shots();
+#ifdef USE_SHMEM
+    void handle_cross_process_fusion_and_get_next_shot(int shot_container_id);
 
     void decode_shots_with_shmem();
+#else
+    void write_result_and_get_next_shot(int shot_container_id);
+
+    void decode_shots();
+#endif
 
     void solve_task(pm::Mwpm& solver, std::vector<uint64_t>& hits, Task* task, int tid, int draw_frames, int shot_id);
 };

@@ -97,22 +97,6 @@ GraphFlooder::GraphFlooder(GraphFlooder&& flooder) noexcept
 }
 #endif
 
-// #ifdef USE_THREADS
-// inline void debug_validate_region_nodes(const GraphFillRegion& r, const std::vector<DetectorNode>& nodes,
-// std::set<long> active_parts) {
-//     for (DetectorNode *p : r.shell_area) {
-//         if (p == nullptr) continue;
-//         size_t i = static_cast<size_t>(p - &nodes[0]);
-//         if (i >= nodes.size())
-//             std::cout << "  ERROR: shell_area nodes out of bounds" << std::endl;
-//         if (&nodes[i] != p)
-//             std::cout << "  ERROR: could not reference shell_area node" << std::endl;
-//         if (!(p->is_active == omp_get_thread_num()))
-//             std::cout << "  ERROR: inactive node added to shell_area" << std::endl;
-//     }
-// }
-// #endif
-
 #ifdef USE_THREADS
 // ===============
 inline bool GraphFlooder::is_active(const DetectorNode* node) const {
@@ -368,9 +352,6 @@ void GraphFlooder::do_region_arriving_at_empty_detector_node(
     empty_node.wrapped_radius_cached = empty_node.compute_wrapped_radius();
 #endif
     region.shell_area.push_back(&empty_node);
-    // #ifdef USE_THREADS
-    //     if (DEBUG) debug_validate_region_nodes(region, graph.nodes, active_partitions);
-    // #endif
     reschedule_events_at_detector_node(empty_node);
 }
 

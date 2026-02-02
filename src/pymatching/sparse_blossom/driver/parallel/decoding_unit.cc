@@ -38,6 +38,7 @@ void pm::ShotContainer::clear() {
 void pm::DecodingUnit::setup(
 #ifdef USE_SHMEM
     void* &regions_ptr,
+    uint64_t* atomics_ptr,
 #endif
     std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
     std::unique_ptr<stim::MeasureRecordWriter> writer,
@@ -46,8 +47,16 @@ void pm::DecodingUnit::setup(
     int max_threads,
     stim::DetectorErrorModel dem /* For shot reading */
 ) {
+#ifdef USE_SHMEM
+    // Initialize synchronization atomics
+    pid = shmem_my_pe();
+    other_pid = (pid == 0) ? 1 : 0;
+#endif
     // Setup ReaderWriter and shot buffer
     shot_buffer = std::make_shared<pm::ShotBuffer>(
+#ifdef USE_SHMEM
+        atomics_ptr,
+#endif
         std::move(reader), std::move(writer), num_partitions, num_virtual_boundaries, graph_ptr->num_observables);
     build_tasks_for_round_partitioning();
     // Read first NUM_BUFFERS_PER_UNIT shots
@@ -64,15 +73,23 @@ void pm::DecodingUnit::setup(
                     shot_buffer->buffer[i].virtual_boundary_hits[-1 * part_id - 1].push_back(det);
                 }
             }
+            shot_buffer->buffer[i].current_shot = i;
         } else {
             break;
         }
     }
     // Setup threads
+#ifdef USE_SHMEM
+    if (max_threads < num_partitions/2) {
+        throw std::invalid_argument("The number of threads should be >= half the number of partitions.");
+    }
+    int num_threads = num_partitions;
+#else
     if (max_threads < num_partitions) {
         throw std::invalid_argument("The number of threads should be >= the number of partitions.");
     }
-    int num_threads = num_partitions;
+    int num_threads = num_partitions/2;
+#endif
     omp_set_num_threads(num_threads);
 #ifdef USE_SHMEM
     // Allocate buffer for GraphFillRegion arenas
@@ -201,18 +218,38 @@ void pm::DecodingUnit::build_solvers(bool ensure_search_flooder_included, bool e
     }
 }
 
+#ifdef USE_SHMEM
+void pm::DecodingUnit::handle_cross_process_fusion_and_get_next_shot(int shot_container_id) {
+    // --- acquire thread lock ---
+    std::unique_lock<std::mutex> lock(shot_buffer->m);
+    shot_buffer->cv.wait(lock, [&] {
+        return shot_buffer->next_shot_container_id == shot_container_id;
+    });
+    auto& shot = shot_buffer->buffer[shot_container_id];
+    // --- try to win cross-process fusion ---
+    uint64_t shot_status = shot_buffer->shot_container_status[shot_container_id];
+    if (shot_status == 0) { // signal other PE
+        shmem_atomic_inc(shot_buffer->shot_container_status + shot_container_id, other_pid);
+        shmem_quiet();
+        if (shot_status == 0) {
+            shot_status = shot_buffer->shot_container_status[shot_container_id];
+        }
+    }
+}
+
+#else
 // Should only be called by the thread that finishes a shot
 //   Assumes round-based partitioning and detection_events given in order of ascending detector node index
-void pm::DecodingUnit::write_result_and_get_next_shot(int shot_buffer_id) {
+void pm::DecodingUnit::write_result_and_get_next_shot(int shot_container_id) {
     // --- acquire ---
     std::unique_lock<std::mutex> lock(shot_buffer->m);
     shot_buffer->cv.wait(lock, [&] {
-        return shot_buffer->next_shot_buffer_id == shot_buffer_id;
+        return shot_buffer->next_shot_container_id == shot_container_id;
     });
-    auto& shot = shot_buffer->buffer[shot_buffer_id];
+    auto& shot = shot_buffer->buffer[shot_container_id];
     // --- write results ---
     if (DEBUG) {
-        std::cout << "T" << omp_get_thread_num() << " writing results for shot buffer " << shot_buffer_id << std::endl;
+        std::cout << "T" << omp_get_thread_num() << " writing results for shot buffer " << shot_container_id << std::endl;
     }
     for (size_t k = 0; k < graph_ptr->num_observables; k++) {
         shot_buffer->writer->write_bit(shot.res.obs_crossed[k]);
@@ -220,7 +257,7 @@ void pm::DecodingUnit::write_result_and_get_next_shot(int shot_buffer_id) {
     shot_buffer->writer->write_end();
     // --- read next shot ---
     shot.clear();
-    if (shot_buffer->last_shot_buffer_id < 0) {
+    if (shot_buffer->last_shot_container_id < 0) {
         bool shot_read = pm::start_and_read_entire_record_buffered(*shot_buffer->reader, shot.sparse_shot);
         if (shot_read) {  // partition detection events
             for (auto det : shot.sparse_shot.hits) {
@@ -232,27 +269,155 @@ void pm::DecodingUnit::write_result_and_get_next_shot(int shot_buffer_id) {
                 }
             }
             shot.current_buffer_round++;
+            shot.current_shot += NUM_BUFFERS_PER_UNIT;
         } else {
-            if (shot_buffer_id > 0) {
-                shot_buffer->last_shot_buffer_id = shot_buffer_id - 1;
+            if (shot_container_id > 0) {
+                shot_buffer->last_shot_container_id = shot_container_id - 1;
             } else {
-                shot_buffer->last_shot_buffer_id = NUM_BUFFERS_PER_UNIT - 1;
+                shot_buffer->last_shot_container_id = NUM_BUFFERS_PER_UNIT - 1;
             }
         }
-    } else if (shot_buffer->last_shot_buffer_id == shot_buffer_id) {
+    } else if (shot_buffer->last_shot_container_id == shot_container_id) {
         for (int i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
             shot_buffer->buffer[i].current_buffer_round.store(-1);
         }
     }
-    // --- increment next_shot_buffer_id ---
-    if (++shot_buffer->next_shot_buffer_id >= NUM_BUFFERS_PER_UNIT) {
-        shot_buffer->next_shot_buffer_id = 0;
+    // --- increment next_shot_container_id ---
+    if (++shot_buffer->next_shot_container_id >= NUM_BUFFERS_PER_UNIT) {
+        shot_buffer->next_shot_container_id = 0;
     }
     // --- release ---
     lock.unlock();
     shot_buffer->cv.notify_all();
 }
+#endif
 
+#ifdef USE_SHMEM
+// Core multi-process decoding loop
+void pm::DecodingUnit::decode_shots_with_shmem() {
+    if (enable_correlations) {
+        throw std::invalid_argument("Edge correlations are not yet implemented in parallel.");
+    }
+    size_t num_observables = graph_ptr->num_observables;
+    shmem_barrier_all();
+#pragma omp parallel shared(num_observables)
+    {
+        const int tid = omp_get_thread_num();
+        const int num_threads = omp_get_num_threads();
+        std::ofstream t_out;
+        if (DEBUG) {
+            t_out = (std::ofstream)("out_parallel/t" + std::to_string(tid) + ".out");
+            std::cout << "T" << tid << " of " << num_threads << std::endl;
+        }
+        // Start decoding
+        int shot_container_id = 0;
+        uint64_t shot_buffer_round = shot_buffer->buffer[0].current_buffer_round.load();
+        uint64_t shot_id = shot_buffer_round * NUM_BUFFERS_PER_UNIT;
+        try {
+            while (true) {
+                if (DEBUG) {
+                    t_out << std::endl
+                          << "Starting shot " << shot_id << ", buffer round " << shot_buffer_round << ", buffer_id "
+                          << shot_container_id << std::endl;
+                }
+                if (draw_frames) {
+                    std::filesystem::create_directories(
+                        "out_parallel/frames/" + std::to_string(shot_id) + "/p" + std::to_string(pid) + "/t" + std::to_string(tid));
+                }
+                auto& shot = shot_buffer->buffer[shot_container_id];
+                int current_buffer_round = shot.current_buffer_round.load();
+                while (current_buffer_round < shot_buffer_round) {  // wait
+                    if (current_buffer_round < 0) {
+                        break;
+                    }
+                    _mm_pause();
+                    current_buffer_round = shot.current_buffer_round.load();
+                }
+                if (current_buffer_round < 0) {
+                    break;
+                }
+                pm::Mwpm& solver = *solvers[shot_container_id * num_threads + tid];
+                Task* t = &shot.tasks[pid * num_threads + tid];
+                bool stolen = t->try_to_steal_leaf(shot_buffer_round);
+                while (stolen) {  // Got task
+                    if (!t->parent) { // Got root task
+                        handle_cross_process_fusion_and_get_next_shot(current_buffer_round);
+                        break;
+                    }
+                    if (DEBUG) {
+                        t_out << "Thread " << tid << " solving " << (t->is_fusion ? "f" : "p") << t->part << std::endl;
+                    }
+                    auto& hitsref = (t->is_fusion) ? shot.virtual_boundary_hits[t->part] : shot.partition_hits[t->part];
+                    solve_task(solver, hitsref, t, tid, draw_frames, shot_id);
+                    Task* sibling = (t->child_bit == 1) ? t->parent->right_child : t->parent->left_child;
+                    // Try to steal parent
+                    t = t->try_to_steal_parent_or_descendent(shot_buffer_round);
+                    stolen = (t != nullptr);
+                    if (DEBUG) {
+                        if (t != nullptr) {
+                            t_out << (t->is_fusion ? "  f" : "  p") << t->part << " stolen = " << stolen
+                                  << std::endl;
+                        }
+                    }
+                    //     if (DEBUG) {
+                    //         t_out << "T" << tid << " extracting solution" << std::endl;
+                    //     }
+                    //     if (num_observables > sizeof(pm::obs_int) * 8) {
+                    //         solver.flooder.match_edges.clear();
+                    //         pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
+                    //             solver, shot.sparse_shot.hits);
+                    //         if (!solver.flooder.negative_weight_detection_events.empty())
+                    //             shatter_blossoms_for_all_detection_events_and_extract_match_edges(
+                    //                 solver, solver.flooder.negative_weight_detection_events);
+                    //         solver.extract_paths_from_match_edges(
+                    //             solver.flooder.match_edges, shot.res.obs_crossed.data(), shot.res.weight);
+                    //         // XOR negative weight observables
+                    //         for (auto& obs : solver.flooder.negative_weight_observables)
+                    //             *(shot.res.obs_crossed.data() + obs) ^= 1;
+                    //         // Add negative weight sum to blossom solution weight
+                    //         shot.res.weight += solver.flooder.negative_weight_sum;
+                    //     } else {
+                    //         pm::MatchingResult bit_packed_res =
+                    //             pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
+                    //                 solver, shot.sparse_shot.hits);
+                    //         if (!solver.flooder.negative_weight_detection_events.empty())
+                    //             bit_packed_res +=
+                    //                 shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
+                    //                     solver, solver.flooder.negative_weight_detection_events);
+                    //         // XOR in negative weight observable mask
+                    //         bit_packed_res.obs_mask ^= solver.flooder.negative_weight_obs_mask;
+                    //         // Translate observable mask into bit vector
+                    //         pm::fill_bit_vector_from_obs_mask(
+                    //             bit_packed_res.obs_mask, shot.res.obs_crossed.data(), num_observables);
+                    //         // Add negative weight sum to blossom solution weight
+                    //         shot.res.weight = bit_packed_res.weight + solver.flooder.negative_weight_sum;
+                    //     }
+                }
+                // Move on to next shot buffer
+                ++shot_id;
+                ++shot_container_id;
+                if (shot_container_id >= NUM_BUFFERS_PER_UNIT) {
+                    ++shot_buffer_round;
+                    shot_container_id = 0;
+                }
+            }
+        } catch (const std::exception& e) {
+#pragma omp critical
+            {
+                std::cerr << "ERROR: Shot " << shot_id << " Thread " << tid << " caught exception: " << e.what()
+                          << std::endl;
+            }
+        } catch (...) {
+#pragma omp critical
+            {
+                std::cerr << "ERROR: Shot " << shot_id << " Thread " << tid << " caught unknown exception."
+                          << std::endl;
+            }
+        }
+    }
+}
+
+#else
 // Core multi-threaded multi-active-shot decoding loop
 void pm::DecodingUnit::decode_shots() {
     if (enable_correlations) {
@@ -269,21 +434,21 @@ void pm::DecodingUnit::decode_shots() {
             std::cout << "T" << tid << " of " << num_threads << std::endl;
         }
         // Start decoding
-        int shot_buffer_id = 0;
-        int shot_buffer_round = shot_buffer->buffer[0].current_buffer_round.load();  // how many times buffer has looped
-        int shot_id = shot_buffer_round * NUM_BUFFERS_PER_UNIT;
+        int shot_container_id = 0;
+        uint64_t shot_buffer_round = shot_buffer->buffer[0].current_buffer_round.load(); // how many times buffer has looped
+        uint64_t shot_id = shot_buffer_round * NUM_BUFFERS_PER_UNIT;
         try {
             while (true) {
                 if (DEBUG) {
                     t_out << std::endl
                           << "Starting shot " << shot_id << ", buffer round " << shot_buffer_round << ", buffer_id "
-                          << shot_buffer_id << std::endl;
+                          << shot_container_id << std::endl;
                 }
                 if (draw_frames) {
                     std::filesystem::create_directories(
                         "out_parallel/frames/" + std::to_string(shot_id) + "/t" + std::to_string(tid));
                 }
-                auto& shot = shot_buffer->buffer[shot_buffer_id];
+                auto& shot = shot_buffer->buffer[shot_container_id];
                 int current_buffer_round = shot.current_buffer_round.load();
                 while (current_buffer_round < shot_buffer_round) {  // wait
                     if (current_buffer_round < 0) {
@@ -295,7 +460,7 @@ void pm::DecodingUnit::decode_shots() {
                 if (current_buffer_round < 0) {
                     break;
                 }
-                pm::Mwpm& solver = *solvers[shot_buffer_id * num_threads + tid];
+                pm::Mwpm& solver = *solvers[shot_container_id * num_threads + tid];
                 Task* t = &shot.tasks[tid];
                 bool stolen = t->try_to_steal_leaf(shot_buffer_round);
                 while (stolen) {  // Got task
@@ -356,16 +521,16 @@ void pm::DecodingUnit::decode_shots() {
                             // Add negative weight sum to blossom solution weight
                             shot.res.weight = bit_packed_res.weight + solver.flooder.negative_weight_sum;
                         }
-                        write_result_and_get_next_shot(shot_buffer_id);
+                        write_result_and_get_next_shot(shot_container_id);
                         break;
                     }
                 }
                 // Move on to next shot buffer
                 ++shot_id;
-                ++shot_buffer_id;
-                if (shot_buffer_id >= NUM_BUFFERS_PER_UNIT) {
+                ++shot_container_id;
+                if (shot_container_id >= NUM_BUFFERS_PER_UNIT) {
                     ++shot_buffer_round;
-                    shot_buffer_id = 0;
+                    shot_container_id = 0;
                 }
             }
         } catch (const std::exception& e) {
@@ -383,6 +548,7 @@ void pm::DecodingUnit::decode_shots() {
         }
     }
 }
+#endif
 
 // Individidual task solver
 void pm::DecodingUnit::solve_task(
