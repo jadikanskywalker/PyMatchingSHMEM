@@ -129,7 +129,7 @@ class UserGraph {
         const EdgeCallable& edge_func,
         const BoundaryEdgeCallable& boundary_edge_func);
 #ifdef USE_THREADS
-    pm::DecodingUnit to_decoding_unit(
+    pm::SharedMatchingGraph to_shared_matching_graph(
         pm::weight_int num_distinct_weights
 #ifdef USE_SHMEM
         , DetectorNodeEphemeralFields *nodes_ephemeral_fields_ptr

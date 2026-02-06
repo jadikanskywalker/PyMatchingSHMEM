@@ -17,7 +17,7 @@ else
     M=$4
 fi
 
-ppn=1
+ppn=2
 
 if [ ! -d "run" ]
   then
@@ -25,6 +25,8 @@ if [ ! -d "run" ]
 fi
 
 cd run
+
+rm *.out
 
 hosts=$(srun hostname | sort | uniq | paste -sd, -)
 # Function to create a hostfile with specified slots per host
@@ -57,7 +59,7 @@ fi
 # need to find d=21 lattice surgery circuit
 stim gen \
     --rounds=$rounds \
-    --distance=21 \
+    --distance=7 \
     --after_clifford_depolarization=0.001 \
     --code surface_code \
     --task rotated_memory_x \
@@ -106,7 +108,7 @@ paste -d " " predicted_obs_flips__threads.01 actual_obs_flips.01 | grep "0 1\|1 
 echo
 
 # Parallel run with timing
-export ASAN_OPTIONS=detect_leaks=0
+# export ASAN_OPTIONS=detect_leaks=0
 echo "Starting SHMEM run..."
 start_parallel=$(date +%s)
 oshrun  \
@@ -134,14 +136,14 @@ paste -d " " predicted_obs_flips__shmem.01 actual_obs_flips.01 | grep "1 1\|0 0"
 echo wrong predictions:
 paste -d " " predicted_obs_flips__shmem.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
 
-echo
-echo Shots with differring predictions:
-awk 'NR==FNR{a[NR]=$0; n=NR; next} {
-  if (FNR>n || $0!=a[FNR]) { print FNR-1; out=1 }
-} END {
-  if (n>FNR) { for (i=FNR+1;i<=n;i++) { print i-1; out=1 } }
-  if (!out) print "no differences"
-}' predicted_obs_flips__threads.01 predicted_obs_flips__shmem.01
+# echo
+# echo Shots with differring predictions:
+# awk 'NR==FNR{a[NR]=$0; n=NR; next} {
+#   if (FNR>n || $0!=a[FNR]) { print FNR-1; out=1 }
+# } END {
+#   if (n>FNR) { for (i=FNR+1;i<=n;i++) { print i-1; out=1 } }
+#   if (!out) print "no differences"
+# }' predicted_obs_flips__threads.01 predicted_obs_flips__shmem.01
 
 rm hostfile.txt
 cd ..

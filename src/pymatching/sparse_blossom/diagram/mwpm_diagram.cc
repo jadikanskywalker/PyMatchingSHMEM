@@ -16,10 +16,6 @@
 
 #include <fstream>
 
-#ifdef USE_THREADS
-#include <omp.h>
-#endif
-
 using namespace pm;
 
 std::pair<std::vector<std::pair<float, float>>, std::vector<std::pair<float, float>>>

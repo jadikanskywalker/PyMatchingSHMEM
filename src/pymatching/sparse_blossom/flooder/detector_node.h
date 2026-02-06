@@ -100,6 +100,15 @@ class DetectorNode {
     inline const DetectorNodeEphemeralFields& state(int rotating_buffer_idx) const {
         return ephemeral_fields[rotating_buffer_idx];
     }
+// #else
+//     DetectorNodeEphemeralFields ephemeral_fields;
+//     inline DetectorNodeEphemeralFields& state(int rotating_buffer_idx) {
+//         return ephemeral_fields[];
+//     }
+//     inline const DetectorNodeEphemeralFields& state(int rotating_buffer_idx) const {
+//         return ephemeral_fields[];
+//     }
+// #endif
 #else
     /// The region that reached and owns this node.
     GraphFillRegion* region_that_arrived;

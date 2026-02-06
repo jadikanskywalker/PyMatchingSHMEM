@@ -95,6 +95,15 @@ class AltTreeNode {
     /// Ephemeral state used during algorithms.
     bool visited;
 
+    // #ifdef USE_THREADS
+    // bool created_by_unmatch{false};
+    // int destroyed_by_prune{false};
+    // int shot_created{0};
+    // int task_created{0};
+    // int shot_destroyed{0};
+    // int task_destroyed{0};
+    // #endif
+
     AltTreeNode();
     AltTreeNode(
         GraphFillRegion* inner_region,

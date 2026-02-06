@@ -30,7 +30,7 @@
 
 #ifdef USE_THREADS
 #include <omp.h>
-
+#include <fstream>
 #include "../config_parallel.h"
 #include "../diagram/mwpm_diagram.h"
 #endif
@@ -39,7 +39,6 @@
 #include <shmem.h>
 #endif
 
-#ifndef USE_SHMEM
 int main_predict(int argc, const char** argv) {
     stim::check_for_unknown_arguments(
         {
@@ -92,15 +91,14 @@ int main_predict(int argc, const char** argv) {
     pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
 
 #ifdef USE_THREADS
-    auto decoding_unit = pm::detector_error_model_to_decoding_unit(
+    pm::DecodingUnit decoding_unit(
+        std::move(reader),
+        std::move(writer),
         dem,
         num_buckets,
-        /*ensure_search_flooder_included=*/enable_correlations,
-        /*enable_correlations=*/enable_correlations);
-    // DecodingSet decoding_set(std::move(decoding_units), std::move(reader), std::move(writer), enable_correlations,
-    // draw_frames); decoding_set.build_solvers(omp_get_max_threads(), dem);
-    decoding_unit.setup(
-        std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
+        enable_correlations,
+        enable_correlations,
+        draw_frames);
     if (DEBUG) {
         pm::setup_output_dirs(draw_frames, use_threads);
     }
@@ -159,102 +157,101 @@ int main_predict(int argc, const char** argv) {
     return EXIT_SUCCESS;
 }
 
-#else
-// main_predict (SHMEM) sets up shared memory environment
-int main_predict(int argc, const char** argv) {
-    // SHMEM memory regions
-    void* nodes_ephemeral_fields_ptr;
-    void* regions_ptr;
-    alignas(64)
-    static std::array<uint64_t, NUM_BUFFERS_PER_UNIT> atomics;
-    // Parse args
-    stim::check_for_unknown_arguments(
-        {
-            "--in",
-            "--in_format",
-            "--in_includes_appended_observables",
-            "--out",
-            "--out_format",
-            "--dem",
-            "--enable_correlations",
-            "--rounds_per_partition",
-            "--draw_frames",
-            "--use_threads",
-        },
-        {},
-        "predict",
-        argc,
-        argv);
+// #else
+// // main_predict (SHMEM) sets up shared memory environment
+// int main_predict(int argc, const char** argv) {
+//     if (atomics_ptr == nullptr) {
+//         throw std::invalid_argument("Failed to allocate symmetric memory for SHMEM atomics.");
+//     }
+//     // Parse args
+//     stim::check_for_unknown_arguments(
+//         {
+//             "--in",
+//             "--in_format",
+//             "--in_includes_appended_observables",
+//             "--out",
+//             "--out_format",
+//             "--dem",
+//             "--enable_correlations",
+//             "--rounds_per_partition",
+//             "--draw_frames",
+//             "--use_threads",
+//         },
+//         {},
+//         "predict",
+//         argc,
+//         argv);
 
-    FILE* shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
-    FILE* predictions_out = stim::find_open_file_argument("--out", stdout, "wb", argc, argv);
-    FILE* dem_file = stim::find_open_file_argument("--dem", nullptr, "r", argc, argv);
-    stim::FileFormatData shots_in_format =
-        stim::find_enum_argument("--in_format", "b8", stim::format_name_to_enum_map(), argc, argv);
-    stim::FileFormatData predictions_out_format =
-        stim::find_enum_argument("--out_format", "01", stim::format_name_to_enum_map(), argc, argv);
-    bool append_obs = stim::find_bool_argument("--in_includes_appended_observables", argc, argv);
-    bool enable_correlations = stim::find_bool_argument("--enable_correlations", argc, argv);
+//     FILE* shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
+//     FILE* predictions_out = stim::find_open_file_argument("--out", stdout, "wb", argc, argv);
+//     FILE* dem_file = stim::find_open_file_argument("--dem", nullptr, "r", argc, argv);
+//     stim::FileFormatData shots_in_format =
+//         stim::find_enum_argument("--in_format", "b8", stim::format_name_to_enum_map(), argc, argv);
+//     stim::FileFormatData predictions_out_format =
+//         stim::find_enum_argument("--out_format", "01", stim::format_name_to_enum_map(), argc, argv);
+//     bool append_obs = stim::find_bool_argument("--in_includes_appended_observables", argc, argv);
+//     bool enable_correlations = stim::find_bool_argument("--enable_correlations", argc, argv);
 
-    config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
-    bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
-    bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);
+//     config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
+//     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
+//     bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);
 
-    stim::DetectorErrorModel dem = stim::DetectorErrorModel::from_file(dem_file);
-    fclose(dem_file);
+//     stim::DetectorErrorModel dem = stim::DetectorErrorModel::from_file(dem_file);
+//     fclose(dem_file);
 
-    size_t num_obs = dem.count_observables();
-    auto reader = stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>::make(
-        shots_in, shots_in_format.id, 0, dem.count_detectors(), append_obs * num_obs);
-    auto writer = stim::MeasureRecordWriter::make(predictions_out, predictions_out_format.id);
-    writer->begin_result_type('L');
+//     size_t num_obs = dem.count_observables();
+//     auto reader = stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>::make(
+//         shots_in, shots_in_format.id, 0, dem.count_detectors(), append_obs * num_obs);
+//     auto writer = stim::MeasureRecordWriter::make(predictions_out, predictions_out_format.id);
+//     writer->begin_result_type('L');
 
-    pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
+//     pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
 
-    auto decoding_unit = pm::detector_error_model_to_decoding_unit(
-        nodes_ephemeral_fields_ptr,
-        dem,
-        num_buckets,
-        /*ensure_search_flooder_included=*/enable_correlations,
-        /*enable_correlations=*/enable_correlations);
-    decoding_unit.setup(regions_ptr, atomics.data(), std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
-    if (DEBUG) {
-        pm::setup_output_dirs(draw_frames, use_threads);
-    }
+//     auto decoding_unit = pm::detector_error_model_to_decoding_unit(
+//         nodes_ephemeral_fields_ptr,
+//         dem,
+//         num_buckets,
+//         /*ensure_search_flooder_included=*/enable_correlations,
+//         /*enable_correlations=*/enable_correlations);
+//     decoding_unit.setup(regions_ptr, (uint64_t*) atomics_ptr, std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
+//     if (DEBUG) {
+//         pm::setup_output_dirs(draw_frames, use_threads);
+//     }
 
-#ifdef OUTPUT_DECODING_TIME
-    using std::chrono::duration;
-    using std::chrono::duration_cast;
-    using std::chrono::milliseconds;
-    using std::chrono::steady_clock;
+// #ifdef OUTPUT_DECODING_TIME
+//     using std::chrono::duration;
+//     using std::chrono::duration_cast;
+//     using std::chrono::milliseconds;
+//     using std::chrono::steady_clock;
 
-    auto t1 = steady_clock::now();
-#endif
+//     auto t1 = steady_clock::now();
+// #endif
 
-    decoding_unit.decode_shots();
+//     decoding_unit.decode_shots_with_shmem();
 
-#ifdef OUTPUT_DECODING_TIME
-    auto t2 = steady_clock::now();
-    /* Getting number of milliseconds as an integer. */
-    auto ms_int = duration_cast<milliseconds>(t2 - t1);
-    /* Getting number of milliseconds as a double. */
-    duration<double, std::milli> ms_double = t2 - t1;
-    std::cout << "Decoding time: " << ms_double.count() << "ms\n";
-#endif
+// #ifdef OUTPUT_DECODING_TIME
+//     auto t2 = steady_clock::now();
+//     /* Getting number of milliseconds as an integer. */
+//     auto ms_int = duration_cast<milliseconds>(t2 - t1);
+//     /* Getting number of milliseconds as a double. */
+//     duration<double, std::milli> ms_double = t2 - t1;
+//     std::cout << "Decoding time: " << ms_double.count() << "ms\n";
+// #endif
 
-    if (predictions_out != stdout) {
-        fclose(predictions_out);
-    }
-    if (shots_in != stdin) {
-        fclose(shots_in);
-    }
+//     if (predictions_out != stdout) {
+//         fclose(predictions_out);
+//     }
+//     if (shots_in != stdin) {
+//         fclose(shots_in);
+//     }
 
-    // Free SHMEM memory regions
-    shmem_free(nodes_ephemeral_fields_ptr);
+//     shmem_free(regions_ptr);
+//     shmem_free(nodes_ephemeral_fields_ptr);
+//     shmem_free(atomics_ptr);
 
-    return EXIT_SUCCESS;
-}
-#endif
+//     return EXIT_SUCCESS;
+// }
+// #endif
 
 int main_count_mistakes(int argc, const char** argv) {
     stim::check_for_unknown_arguments(
