@@ -96,26 +96,26 @@ pm::Mwpm pm::detector_error_model_to_mwpm(
     return user_graph.to_mwpm(num_distinct_weights, ensure_search_flooder_included);
 }
 
-#ifdef USE_THREADS
-pm::DecodingUnit pm::detector_error_model_to_decoding_unit(
-#ifdef USE_SHMEM
-    void* &nodes_ephemeral_fields_ptr,
-#endif
-    const stim::DetectorErrorModel& detector_error_model,
-    pm::weight_int num_distinct_weights,
-    bool ensure_search_flooder_included,
-    bool enable_correlations) {
-    auto user_graph =
-        pm::detector_error_model_to_user_graph(detector_error_model, enable_correlations, num_distinct_weights);
-#ifdef USE_SHMEM
-    /* PEs allocate detector nodes in shared memory */
-    nodes_ephemeral_fields_ptr = shmem_malloc(user_graph.nodes.size() * NUM_BUFFERS_PER_UNIT * sizeof(DetectorNodeEphemeralFields));
-    return user_graph.to_decoding_unit(num_distinct_weights, (DetectorNodeEphemeralFields*) nodes_ephemeral_fields_ptr);
-#else
-    return user_graph.to_decoding_unit(num_distinct_weights);
-#endif
-}
-#endif
+// #ifdef USE_THREADS
+// pm::DecodingUnit pm::detector_error_model_to_decoding_unit(
+// #ifdef USE_SHMEM
+//     void* &nodes_ephemeral_fields_ptr,
+// #endif
+//     const stim::DetectorErrorModel& detector_error_model,
+//     pm::weight_int num_distinct_weights,
+//     bool ensure_search_flooder_included,
+//     bool enable_correlations) {
+//     auto user_graph =
+//         pm::detector_error_model_to_user_graph(detector_error_model, enable_correlations, num_distinct_weights);
+// #ifdef USE_SHMEM
+//     /* PEs allocate detector nodes in shared memory */
+//     nodes_ephemeral_fields_ptr = shmem_malloc(user_graph.nodes.size() * NUM_BUFFERS_PER_UNIT * sizeof(DetectorNodeEphemeralFields));
+//     return user_graph.to_decoding_unit(num_distinct_weights, (DetectorNodeEphemeralFields*) nodes_ephemeral_fields_ptr);
+// #else
+//     return user_graph.to_decoding_unit(num_distinct_weights);
+// #endif
+// }
+// #endif
 
 #ifdef USE_THREADS
 void pm::process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events,
@@ -249,6 +249,12 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
             for (pm::AltTreeNode *alttreenode : mwpm.node_arena.allocated) {
                 if (alttreenode == nullptr) continue;
                 if (freed_nodes.find(alttreenode) != freed_nodes.end()) continue;
+                // std::cout << "    created_by_unmatch: " << alttreenode->created_by_unmatch << std::endl
+                //           << "    destroyed_by_prune: " << alttreenode->destroyed_by_prune << std::endl
+                //           << "    shot_created: " << alttreenode->shot_created << std::endl
+                //           << "    task_created: " << alttreenode->task_created << std::endl
+                //           << "    shot_destroyed: " << alttreenode->shot_destroyed << std::endl
+                //           << "    task_destroyed: " << alttreenode->task_destroyed << std::endl; // tmp
                 if (alttreenode->inner_region) {
                     std::cout << "  inner GraphFillRegion: " << alttreenode->inner_region << std::endl;
                     for (auto &detector_node : alttreenode->inner_region->shell_area) {
@@ -551,7 +557,7 @@ void pm::output_detector_nodes(pm::Mwpm& mwpm, bool parallel) {
             if (node.neighbors[i] == nullptr)
                 continue;
             out << "    neighbor: " << node.neighbors[i] << std::endl
-                << "  vb : " << node.neighbors[i]->vb << std::endl;;
+                << "      vb : " << node.neighbors[i]->vb << std::endl;;
             out << "      weight    : " << node.neighbor_weights[i] << std::endl
                 << "      logobs    : " << node.neighbor_observables[i] << std::endl;
             }

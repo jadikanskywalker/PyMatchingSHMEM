@@ -131,6 +131,11 @@ struct GraphFlooder {
 // ===============
 #endif
 
+#ifdef USE_SHMEM
+    // Functions to support cross-PE fusion
+    void construct_region_vectors_from_detector_nodes();
+#endif
+
     pm::FloodCheckEvent dequeue_valid();
     pm::MwpmEvent process_tentative_event_returning_mwpm_event(FloodCheckEvent tentative_event);
 

@@ -14,7 +14,7 @@ rm -r run/logs/
 
 if [ $# -le 4 ]
   then
-    echo "Args: [ppn] [nthreads] [shots] [rounds] [M]"
+    echo "Args: [ppn] [nthreads] [shots] [rounds] [M] ... [skip_stim=false] [profile_serial=false] "
     exit 1
 else
     ppn=$1
@@ -24,14 +24,24 @@ else
     M=$5
 fi
 
+if [[ -n ${6+x} ]]; then
+    build_circuit=false
+else
+    build_circuit=true
+fi
+
+if [[ -n ${7+x} ]]; then
+    profile_serial=false
+else
+    profile_serial=true
+fi
+
 if [ ! -d "run" ]
   then
     mkdir run
 fi
 
 cd run
-
-rm *.01 circuit.stim *.b8 *.dem
 
 if [ -d "out_parallel" ]
   then
@@ -46,87 +56,79 @@ if [ -d "out_frames" ]
     rm out_frames -r
 fi
 
-
-stim gen \
-    --rounds=$(($rounds-1)) \
-    --distance=21 \
-    --after_clifford_depolarization=0.001 \
-    --code surface_code \
-    --task rotated_memory_x \
-    > circuit.stim
-stim analyze_errors \
-    --decompose_errors \
-    --fold_loops \
-    --in circuit.stim \
-    > error_model.dem
-stim detect \
-    --in circuit.stim \
-    --shots $shots \
-    --obs_out actual_obs_flips.01 \
-    --obs_out_format 01 \
-    --out detection_events.b8 \
-    --out_format b8
-
-# Run prediction
-# oshrun --hostfile hostfile.txt -N $ppn \
-#   vtune -collect hotspots -knob enable-stack-collection=true -r logs/vtune_result \
-#   ./pymatching predict \
-#     --dem error_model.dem \
-#     --in detection_events.b8 \
-#     --in_format b8 \
-#     --out predicted_obs_flips.01 \
-#     --out_format 01 \
-#     --rounds_per_partition $M
-
-echo "Starting serial run..."
-start_serial=$(date +%s)
-if [ $ppn -le 0 ]
-  then
-    vtune -collect $collect -knob enable-stack-collection=true -r logs/serial/vtune_result \
-      ~/PyMatchingSHMEM/build/pymatching predict \
-        --dem error_model.dem \
-        --in detection_events.b8 \
-        --in_format b8 \
-        --out predicted_obs_flips__without_shmem.01 \
-        --out_format 01 \
-        > log_serial.out
-else
-    oshrun --hostfile hostfile.txt -N $ppn \
-        ~/PyMatchingSHMEM/build_osss/pymatching predict \
-        --dem error_model.dem \
-        --in detection_events.b8 \
-        --in_format b8 \
-        --out predicted_obs_flips__without_shmem.01 \
-        --out_format 01 \
-        --rounds_per_partition $M > log_serial.out
+if $build_circuit; then
+    stim gen \
+        --rounds=$(($rounds-1)) \
+        --distance=21 \
+        --after_clifford_depolarization=0.001 \
+        --code surface_code \
+        --task rotated_memory_x \
+        > circuit.stim
+    stim analyze_errors \
+        --decompose_errors \
+        --fold_loops \
+        --in circuit.stim \
+        > error_model.dem
+    stim detect \
+        --in circuit.stim \
+        --shots $shots \
+        --obs_out actual_obs_flips.01 \
+        --obs_out_format 01 \
+        --out detection_events.b8 \
+        --out_format b8
 fi
-end_serial=$(date +%s)
-serial_time=$((end_serial - start_serial))
-echo "Serial run completed in $serial_time seconds."
 
-echo Serial
-echo correct predictions:
-paste -d " " predicted_obs_flips__without_shmem.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
-echo wrong predictions:
-paste -d " " predicted_obs_flips__without_shmem.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
-echo
+if $profile_serial; then
+    echo "Starting serial run..."
+    start_serial=$(date +%s)
+    if [ $ppn -le 0 ]
+      then
+        vtune -collect $collect -knob enable-stack-collection=true -r logs/serial/vtune_result \
+          ~/PyMatchingSHMEM/build/pymatching predict \
+            --dem error_model.dem \
+            --in detection_events.b8 \
+            --in_format b8 \
+            --out predicted_obs_flips__without_shmem.01 \
+            --out_format 01 \
+            > log_serial.out
+    else
+        oshrun --hostfile hostfile.txt -N $ppn \
+            ~/PyMatchingSHMEM/build_osss/pymatching predict \
+            --dem error_model.dem \
+            --in detection_events.b8 \
+            --in_format b8 \
+            --out predicted_obs_flips__without_shmem.01 \
+            --out_format 01 \
+            --rounds_per_partition $M > log_serial.out
+    fi
+    end_serial=$(date +%s)
+    serial_time=$((end_serial - start_serial))
+    echo "Serial run completed in $serial_time seconds."
 
-vtune -report summary -r logs/serial/vtune_result/vtune_result.vtune \
-      -report-output logs/serial/vtune_report_summary.txt
+    echo Serial
+    echo correct predictions:
+    paste -d " " predicted_obs_flips__without_shmem.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
+    echo wrong predictions:
+    paste -d " " predicted_obs_flips__without_shmem.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
+    echo
 
-vtune -report top-down -r logs/serial/vtune_result/vtune_result.vtune \
-      -call-stack-mode all -column="CPU Time:Self","Module" -filter "Function Stack"  \
-      --format csv -csv-delimiter comma -report-output logs/serial/vtune_report_topdown.csv
+    vtune -report summary -r logs/serial/vtune_result/vtune_result.vtune \
+        -report-output logs/serial/vtune_report_summary.txt
 
-vtune -report hotspots -r logs/serial/vtune_result/vtune_result.vtune \
-      --format csv -csv-delimiter comma \
-      -report-output logs/serial/vtune_report_hotspots.csv
+    vtune -report top-down -r logs/serial/vtune_result/vtune_result.vtune \
+        -call-stack-mode all -column="CPU Time:Self","Module" -filter "Function Stack"  \
+        --format csv -csv-delimiter comma -report-output logs/serial/vtune_report_topdown.csv
 
-vtune -report callstacks -r logs/serial/vtune_result/vtune_result.vtune \
-      --format csv -csv-delimiter comma \
-      -report-output logs/serial/vtune_report_callstacks.csv
-# mat b8
-echo
+    vtune -report hotspots -r logs/serial/vtune_result/vtune_result.vtune \
+        --format csv -csv-delimiter comma \
+        -report-output logs/serial/vtune_report_hotspots.csv
+
+    vtune -report callstacks -r logs/serial/vtune_result/vtune_result.vtune \
+        --format csv -csv-delimiter comma \
+        -report-output logs/serial/vtune_report_callstacks.csv
+    mat b8
+    echo
+fi
 
 # Run prediction
 if [ $nthreads -gt 0 ]
@@ -166,7 +168,6 @@ fi
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
 echo "Parallel run completed in $parallel_time seconds."
-
 
 vtune -report summary -r logs/parallel/vtune_result/vtune_result.vtune \
       -report-output logs/parallel/vtune_report_summary.txt

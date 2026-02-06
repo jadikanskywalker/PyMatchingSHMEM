@@ -69,16 +69,16 @@ Mwpm detector_error_model_to_mwpm(
     bool ensure_search_flooder_included = false,
     bool enable_correlations = false);
 
-#ifdef USE_THREADS
-DecodingUnit detector_error_model_to_decoding_unit(
-#ifdef USE_SHMEM
-    void* &nodes_ephemeral_fields_ptr,
-#endif
-    const stim::DetectorErrorModel& detector_error_model,
-    pm::weight_int num_distinct_weights,
-    bool ensure_search_flooder_included = false,
-    bool enable_correlations = false);
-#endif
+// #ifdef USE_THREADS
+// DecodingUnit detector_error_model_to_decoding_unit(
+// #ifdef USE_SHMEM
+//     void* &nodes_ephemeral_fields_ptr,
+// #endif
+//     const stim::DetectorErrorModel& detector_error_model,
+//     pm::weight_int num_distinct_weights,
+//     bool ensure_search_flooder_included = false,
+//     bool enable_correlations = false);
+// #endif
 
 MatchingResult decode_detection_events_for_up_to_64_observables(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, bool edge_correlations);

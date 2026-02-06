@@ -61,6 +61,10 @@ void Mwpm::shatter_descendants_into_matches_and_freeze(AltTreeNode &alt_tree_nod
     if (alt_tree_node.outer_region) {
         alt_tree_node.outer_region->alt_tree_node = nullptr;
     }
+// #ifdef USE_THREADS
+//     alt_tree_node.shot_destroyed = flooder.current_shot;
+//     alt_tree_node.task_destroyed = (task->is_fusion) ? -task->part : task->part;
+// #endif
     node_arena.del(&alt_tree_node);
 }
 
@@ -86,10 +90,6 @@ void Mwpm::handle_tree_hitting_virtual_boundary(const RegionHitVirtualBoundaryEv
     event.region->match = Match{nullptr, event.edge};
     flooder.set_region_frozen(*event.region);
 
-    // Defensive: ensure the event region no longer references an AltTreeNode.
-    // In rare interleavings, the root may not have had its pointer nulled by shattering.
-    event.region->alt_tree_node = nullptr;
-
     task->regions_matched_to_virtual_boundary.push_back(event.region);
 
     // if (DEBUG) {
@@ -105,13 +105,13 @@ void Mwpm::handle_tree_hitting_boundary_match(
     GraphFillRegion *matched_region,
     const CompressedEdge &unmatched_to_matched_edge) {
 // #ifdef USE_THREADS
-    // if (DEBUG) {
-    //     std::cout << "  DEBUG: tree hitting boundary match" << std::endl
-    //               << "    matched_region: " << matched_region << std::endl
-    //               << "    unmatched_region: " << unmatched_region << std::endl
-    //               << "    unmatched_to_match_edge: " << unmatched_to_matched_edge <<std::endl
-    //               << "    matched_region->match.edge: " << unmatched_region->match.edge << std::endl;
-    // }
+//     if (DEBUG) {
+//         std::cout << "  DEBUG: tree hitting boundary match" << std::endl
+//                   << "    matched_region: " << matched_region << std::endl
+//                   << "    unmatched_region: " << unmatched_region << std::endl
+//                   << "    unmatched_to_match_edge: " << unmatched_to_matched_edge <<std::endl
+//                   << "    matched_region->match.edge: " << unmatched_region->match.edge << std::endl;
+//     }
 // #endif
     auto &alt_tree_node = unmatched_region->alt_tree_node;
     unmatched_region->add_match(matched_region, unmatched_to_matched_edge);
@@ -141,10 +141,7 @@ void Mwpm::handle_tree_hitting_virtual_boundary_match(
     flooder.set_region_frozen(*unmatched_region);
     alt_tree_node->become_root();
     shatter_descendants_into_matches_and_freeze(*alt_tree_node);
-    // Defensive: ensure no lingering alt-tree back-references remain.
-    unmatched_region->alt_tree_node = nullptr;
-    matched_region->alt_tree_node = nullptr;
-    // matched_region no longer matched to virtual boundary
+
     for (int i=0; i < task->regions_matched_to_virtual_boundary.size(); ++i) {
         if (task->regions_matched_to_virtual_boundary[i] == matched_region) {
             task->regions_matched_to_virtual_boundary[i] = task->regions_matched_to_virtual_boundary.back();
@@ -406,7 +403,6 @@ void Mwpm::unmatch_virtual_boundaries_between_partitions() {
         // std::cout << "  DEBUG: unmatching regions_to_unmatch" << std::endl;
     for (GraphFillRegion *matched_region: task->regions_to_unmatch) {
         CompressedEdge match_edge = matched_region->match.edge;
-        // TODO: FIX THIS IF
         // if (DEBUG) {
         //     std::cout << "    region: " << matched_region << std::endl;
         // }
@@ -422,6 +418,11 @@ void Mwpm::unmatch_virtual_boundaries_between_partitions() {
             // }
             auto alt_tree_node = node_arena.alloc_unconstructed();
             new (alt_tree_node) AltTreeNode(matched_region);
+// #ifdef USE_THREADS
+//                 alt_tree_node->created_by_unmatch = true;
+//                 alt_tree_node->shot_created = flooder.current_shot;
+//                 alt_tree_node->task_created = (task->is_fusion) ? -task->part : task->part;
+// #endif
             matched_region->alt_tree_node = alt_tree_node;
             flooder.set_region_growing(*matched_region);
             matched_region->match.clear();
@@ -594,6 +595,10 @@ void Mwpm::create_detection_event(DetectorNode *node) {
     auto alt_tree_node = node_arena.alloc_unconstructed();
     new (alt_tree_node) AltTreeNode(region);
     region->alt_tree_node = alt_tree_node;
+// #ifdef USE_THREADS
+//     alt_tree_node->shot_created = flooder.current_shot;
+//     alt_tree_node->task_created = (task->is_fusion) ? -task->part : task->part;
+// #endif
     flooder.do_region_created_at_empty_detector_node(*region, *node);
 }
 

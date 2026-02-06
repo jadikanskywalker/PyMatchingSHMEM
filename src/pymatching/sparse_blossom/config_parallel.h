@@ -1,6 +1,6 @@
 #pragma once
 
-#define DEBUG 0
+#define DEBUG 1
 
 #define NUM_BUFFERS_PER_UNIT 2
 

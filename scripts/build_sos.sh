@@ -35,7 +35,7 @@ elif [ "$BUILD_TYPE" = "debug" ]; then
     echo "Configuring Debug build..."
     cmake . -B build_sos \
         -DCMAKE_BUILD_TYPE=Debug \
-        -DCMAKE_CXX_FLAGS_DEBUG="-g -O0 -fsanitize=address" \
+        -DCMAKE_CXX_FLAGS_DEBUG="-g -O2 -fsanitize=address" \
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DCMAKE_C_COMPILER="$CC" \
         -DCMAKE_CXX_COMPILER="$CXX" \

@@ -32,7 +32,7 @@ namespace pm {
 #endif
 
 struct ShotContainer {
-    std::atomic<uint64_t> current_buffer_round{0};  // Used for idle thread spin-wait until new shot read
+    std::atomic<int> current_buffer_round{0};  // Used for idle thread spin-wait until new shot read
     uint64_t current_shot;
 
     stim::SparseShot sparse_shot;
@@ -57,8 +57,7 @@ struct ShotContainer {
           partition_hits(std::move(other.partition_hits)),
           virtual_boundary_hits(std::move(other.virtual_boundary_hits)),
           res(std::move(other.res)),
-          tasks(std::move(other.tasks)) {
-    }
+          tasks(std::move(other.tasks)) {}
 
     ShotContainer& operator=(ShotContainer&& other) noexcept {
         if (this != &other) {
@@ -82,11 +81,11 @@ struct ShotBuffer {
     std::vector<ShotContainer> buffer;
 
 #ifdef USE_SHMEM
-    // Used for cross-PE synchronization
+    // Symmetric memory pointers
     uint64_t* shot_container_status;
 #endif
-    int next_shot_container_id = 0;
-    int last_shot_container_id = -1;
+    int next_shot_container_id{ 0 };
+    int last_shot_container_id{ -1 };
 
     // Lock for result writing & shot reading
     std::mutex m;
@@ -100,91 +99,95 @@ struct ShotBuffer {
         std::unique_ptr<stim::MeasureRecordWriter> writer,
         int num_partitions,
         int num_virtual_boundaries,
-        int num_observables)
-        : reader(std::move(reader)), writer(std::move(writer))
-    {
-#ifdef USE_SHMEM
-        shot_container_status = atomics_ptr;
-        for (int i=0; i<NUM_BUFFERS_PER_UNIT; ++i) {
-            shot_container_status[i] = 0;
-        }
-#endif
-        buffer.reserve(static_cast<size_t>(NUM_BUFFERS_PER_UNIT));
-        for (int i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
-            buffer.emplace_back(num_partitions, num_virtual_boundaries, num_observables);
-        }
-    }
+        int num_observables);
 };
 
-// A decoding unit is a connected decoding graph
+struct SharedMatchingGraph {
+    std::shared_ptr<pm::MatchingGraph> graph_ptr;
+    std::vector<int> node_part_id;
+    int num_partitions;
+    int num_virtual_boundaries;
+
+#ifdef USE_SHMEM
+    std::vector<std::pair<size_t, size_t>> partition_bounds;
+#endif
+
+    SharedMatchingGraph();
+
+    SharedMatchingGraph(
+        std::shared_ptr<pm::MatchingGraph> graph_ptr_,
+        std::vector<int> node_part_id_,
+        int num_partitions_,
+        int num_virtual_boundaries_);
+
+#ifdef USE_SHMEM
+    void construct_partition_bounds();
+#endif
+};
+
+// A decoding unit is responsible for decoding a connected decoding graph in parallel
 //   Connected decoding graphs are partitioned for parallel solving
 //   A decoding task involves solving a partition or fusing two solved partition along a virtual boundary
+//   Decoding units implement multi-threading and OpenSHMEM behavoior
 struct DecodingUnit {
     // Graph
-    std::shared_ptr<pm::MatchingGraph> graph_ptr;
+    SharedMatchingGraph graph;
+    // std::shared_ptr<pm::MatchingGraph> graph_ptr;
 
-    const std::vector<int> node_part_id;
-    const int num_partitions;
-    const int num_virtual_boundaries;
+    // std::vector<int> node_part_id;
+    // int num_partitions;
+    // int num_virtual_boundaries;
 
     // Shots
     std::shared_ptr<ShotBuffer> shot_buffer;
 
     // Solvers
+    bool ensure_search_flooder_included;
     bool enable_correlations;
     bool draw_frames;
+    int num_threads;
+    int num_partition_units;
     std::vector<std::shared_ptr<pm::Mwpm>> solvers;
-
-    bool done = false;
 
 #ifdef USE_SHMEM
     int pid;
-    int other_pid;
+    int other_pid; // for simple two PE impl.
+    // Symmetric memory
+    DetectorNodeEphemeralFields* node_ephemeral_fields_ptr = nullptr;
+    uint64_t* atomics_ptr = nullptr;
+    GraphFillRegion* regions_ptr = nullptr;
+    // Cross-PE Fusion Contexts
+    shmem_ctx_t summary_ctx;
+    shmem_ctx_t fallback_ctx;
+    // Info used for symmetric memory accesses
+    size_t regions_nelems_per_solver;
+    GraphFillRegion* regions_base_other_pe = nullptr; // base for region SHMEMArena on other PE
 #endif
 
     // Initialization Functions
     DecodingUnit(
-        const std::shared_ptr<pm::MatchingGraph> graph_ptr,
-        const std::vector<int> node_part_id,
-        int num_partitions,
-        int num_virtual_boundaries)
-        : graph_ptr(graph_ptr),
-          node_part_id(node_part_id),
-          num_partitions(num_partitions),
-          num_virtual_boundaries(num_virtual_boundaries)
-    {}
-
-    void setup(
-#ifdef USE_SHMEM
-        void* &regions_ptr,
-        uint64_t* atomics_ptr,
-#endif
         std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
         std::unique_ptr<stim::MeasureRecordWriter> writer,
+        const stim::DetectorErrorModel& detector_error_model,
+        pm::weight_int num_distinct_weights,
+        bool ensure_search_flooder_included,
         bool enable_correlations,
-        bool draw_frames,
-        int max_threads,
-        stim::DetectorErrorModel dem /* only for drawing coors */
-    );
+        bool draw_frames);
+
+    ~DecodingUnit();
 
     void build_tasks_for_round_partitioning();
 
-    void build_solvers(bool ensure_search_flooder_included, bool enable_correlations, int num_threads
-#ifdef USE_SHMEM
-        , GraphFillRegion* regions_ptr, size_t regions_nelems_per_solver
-#endif
-    );
+    void build_solvers();
 
     // Decoding Functions
 #ifdef USE_SHMEM
-    void handle_cross_process_fusion_and_get_next_shot(int shot_container_id);
-
-    void decode_shots_with_shmem();
+    void handle_cross_process_fusion_and_get_next_shot(int shot_container_id, int num_threads);
 #else
     void write_result_and_get_next_shot(int shot_container_id);
+#endif
 
     void decode_shots();
-#endif
 
     void solve_task(pm::Mwpm& solver, std::vector<uint64_t>& hits, Task* task, int tid, int draw_frames, int shot_id);
 };

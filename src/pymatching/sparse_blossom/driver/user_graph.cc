@@ -270,9 +270,10 @@ double pm::UserGraph::max_abs_weight() {
 }
 
 #ifdef USE_THREADS
-pm::DecodingUnit pm::UserGraph::to_decoding_unit(pm::weight_int num_distinct_weights
+pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
+    pm::weight_int num_distinct_weights
 #ifdef USE_SHMEM
-    , DetectorNodeEphemeralFields* nodes_ephemeral_fields_ptr
+    , DetectorNodeEphemeralFields* node_ephemeral_fields_ptr
 #endif
 ) {
     std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
@@ -281,7 +282,7 @@ pm::DecodingUnit pm::UserGraph::to_decoding_unit(pm::weight_int num_distinct_wei
     const int num_nodes = nodes.size();
     for (int i=0; i < num_nodes; ++i) {
         for (int j=0; j < NUM_BUFFERS_PER_UNIT; ++j) {
-            matching_graph.nodes[i].ephemeral_fields[j] = nodes_ephemeral_fields_ptr + i + j*num_nodes;
+            matching_graph.nodes[i].ephemeral_fields[j] = node_ephemeral_fields_ptr + i + j*num_nodes;
         }
     }
 #endif
@@ -316,9 +317,7 @@ pm::DecodingUnit pm::UserGraph::to_decoding_unit(pm::weight_int num_distinct_wei
         }
     }
 
-    pm::DecodingUnit unit(matching_graph_ptr, node_part_id, num_partitions, virtual_boundaries.size());
-
-    return unit;
+    return SharedMatchingGraph(matching_graph_ptr, node_part_id, num_partitions, virtual_boundaries.size());
 }
 #endif
 
@@ -659,7 +658,7 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
                 ++p;
                 p_or_vb = false; // boundary
             } else if (round_counter > M) {
-                round_counter = 0;
+                round_counter = 1;
                 ++vb;
                 virtual_boundaries.push_back((std::vector<int>){});
                 p_or_vb = true; // partition
@@ -673,6 +672,13 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
             node_part_id[n] = -vb;
             virtual_boundaries[vb-1].push_back(n);
         }
+    }
+    if (!p_or_vb) { // ended on boundary, reassign to last partition
+        --p;
+        for (int n : virtual_boundaries[vb-1]) {
+            node_part_id[n] = p;
+        }
+        virtual_boundaries.pop_back();
     }
     num_partitions = p+1;
 }
