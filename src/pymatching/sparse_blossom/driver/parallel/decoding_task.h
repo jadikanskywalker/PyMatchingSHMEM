@@ -44,6 +44,10 @@ struct Task {
     const int part;
     const bool is_fusion;
 
+#ifdef USE_SHMEM
+    bool is_cross_pe{ false };
+#endif
+
     const int vb_left, vb_right;  // Assumes round-based partitioning
 
     int child_bit;
@@ -51,8 +55,8 @@ struct Task {
     Task* right_child{nullptr};
     Task* parent{nullptr};
 
-    std::vector<pm::GraphFillRegion*> regions_matched_to_virtual_boundary;
-    std::vector<pm::GraphFillRegion*> regions_to_unmatch;
+    std::vector<pm::GraphFillRegion*> regions_to_unmatch; // built from fusion children, unmatched at beginning
+    std::vector<pm::GraphFillRegion*> regions_matched_to_virtual_boundary; // saved while solving
 
     Task(int task_id, int partition)
         : task_id(task_id),
@@ -69,8 +73,8 @@ struct Task {
           left_child(left_child),
           right_child(right_child),
           is_fusion(true),
-          vb_left(left_child->vb_left),
-          vb_right(right_child->vb_right)  // Assumes round-based partitioning
+          vb_left(left_child->vb_left), // Assumes round-based partitioning
+          vb_right(right_child->vb_right)
     {
         left_child->parent = this;
         left_child->child_bit = 1;
@@ -94,7 +98,7 @@ struct Task {
     }
 
     /* Helper Methods */
-    void setup() {
+    inline void setup() {
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
         if (is_fusion) {
@@ -114,18 +118,27 @@ struct Task {
     };
 
     /* Sychnorization Methods */
-    void mark_solved() {
+    inline void mark_solved() {
         if (is_fusion) {
             status.store(0, std::memory_order_release);
         }
     }
 
-    bool try_to_steal_leaf(int next) {
+    inline bool try_to_steal_leaf(int next) {
         int expected = next - 1;
         return status.compare_exchange_strong(expected, next, std::memory_order_acq_rel);
     }
 
-    Task* try_to_steal_parent_or_descendent(int next) {
+    inline bool try_to_steal_parent() {
+        int old = parent->status.fetch_or(child_bit, std::memory_order_acq_rel);
+        if ((old | child_bit) == 3) {
+            return old != 3;
+        } else {
+            return false;
+        }
+    }
+
+    inline Task* try_to_steal_parent_or_descendent(int next) {
         int old = parent->status.fetch_or(child_bit, std::memory_order_acq_rel);
         if ((old | child_bit) == 3) {
             if (old == 3) {  // got beat
@@ -139,7 +152,7 @@ struct Task {
         return sibling->try_to_steal_descendent(next);
     }
 
-    Task* try_to_steal_descendent(int next) {
+    inline Task* try_to_steal_descendent(int next) {
         Task* t = nullptr;
         if (!is_fusion) {  // I am leaf
             bool stolen = try_to_steal_leaf(next);
@@ -157,72 +170,6 @@ struct Task {
         }
         return t;
     }
-
-    bool try_to_steal_parent() {
-        int old = parent->status.fetch_or(child_bit, std::memory_order_acq_rel);
-        if ((old | child_bit) == 3) {
-            return old != 3;
-        } else {
-            return false;
-        }
-    }
 };
-
-// class WorkStealingDeque {
-// private:
-//     std::vector<Task> buffer;
-//     std::atomic<size_t> top;
-//     std::atomic<size_t> bottom;
-//     const size_t capacity;
-
-// public:
-//     WorkStealingDeque(size_t cap = 1024)
-//         : buffer(cap), top(0), bottom(0), capacity(cap) {}
-
-//     // // Only the thread who owns the queue can push
-//     // bool push(const Task& task) {
-//     //     size_t b = bottom.load(std::memory_order_relaxed);
-//     //     if (b - top.load(std::memory_order_acquire) >= capacity)
-//     //         return false; // queue full
-//     //     buffer[b % capacity] = task;
-//     //     std::atomic_thread_fence(std::memory_order_release);
-//     //     bottom.store(b + 1, std::memory_order_relaxed);
-//     //     return true;
-//     // }
-
-//     // // Only the thread who owns the queue can pop
-//     // bool pop(Task** task) {
-//     //     size_t b = bottom.load(std::memory_order_relaxed) - 1;
-//     //     bottom.store(b, std::memory_order_relaxed);
-//     //     std::atomic_thread_fence(std::memory_order_seq_cst);
-//     //     size_t t = top.load(std::memory_order_relaxed);
-//     //     if (t <= b) {
-//     //         task = buffer[b % capacity];
-//     //         return true;
-//     //     } else {
-//     //         bottom.store(t, std::memory_order_relaxed);
-//     //         return false;
-//     //     }
-//     // }
-
-//     // // Other threads can steal
-//     // bool steal(Task** task) {
-//     //     size_t t = top.load(std::memory_order_acquire);
-//     //     std::atomic_thread_fence(std::memory_order_seq_cst);
-//     //     size_t b = bottom.load(std::memory_order_acquire);
-//     //     if (t < b) {
-//     //         task = buffer[t % capacity];
-//     //         if (task.is_ready) {
-//     //             if (!top.compare_exchange_strong(t, t + 1,
-//     //                     std::memory_order_seq_cst,
-//     //                     std::memory_order_relaxed))
-//     //                 return false;
-//     //             return true;
-//     //         }
-//     //         return false;
-//     //     }
-//     //     return false;
-//     // }
-// };
 
 #endif  // PYMATCHING2_DECODING_TASK_H

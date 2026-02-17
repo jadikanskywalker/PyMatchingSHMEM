@@ -20,8 +20,12 @@
 #include <set>
 
 #ifdef USE_THREADS
+#include "pymatching/sparse_blossom/config_parallel.h"
 #include <memory>
-// #include "pymatching/sparse_blossom/driver/parallel/decoding_unit.h"
+#endif
+
+#ifdef USE_SHMEM
+#include "pymatching/sparse_blossom/driver/helpers/vector_wrapper.h"
 #endif
 
 namespace pm {
@@ -29,16 +33,32 @@ namespace pm {
 class DecodingUnit;
 
 struct ExtendedMatchingResult {
+#ifdef USE_SHMEM
+    VectorWrapper<uint8_t> obs_crossed;
+#else
     std::vector<uint8_t> obs_crossed;
+#endif
+
     total_weight_int weight;
     ExtendedMatchingResult();
-    explicit ExtendedMatchingResult(size_t num_observables);
+    explicit ExtendedMatchingResult(
+#ifdef USE_SHMEM
+        uint8_t* arr,
+#endif
+        size_t num_observables
+    );
 
     bool operator==(const ExtendedMatchingResult& rhs) const;
 
     bool operator!=(const ExtendedMatchingResult& rhs) const;
 
-    ExtendedMatchingResult(std::vector<uint8_t> obs_crossed, total_weight_int weight);
+    ExtendedMatchingResult(
+#ifdef USE_SHMEM
+        VectorWrapper<uint8_t> obs_crossed,
+#else
+        std::vector<uint8_t> obs_crossed,
+#endif
+        total_weight_int weight);
 
     void reset();
 
@@ -47,13 +67,25 @@ struct ExtendedMatchingResult {
 };
 
 inline void ExtendedMatchingResult::reset() {
+#ifdef USE_SHMEM
+    for (size_t i=0; i < obs_crossed.size_; ++i) {
+        obs_crossed[i] = 0;
+    }
+#else
     std::fill(obs_crossed.begin(), obs_crossed.end(), 0);
+#endif
     weight = 0;
 }
 
 #ifdef USE_THREADS
-void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events,
-    bool draw_frames=false, bool parallel=false, int tid=-1);
+void process_timeline_until_completion(
+    pm::Mwpm& mwpm,
+    const std::vector<uint64_t>& detection_events,
+#if ENABLE_DRAW_FLAGS
+    bool draw_frames = false,
+#endif
+    bool parallel = false,
+    int tid = -1);
 MatchingResult shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events);
 void shatter_blossoms_for_all_detection_events_and_extract_match_edges(
@@ -95,8 +127,10 @@ void decode_detection_events(
     pm::total_weight_int& weight,
     bool edge_correlations
 #ifdef USE_THREADS
-    , int shot = 0,
-    bool draw_frames = false
+    , int shot = 0
+#if ENABLE_DRAW_FLAGS
+    , bool draw_frames = false
+#endif
 #endif
 );
 
@@ -116,7 +150,11 @@ void decode_detection_events_to_edges_with_edge_correlations(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, std::vector<int64_t>& edges);
  
 #ifdef USE_THREADS
-void setup_output_dirs(bool draw_frames, bool parallel=false);
+void setup_output_dirs(
+#if ENABLE_DRAW_FLAGS
+    bool draw_frames,
+#endif
+    bool parallel = false);
 void output_detector_nodes(pm::Mwpm& mwpm, bool parallel=false);
 void output_detection_events(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, int shot, bool parallel=false);
 void output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, bool parallel=false);

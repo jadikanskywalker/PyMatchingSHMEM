@@ -76,7 +76,8 @@ class UserGraph {
 
 #ifdef USE_THREADS
     std::vector<int> node_part_id;
-    int num_partitions;
+    size_t num_partitions;
+    size_t num_rounds{ 0 };
     std::vector<std::vector<int>> virtual_boundaries;
 #endif
 

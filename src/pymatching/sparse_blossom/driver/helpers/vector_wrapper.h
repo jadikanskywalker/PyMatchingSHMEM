@@ -26,11 +26,26 @@ public:
         : arr_(nullptr), size_(0), capacity_(0) {};
     VectorWrapper(T *arr, std::size_t capacity)
         : arr_(arr), size_(0), capacity_(capacity) {}
+    VectorWrapper(T *arr, std::size_t capacity, T val)
+        : arr_(arr), size_(capacity), capacity_(capacity) {
+        for (size_t i = 0; i < capacity_; ++i) {
+            arr[i] = val;
+        }
+    }
     ~VectorWrapper() {
         destroy_elements(std::integral_constant<bool, std::is_trivially_destructible<T>::value>{});
     }
-    VectorWrapper(const VectorWrapper&) = delete;
-    VectorWrapper& operator=(const VectorWrapper&) = delete;
+    VectorWrapper(const VectorWrapper& other) noexcept
+        : arr_(other.arr_), size_(other.size_), capacity_(other.capacity_) {
+    }
+    VectorWrapper& operator=(const VectorWrapper& other) {
+        if (this != &other) {
+            arr_ = other.arr_;
+            size_ = other.size_;
+            capacity_ = other.capacity_;
+        }
+        return *this;
+    };
 
     VectorWrapper(VectorWrapper&& other) noexcept
         : arr_(other.arr_), size_(other.size_), capacity_(other.capacity_) {
@@ -38,9 +53,9 @@ public:
         other.size_ = 0;
         other.capacity_ = 0;
     }
+    
     VectorWrapper& operator=(VectorWrapper&& other) noexcept {
         if (this != &other) {
-            destroy_elements(std::integral_constant<bool, std::is_trivially_destructible<T>::value>{});
             arr_ = other.arr_;
             size_ = other.size_;
             capacity_ = other.capacity_;
@@ -49,6 +64,21 @@ public:
             other.capacity_ = 0;
         }
         return *this;
+    }
+
+    bool operator==(const VectorWrapper& other) const {
+        if (size_ != other.size_)
+            return false;
+
+        for (std::size_t i = 0; i < size_; ++i) {
+            if (!(arr_[i] == other.arr_[i]))
+                return false;
+        }
+        return true;
+    }
+
+    bool operator!=(const VectorWrapper& other) const {
+        return !(*this == other);
     }
 
     inline std::size_t size() const { return size_; };
@@ -97,6 +127,13 @@ public:
         *pos = data;
         size_++;
         return pos;
+    }
+
+    inline T* data() noexcept {
+        return arr_;
+    }
+    inline const T* data() const noexcept {
+        return arr_;
     }
 
 private:

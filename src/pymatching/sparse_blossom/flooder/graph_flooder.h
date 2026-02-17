@@ -76,7 +76,7 @@ struct GraphFlooder {
 
 #ifdef USE_THREADS
     const int rotating_buffer_idx{-1};
-    int current_shot = -1;
+    // int current_shot = -1;
     int vb_left, vb_right;
 #endif
 

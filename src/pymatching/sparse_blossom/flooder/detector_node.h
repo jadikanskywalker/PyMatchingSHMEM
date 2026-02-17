@@ -28,10 +28,6 @@
 #include "pymatching/sparse_blossom/config_parallel.h"
 #endif
 
-#ifdef USE_SHMEM
-#include "pymatching/sparse_blossom/flooder/helpers/vector_wrapper.h"
-#endif
-
 namespace pm {
 
 #ifdef USE_THREADS

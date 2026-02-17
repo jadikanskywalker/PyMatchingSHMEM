@@ -24,7 +24,6 @@
 
 #ifdef USE_SHMEM
 #include "pymatching/sparse_blossom/flooder/helpers/shmem_arena.h"
-#include "pymatching/sparse_blossom/flooder/helpers/vector_wrapper.h"
 #endif
 #ifdef USE_THREADS
 #include "pymatching/sparse_blossom/arena.h"
@@ -43,7 +42,6 @@ struct GraphFillRegion {
     /// If this is a top-level region (not a blossom child), this is the alternating tree that
     /// it is part of. Note that it may be a degenerate alternating tree with just a single
     /// graph fill region (this one).
-    pm::AltTreeNode* alt_tree_node;
     /// How much this region has grown since its creation (and whether it is currently growing).
     /// For graph fill regions starting from detection events, this is just the actual radius
     /// of the region. For graph fill regions starting from blossom-creation events, this is how
@@ -52,9 +50,10 @@ struct GraphFillRegion {
     pm::VaryingCT radius;
     /// Event tracker for shrink events. Handles ensuring at least, and ideally exactly, one event
     /// to look at the region is in the event queue.
+    pm::Match match;
+    pm::AltTreeNode* alt_tree_node;
     QueuedEventTracker shrink_event_tracker;
     /// If the region is matched, as opposed to growing/shrinking, this says what it is matched to.
-    pm::Match match;
 
 // #ifdef USE_SHMEM
 //     VectorWrapper<pm::RegionEdge> blossom_children;
@@ -128,6 +127,23 @@ inline void pm::GraphFillRegion::do_op_for_each_descendant_and_self(const Callab
         child.region->do_op_for_each_descendant_and_self(func);
     }
 }
+
+#ifdef USE_SHMEM
+struct GraphFillRegionSubstates {
+    GraphFillRegion* region;
+    GraphFillRegion* blossom_parent;
+    GraphFillRegion* blossom_parent_top;
+    pm::VaryingCT radius; 
+    pm::Match match;
+
+    GraphFillRegionSubstates(GraphFillRegion* region_)
+      : region(region_),
+        blossom_parent(region_->blossom_parent),
+        blossom_parent_top(region_->blossom_parent_top),
+        radius(region_->radius),
+        match(region_->match) {}
+};
+#endif
 
 }  // namespace pm
 
