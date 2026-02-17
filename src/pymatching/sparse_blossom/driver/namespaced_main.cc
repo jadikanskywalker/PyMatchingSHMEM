@@ -52,7 +52,9 @@ int main_predict(int argc, const char** argv) {
 #ifdef USE_THREADS
             ,
             "--rounds_per_partition",
+#if ENABLE_DRAW_FLAGS
             "--draw_frames",
+#endif
             "--use_threads",
 #endif
         },
@@ -74,7 +76,9 @@ int main_predict(int argc, const char** argv) {
 #ifdef USE_THREADS
     // ===============
     config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
+#if ENABLE_DRAW_FLAGS
     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
+#endif
     bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);
 // ===============
 #endif
@@ -97,10 +101,17 @@ int main_predict(int argc, const char** argv) {
         dem,
         num_buckets,
         enable_correlations,
-        enable_correlations,
-        draw_frames);
+        enable_correlations
+#if ENABLE_DRAW_FLAGS
+        , draw_frames
+#endif
+    );
     if (DEBUG) {
+#if ENABLE_DRAW_FLAGS
         pm::setup_output_dirs(draw_frames, use_threads);
+#else
+        pm::setup_output_dirs(use_threads);
+#endif
     }
 #else
     auto mwpm = pm::detector_error_model_to_mwpm(

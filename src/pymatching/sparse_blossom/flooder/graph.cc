@@ -232,4 +232,56 @@ void MatchingGraph::undo_reweights() {
     previous_weights.clear();
 }
 
+#ifdef USE_THREADS
+pm::SharedMatchingGraph::SharedMatchingGraph() = default;
+
+pm::SharedMatchingGraph::SharedMatchingGraph(
+    std::shared_ptr<pm::MatchingGraph> graph_ptr_,
+    std::vector<int> node_part_id_,
+    size_t num_partitions_,
+    size_t num_virtual_boundaries_,
+    size_t num_rounds_)
+: graph_ptr(graph_ptr_),
+    node_part_id(node_part_id_),
+    num_partitions(num_partitions_),
+    num_virtual_boundaries(num_virtual_boundaries_),
+    num_rounds(num_rounds_) {
+#ifdef USE_SHMEM
+    construct_partition_vb_bounds();
+#endif
+}
+
+#ifdef USE_SHMEM
+// Assumes that the first and last round are parts of a partition, not a virtual boundary
+void pm::SharedMatchingGraph::construct_partition_vb_bounds() {
+    if (num_partitions <= 0) {
+        throw std::invalid_argument("SharedMatchingGraph requires at least one partition.");
+    }
+    if (node_part_id.empty()) {
+        throw std::invalid_argument("SharedMatchingGraph requires node partition assignments.");
+    }
+    partition_bounds.resize(num_partitions);
+    vb_bounds.resize(num_virtual_boundaries);
+    partition_bounds[0].first = 0;
+    size_t partition_bounds_idx = 0;
+    size_t vb_bounds_idx = 0;
+    int last_part_id = node_part_id[0];
+    for (int i = 0; i < node_part_id.size(); ++i) {
+        if (node_part_id[i] == last_part_id) {
+            continue;
+        } else if (node_part_id[i] < 0) { // entering v_b, end of last p
+            partition_bounds[partition_bounds_idx].second = i-1;
+            vb_bounds[vb_bounds_idx].first = i;
+            last_part_id = node_part_id[i];
+        } else { // entering new p
+            partition_bounds[++partition_bounds_idx].first = i;
+            vb_bounds[vb_bounds_idx++].second = i-1;
+            last_part_id = node_part_id[i];
+        }
+    }
+    partition_bounds[partition_bounds_idx].second = node_part_id.size()-1;
+}
+#endif
+#endif
+
 }  // namespace pm

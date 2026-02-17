@@ -20,6 +20,10 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef USE_THREADS
+#include <memory>
+#endif
+
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
 #include "pymatching/sparse_blossom/flooder/detector_node.h"
 #include "pymatching/sparse_blossom/tracker/flood_check_event.h"
@@ -113,6 +117,33 @@ inline void apply_reweights(
 inline void MatchingGraph::reweight(std::vector<ImpliedWeight>& implied_weights) {
     apply_reweights(implied_weights, previous_weights);
 }
+
+#ifdef USE_THREADS
+struct SharedMatchingGraph {
+    std::shared_ptr<pm::MatchingGraph> graph_ptr;
+    std::vector<int> node_part_id;
+    size_t num_partitions;
+    size_t num_virtual_boundaries;
+    size_t num_rounds;
+
+#ifdef USE_SHMEM
+    std::vector<std::pair<size_t, size_t>> partition_bounds;
+    std::vector<std::pair<size_t, size_t>> vb_bounds;
+#endif
+
+    SharedMatchingGraph();
+    SharedMatchingGraph(
+        std::shared_ptr<pm::MatchingGraph> graph_ptr_,
+        std::vector<int> node_part_id_,
+        size_t num_partitions_,
+        size_t num_virtual_boundaries_,
+        size_t num_rounds_);
+
+#ifdef USE_SHMEM
+    void construct_partition_vb_bounds();
+#endif
+};
+#endif
 
 }  // namespace pm
 

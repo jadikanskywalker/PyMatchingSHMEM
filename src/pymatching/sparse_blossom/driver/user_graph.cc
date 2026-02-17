@@ -317,7 +317,7 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
         }
     }
 
-    return SharedMatchingGraph(matching_graph_ptr, node_part_id, num_partitions, virtual_boundaries.size());
+    return SharedMatchingGraph(matching_graph_ptr, node_part_id, num_partitions, virtual_boundaries.size(), num_rounds);
 }
 #endif
 
@@ -664,6 +664,7 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
                 p_or_vb = true; // partition
             }
             last_round = coors[round_coor];
+            num_rounds++;
         }
         // Assign to p or vb
         if (p_or_vb){
