@@ -59,7 +59,7 @@ fi
 # need to find d=21 lattice surgery circuit
 stim gen \
     --rounds=$rounds \
-    --distance=5 \
+    --distance=21 \
     --after_clifford_depolarization=0.001 \
     --code surface_code \
     --task rotated_memory_x \
