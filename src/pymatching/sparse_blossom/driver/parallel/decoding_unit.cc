@@ -20,6 +20,10 @@
 
 #include "pymatching/sparse_blossom/driver/user_graph.h"
 
+#define SHMEM_MAX_SYNC_STEPS 5
+#define SHMEM_SYNC_SUMMARY 0
+#define SHMEM_SYNC_RES 1
+
 pm::DecodingUnit::DecodingUnit(
     std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
     std::unique_ptr<stim::MeasureRecordWriter> writer,
@@ -71,7 +75,7 @@ pm::DecodingUnit::DecodingUnit(
     }
 #ifdef USE_SHMEM
     // --- Allocate sychronization & summary memory ---
-    atomics_ptr = static_cast<uint64_t*>(shmem_malloc(NUM_BUFFERS_PER_UNIT * 2 * sizeof(uint64_t)));
+    atomics_ptr = static_cast<uint64_t*>(shmem_malloc(NUM_BUFFERS_PER_UNIT * SHMEM_MAX_SYNC_STEPS * sizeof(uint64_t)));
     if (atomics_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate symmetric atomics buffer.");
     }
@@ -141,7 +145,7 @@ pm::DecodingUnit::DecodingUnit(
         regions_nelems_per_solver = 64;
     }
     regions_ptr = static_cast<GraphFillRegion*>(
-        shmem_malloc(regions_nelems_per_solver * num_threads * NUM_BUFFERS_PER_UNIT * sizeof(GraphFillRegion)));
+        shmem_malloc(regions_nelems_per_solver * (num_threads + 1) * NUM_BUFFERS_PER_UNIT * sizeof(GraphFillRegion))); // includes per-buffer buffer for other PE
     if (regions_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate symmetric region buffer.");
     }
@@ -263,7 +267,7 @@ void pm::DecodingUnit::build_solvers() {
                     idx
 #ifdef USE_SHMEM
                     ,
-                    regions_ptr + (idx * num_threads + t) * regions_nelems_per_solver,
+                    regions_ptr + (idx * (num_threads + 1) + t) * regions_nelems_per_solver,
                     regions_nelems_per_solver
 #endif
                     )));
@@ -294,11 +298,14 @@ void pm::DecodingUnit::solve_cross_process_fusion_and_get_next_shot(
         other_index = 0;
     }
     uint64_t* shot_status_base = shot_buffer->shot_container_status + shot_container_id*2;
-    uint64_t* shot_counter_base = shot_status_base + 1;
+    // uint64_t* shot_counter_base = shot_status_base + 1;
     // shmem_wait_until(shot_counter_base, SHMEM_CMP_EQ, shot_id);
-    shmem_barrier_all();
+    // shmem_barrier_all();
+    // shmem_wait_until(shot_status_base + SHMEM_SYNC_BEGIN, SHMEM_CMP_EQ, shot_id);
     // --- wait until PE ready ---
-    std::cout << "Cross PE Fusion: PE" << pid << " shot " << shot_id << std::endl << std::flush;
+    if (DEBUG) {
+        std::cout << "Cross PE Fusion: PE" << pid << " shot " << shot_id << std::endl << std::flush;
+    }
     // --- send fusion summary info ---
     FusionSummary* fusion_summary_base = fusion_summary_ptr + shot_container_id * 2 + my_index;
     new (fusion_summary_base) FusionSummary(
@@ -307,16 +314,16 @@ void pm::DecodingUnit::solve_cross_process_fusion_and_get_next_shot(
     // std::cout << "  PE" << pid << " putting FusionSummary(" << task->regions_matched_to_virtual_boundary.size() << ", "
     //           << regions_ptr + num_threads * NUM_BUFFERS_PER_UNIT + tid << ")\n"
     //           << std::flush;
-    shmem_ctx_putmem_signal(summary_ctx, fusion_summary_base, fusion_summary_base, sizeof(FusionSummary), shot_status_base, PUT_SUMMARY, SHMEM_SIGNAL_SET, other_pid);
+    shmem_ctx_putmem_signal(summary_ctx, fusion_summary_base, fusion_summary_base, sizeof(FusionSummary), shot_status_base + SHMEM_SYNC_SUMMARY, shot_id, SHMEM_SIGNAL_SET, other_pid);
     // --- signal ready ---
-    shmem_signal_wait_until(shot_status_base, SHMEM_CMP_EQ, PUT_SUMMARY);
+    shmem_signal_wait_until(shot_status_base + SHMEM_SYNC_SUMMARY, SHMEM_CMP_EQ, shot_id);
     // std::cout << "  PE" << pid << " got summary\n" << std::flush;
     // --- check summaries ---
     auto& my_summary = fusion_summary_ptr[my_index];
     auto& other_summary = fusion_summary_ptr[other_index];
     if (my_summary.regions_matched_to_vb_size == 0 && other_summary.regions_matched_to_vb_size == 0 &&
         hitsref.size() == 0) {
-        if (pid == lower_pid) {
+        if (DEBUG && pid == lower_pid) {
             std::cout << "  trivial case " << shot_id << "\n" << std::flush;
         }
         trivial_ctr++;
@@ -351,22 +358,27 @@ void pm::DecodingUnit::solve_cross_process_fusion_and_get_next_shot(
         shot.res.weight = bit_packed_res.weight + solver.flooder.negative_weight_sum;
     }
     uint32_t* obs_crossed_base = obs_crossed_ptr + shot_container_id * obs_crossed_nelems_per_buffer;
-    std::cout << "  PE" << pid << " res: " << *obs_crossed_base << std::endl << std::flush;
+    if (DEBUG) {
+        std::cout << "  PE" << pid << " res: " << *obs_crossed_base << std::endl << std::flush;
+    }
     if (pid != lower_pid) {
         shmem_ctx_uint32_atomic_xor(summary_ctx, obs_crossed_base, *obs_crossed_base, lower_pid);
     }
-#if ENABLE_DRAW_FRAMES 
+#if ENABLE_DRAW_FRAMES
     else if (draw_frames) {
         std::filesystem::create_directory("out_parallel/frames/" + std::to_string(shot_id+1));
     }
 #endif
-    shmem_barrier_all();
-    if (pid == lower_pid) {
+    shmem_ctx_uint64_atomic_set(summary_ctx, shot_status_base + SHMEM_SYNC_RES, shot_id, other_pid);
+    shmem_wait_until(shot_status_base + SHMEM_SYNC_RES, SHMEM_CMP_EQ, shot_id);
+    // shmem_barrier_all();
+
+    if (DEBUG && pid == lower_pid) {
+
         std::cout << "  PE" << pid << " res is " << *obs_crossed_base << std::endl << std::flush;
     }
     shot_buffer->write_result_and_get_next_shot(shot_container_id, graph.node_part_id, pid == lower_pid);
-    shmem_barrier_all();
-    *shot_status_base = READY;
+
     // if (pid == lower_pid) { // wait and write
         // shmem_wait_until(shot_status_base, SHMEM_CMP_EQ, PUT_RESULT);
         // std::cout << "  PE" << pid << " got results\n" << std::flush;
