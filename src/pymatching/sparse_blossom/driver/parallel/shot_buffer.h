@@ -34,6 +34,9 @@ enum ShotStatus : uint64_t { READY, PUT_SUMMARY, PUT_RESULT, WROTE_RESULT };
 // ShotContainer isolates everything needed to solve
 // a single shot in parallel.
 struct ShotContainer {
+#ifdef USE_SHMEM
+    uint64_t* current_buffer_round_shm;
+#endif
     std::atomic<int> current_buffer_round{-1};  // Used for idle thread spin-wait until new shot read
 
     stim::SparseShot sparse_shot;
@@ -44,10 +47,13 @@ struct ShotContainer {
     int num_observables;
     pm::ExtendedMatchingResult res;
 
+    std::vector<bool> i_solved_p;
+    std::vector<bool> i_solved_vb;
     std::vector<Task> tasks;  // Tasks handle dynamic fusion tree synchonization
 
     ShotContainer(
 #ifdef USE_SHMEM
+        uint64_t* current_buffer_round_ptr,
         uint8_t *obs_crossed_ptr,
 #endif
         int num_partitions, int num_virtual_boundaries, int num_observables);
@@ -69,10 +75,10 @@ struct ShotBuffer {
 
     std::vector<ShotContainer> buffer;
 
-#ifdef USE_SHMEM
+// #ifdef USE_SHMEM
     // Symmetric memory pointers
-    uint64_t* shot_container_status;
-#endif
+    // uint64_t* shot_container_status;
+// #endif
     int next_shot_container_id{ 0 };
     int last_shot_container_id{ -1 };
 

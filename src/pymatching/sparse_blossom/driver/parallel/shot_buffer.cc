@@ -27,12 +27,18 @@ namespace pm {
 
 ShotContainer::ShotContainer(
 #ifdef USE_SHMEM
+    uint64_t* current_buffer_round_ptr,
     uint8_t *obs_crossed_ptr,
 #endif
     int num_partitions, int num_virtual_boundaries, int num_observables_in)
     : partition_hits(num_partitions),
       virtual_boundary_hits(num_virtual_boundaries),
       num_observables(num_observables_in),
+#ifdef USE_SHMEM
+      current_buffer_round_shm(current_buffer_round_ptr),
+      i_solved_p(num_partitions, false),
+      i_solved_vb(num_virtual_boundaries, false),
+#endif
       res(
 #ifdef USE_SHMEM
         obs_crossed_ptr,
@@ -83,17 +89,18 @@ ShotBuffer::ShotBuffer(
     int num_observables)
     : reader(std::move(reader_in)), writer(std::move(writer_in))
 {
-#ifdef USE_SHMEM
-    shot_container_status = atomics_ptr;
-    for (size_t i = 0; i < 2 * NUM_BUFFERS_PER_UNIT; i += 2) {
-        shot_container_status[i] = READY;
-        shot_container_status[i+1] = 0;
-    }
-#endif
+// #ifdef USE_SHMEM
+//     shot_container_status = atomics_ptr;
+//     for (size_t i = 0; i < 2*NUM_BUFFERS_PER_UNIT; i+=2) {
+//         shot_container_status[i] = 0;
+//         shot_container_status[i+1] = 0;
+//     }
+// #endif
     buffer.reserve(static_cast<size_t>(NUM_BUFFERS_PER_UNIT));
     for (size_t i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
         buffer.emplace_back(
 #ifdef USE_SHMEM
+            atomics_ptr + i,
             obs_crossed_ptr + i * obs_crossed_stride,
 #endif
             num_partitions, num_virtual_boundaries, num_observables);

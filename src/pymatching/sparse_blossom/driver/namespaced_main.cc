@@ -64,7 +64,29 @@ int main_predict(int argc, const char** argv) {
         argv);
 
     FILE* shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
-    FILE* predictions_out = stim::find_open_file_argument("--out", stdout, "wb", argc, argv);
+    FILE* predictions_out = nullptr;
+#ifdef USE_SHMEM
+    const char* out_fn_base_const = stim::find_argument("--out", argc, argv);
+    std::string out_fn_base = out_fn_base_const ? out_fn_base_const : "";
+    if (!out_fn_base.empty() && out_fn_base != "stdout") {
+        int pid = shmem_my_pe();
+        std::string filename = out_fn_base;
+        size_t last_dot = filename.find_last_of(".");
+        if (last_dot == std::string::npos) {
+            filename += "_pe" + std::to_string(pid);
+        } else {
+            filename.insert(last_dot, "_pe" + std::to_string(pid));
+        }
+        predictions_out = fopen(filename.c_str(), "wb");
+        if (predictions_out == nullptr) {
+             throw std::invalid_argument("Failed to open " + filename);
+        }
+    } else {
+        predictions_out = stim::find_open_file_argument("--out", stdout, "wb", argc, argv);
+    }
+#else
+    predictions_out = stim::find_open_file_argument("--out", stdout, "wb", argc, argv);
+#endif
     FILE* dem_file = stim::find_open_file_argument("--dem", nullptr, "r", argc, argv);
     stim::FileFormatData shots_in_format =
         stim::find_enum_argument("--in_format", "b8", stim::format_name_to_enum_map(), argc, argv);
