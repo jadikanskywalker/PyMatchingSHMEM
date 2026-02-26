@@ -39,26 +39,21 @@ struct GraphFillRegion {
     /// The topmost fill region that contains this region. This field must be kept up to date as
     /// the region structure changes.
     GraphFillRegion* blossom_parent_top;
-    /// If this is a top-level region (not a blossom child), this is the alternating tree that
-    /// it is part of. Note that it may be a degenerate alternating tree with just a single
-    /// graph fill region (this one).
     /// How much this region has grown since its creation (and whether it is currently growing).
     /// For graph fill regions starting from detection events, this is just the actual radius
     /// of the region. For graph fill regions starting from blossom-creation events, this is how
     /// much the blossom has grown since it was created (it's the *extra* radius, not the total
     /// radius starting from the detection events).
     pm::VaryingCT radius;
+    /// If the region is matched, as opposed to growing/shrinking, this says what it is matched to.
+    pm::Match match;
+    /// If this is a top-level region (not a blossom child), this is the alternating tree that
+    /// it is part of. Note that it may be a degenerate alternating tree with just a single
+    /// graph fill region (this one).
+    pm::AltTreeNode* alt_tree_node;
     /// Event tracker for shrink events. Handles ensuring at least, and ideally exactly, one event
     /// to look at the region is in the event queue.
-    pm::Match match;
-    pm::AltTreeNode* alt_tree_node;
     QueuedEventTracker shrink_event_tracker;
-    /// If the region is matched, as opposed to growing/shrinking, this says what it is matched to.
-
-// #ifdef USE_SHMEM
-//     VectorWrapper<pm::RegionEdge> blossom_children;
-//     VectorWrapper<pm::DetectorNode*> shell_area;
-// #else
     /// If this region is a blossom, these are its child regions along with the cyclic paths
     /// between the children.
     std::vector<pm::RegionEdge> blossom_children;
@@ -66,7 +61,6 @@ struct GraphFillRegion {
     /// the nodes indirectly owned by this region that are owned by the blossom children of this
     /// region (or their children or etc).
     std::vector<pm::DetectorNode*> shell_area;
-// #endif
 
     void cleanup_shell_area();
 

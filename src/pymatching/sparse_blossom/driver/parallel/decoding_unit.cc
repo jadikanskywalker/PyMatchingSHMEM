@@ -143,11 +143,13 @@ pm::DecodingUnit::DecodingUnit(
         throw std::invalid_argument("The number of threads should be >= half the number of partitions.");
     }
     num_threads = graph.num_partitions / n_pes;  // Current TEST Case for dividing across two PE's
-    num_partition_units = 1;
+    num_partition_units = 1; // FIX THIS??
+    num_solvers_per_buffer = graph.num_partitions;
 #else
     num_threads =
         (max_threads > graph.num_partitions) ? graph.num_partitions : max_threads;  // max num_partitions threads
     num_partition_units = graph.num_partitions / num_threads + (graph.num_partitions % num_threads > 0);
+    num_solvers_per_buffer = num_threads*num_paritions_units;
 #endif
     std::cout << "graph.num_partitions = " << graph.num_partitions << "; num_threads: " << num_threads << std::endl;
     omp_set_num_threads(num_threads);
@@ -157,7 +159,7 @@ pm::DecodingUnit::DecodingUnit(
         std::cout << "DEBUG: Allocating Regions\n" << std::flush;
     }
     regions_ptr = static_cast<GraphFillRegion*>(
-        shmem_malloc(regions_nelems_per_solver * graph.num_partitions * NUM_BUFFERS_PER_UNIT * sizeof(GraphFillRegion)));
+        shmem_malloc(regions_nelems_per_solver * num_solvers_per_buffer * NUM_BUFFERS_PER_UNIT * sizeof(GraphFillRegion)));
     if (regions_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate symmetric region buffer.");
     }
@@ -315,23 +317,19 @@ void pm::DecodingUnit::build_solvers() {
         throw std::invalid_argument("Correlations and SearchFlooder are not yet supported with threads");
     }
     solvers.clear();
-    solvers.reserve(static_cast<size_t>(num_threads * NUM_BUFFERS_PER_UNIT));
-    for (int idx = 0; idx < NUM_BUFFERS_PER_UNIT; ++idx) {
-        for (int t = 0; t < 
-#ifdef USE_SHMEM
-              graph.num_partitions; // solver per partition
-#else
-              num_threads * num_partition_units;
-#endif
-              ++t) {
+    solvers.reserve(static_cast<size_t>(num_solvers_per_buffer * NUM_BUFFERS_PER_UNIT));
+    std::cout << "num_solvers_per_buffer: " << num_solvers_per_buffer << std::endl << std::flush;
+    for (size_t idx = 0; idx < NUM_BUFFERS_PER_UNIT; ++idx) {
+        for (size_t t = 0; t < num_solvers_per_buffer; ++t) {
             // Each solver shares the same MatchingGraph via shared_ptr.
+            std::cout << "solver: " << idx*num_solvers_per_buffer + t << "  " << get_regions_ptr(idx, t) << std::endl << std::flush;
             solvers.emplace_back(
                 std::make_shared<pm::Mwpm>(pm::GraphFlooder(
                     graph.graph_ptr,
                     idx
 #ifdef USE_SHMEM
                     ,
-                    get_regions_ptr(idx, my_partitions[t]),
+                    get_regions_ptr(idx, t),
                     regions_nelems_per_solver
 #endif
                     )));
@@ -590,8 +588,13 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, Task
                     GraphFillRegion* r = regions_base + index;
                     t_out << "  deleting " << r << "  index " << r - regions_base << ", " << r - regions_ptr << std::endl << std::flush;
                     r->cleanup_shell_area();
-                    t_out << "  cleaned shell area" << std::endl << std::flush;
-                    r->owner_arena->del(r);
+                    t_out << "  cleaned shell area" << std::endl 
+                          << "  r->owner_arena: " << r->owner_arena  << "  " << &solver.flooder.region_arena << std::endl << std::flush;
+                    if (r->owner_arena) {
+                        r->owner_arena->del(r);
+                    } else {
+                        throw std::invalid_argument("send_solution_to_remote_pe (rank " + std::to_string(pid) + "): r->owner_arena nullptr");
+                    }
                     t_out << "  deleted r" << std::endl << std::flush;
                 }
             }
@@ -667,6 +670,7 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, Tas
                         new (&r->blossom_children) std::vector<RegionEdge>();
                         new (&r->shell_area) std::vector<DetectorNode*>();
                         r->shrink_event_tracker.clear();
+                        r->alt_tree_node = nullptr;
                         if (r->blossom_parent)
                             r->blossom_parent = (GraphFillRegion*)((char*)r->blossom_parent - (char*)remote_regions_ptr_base + (char*)regions_ptr);
                         if (r->blossom_parent_top)
