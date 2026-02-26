@@ -589,7 +589,9 @@ void Mwpm::shatter_blossom_and_extract_match_edges(GraphFillRegion *region, std:
 void Mwpm::create_detection_event(DetectorNode *node) {
     auto region = flooder.region_arena.alloc_default_constructed();
 #ifdef USE_THREADS
+    // std::cout << "constructed " << region << " owner_arena=" << region->owner_arena << std::endl << std::flush;
     region->owner_arena = &flooder.region_arena;
+    // std::cout << "  set " << region << " owner_arena=" << region->owner_arena << std::endl << std::flush;
     region->rotating_buffer_idx = flooder.rotating_buffer_idx;
 #endif
     auto alt_tree_node = node_arena.alloc_unconstructed();

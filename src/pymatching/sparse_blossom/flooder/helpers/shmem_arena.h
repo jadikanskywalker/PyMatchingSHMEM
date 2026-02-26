@@ -46,6 +46,7 @@ struct SHMEMArena {
     SHMEMArena(const SHMEMArena&) = delete;
     SHMEMArena(SHMEMArena&& other)
         : shmem_buffer(other.shmem_buffer),
+          shmem_bitmap(std::move(other.shmem_bitmap)),
           shmem_buffer_size(other.shmem_buffer_size),
           allocated(std::move(other.allocated)),
           available(std::move(other.available)) {
@@ -63,6 +64,7 @@ struct SHMEMArena {
             }
         }
         if (result == nullptr) {  // fall back to heap memory
+            std::cout << "ERROR: Fallback to heap" << std::endl;
             if (available.empty()) {
                 T* p = (T*)malloc(sizeof(T));
                 allocated.push_back(p);
@@ -82,8 +84,8 @@ struct SHMEMArena {
 
     void del(T* p) {
         p->~T();
-        size_t idx = p - shmem_buffer;
-        if (idx >= 0 && idx < shmem_buffer_size) {
+        if (p >= shmem_buffer && p < shmem_buffer + shmem_buffer_size) {
+            size_t idx = p - shmem_buffer;
             shmem_bitmap[idx/64] |= (1ULL << (idx%64));  // set bit to 1 (free)
         } else {
             available.push_back(p);

@@ -24,7 +24,7 @@ GraphFillRegion::GraphFillRegion()
       blossom_parent_top(this),
       alt_tree_node(nullptr),
       radius((0 << 2) + 1),
-    shrink_event_tracker()
+      shrink_event_tracker()
 #ifdef USE_THREADS
     , owner_arena(nullptr)
     , rotating_buffer_idx(-1)
