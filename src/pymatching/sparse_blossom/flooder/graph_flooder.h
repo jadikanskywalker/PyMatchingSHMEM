@@ -78,6 +78,9 @@ struct GraphFlooder {
     const int rotating_buffer_idx{-1};
     // int current_shot = -1;
     int vb_left, vb_right;
+#ifdef ENABLE_DRAW_FLAGS
+    const std::vector<int>* node_part_id_ptr = nullptr;
+#endif
 #endif
 
     GraphFlooder();
@@ -88,10 +91,18 @@ struct GraphFlooder {
         std::shared_ptr<MatchingGraph> graph,
         int solver_set_idx,
         GraphFillRegion* shmem_buffer,
-        size_t shmem_buffer_size);
+        size_t shmem_buffer_size
+#ifdef ENABLE_DRAW_FLAGS
+        , const std::vector<int>* node_part_id = nullptr
+#endif
+    );
 #elif defined(USE_THREADS)
     // Construct with a shared graph pointer (shared across solvers)
-    explicit GraphFlooder(std::shared_ptr<MatchingGraph> graph, int solver_set_idx);
+    explicit GraphFlooder(std::shared_ptr<MatchingGraph> graph, int solver_set_idx
+#ifdef ENABLE_DRAW_FLAGS
+        , const std::vector<int>* node_part_id = nullptr
+#endif
+    );
 #endif
     explicit GraphFlooder(MatchingGraph graph);
     GraphFlooder(GraphFlooder&&) noexcept;

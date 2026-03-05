@@ -72,7 +72,6 @@ struct DecodingUnit {
 
 #ifdef USE_SHMEM
     int pid;
-    // int other_pid; // for simple two PE impl.
 
     // Symmetric memory
     DetectorNodeEphemeralFields* node_ephemeral_fields_ptr{ nullptr };
@@ -82,7 +81,7 @@ struct DecodingUnit {
     uint64_t* atomics_ptr{ nullptr };
     uint64_t* task_status_ptr{ nullptr };
     FusionSummary* task_fusion_summary_ptr { nullptr };
-    uint32_t* obs_crossed_ptr{ nullptr };
+    // uint32_t* obs_crossed_ptr{ nullptr };
 
     // Info used for symmetric memory accesses
     size_t nodes_nelems_per_buffer;
@@ -90,8 +89,7 @@ struct DecodingUnit {
     size_t child_edges_nelems_per_solver;
     size_t task_fusion_summary_size_per_task;
     size_t regions_matched_to_vb_nelems;
-    size_t obs_crossed_nelems_per_buffer;
-    GraphFillRegion* regions_base_other_pe{ nullptr }; // base for region SHMEMArena on other PE
+    // size_t obs_crossed_nelems_per_buffer;
 
     inline FusionSummary* get_fusion_summary_ptr(size_t shot_container_id, int partition_id) {
         return reinterpret_cast<FusionSummary*>(
@@ -130,7 +128,11 @@ struct DecodingUnit {
 
     ~DecodingUnit();
 
-    void build_tasks_for_round_partitioning(size_t n_pes);
+    void build_tasks_for_round_partitioning(
+#ifdef USE_SHMEM
+        size_t n_pes
+#endif
+    );
 
     void build_solvers();
 
@@ -149,9 +151,10 @@ struct DecodingUnit {
 #ifdef USE_SHMEM
     void send_solution_to_remote_pe(size_t shot_container_id, Task &task, std::ofstream &t_out);
     bool get_solution_from_remote_pe(size_t shot_container_id, Task &task, std::ofstream &t_out, std::vector<uint64_t>& hitsref); // returns whether solving is necessary
-    void fuse_results_across_pes(size_t shot_container_id);
+    // void fuse_results_across_pes(size_t shot_container_id);
     void solve_cross_process_fusion_and_get_next_shot(size_t shot_container_id, Task* t, size_t tid, size_t num_threads, size_t solver_id, size_t shot_id);
 #endif
+
     void write_result_and_get_next_shot(int shot_container_id);
 
     void decode_shots();

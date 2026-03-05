@@ -39,21 +39,35 @@ GraphFlooder::GraphFlooder()
 
 #ifdef USE_SHMEM
 GraphFlooder::GraphFlooder(
-    std::shared_ptr<MatchingGraph> graph, int solver_set_idx, GraphFillRegion* shmem_buffer, size_t shmem_buffer_size)
-    : graph_ptr(graph),
+    std::shared_ptr<MatchingGraph> graph, int solver_set_idx, GraphFillRegion* shmem_buffer, size_t shmem_buffer_size
+#ifdef ENABLE_DRAW_FLAGS
+    , const std::vector<int>* node_part_id
+#endif
+    ) : graph_ptr(graph),
       graph(*graph_ptr),
       negative_weight_obs_mask(0),
       negative_weight_sum(0),
       rotating_buffer_idx(solver_set_idx),
-      region_arena(shmem_buffer, shmem_buffer_size) {
+      region_arena(shmem_buffer, shmem_buffer_size)
+#ifdef ENABLE_DRAW_FLAGS
+      , node_part_id_ptr(node_part_id)
+#endif
+    {
 }
 #else
-GraphFlooder::GraphFlooder(std::shared_ptr<MatchingGraph> graph, int solver_set_idx)
-    : graph_ptr(graph),
+GraphFlooder::GraphFlooder(std::shared_ptr<MatchingGraph> graph, int solver_set_idx
+#ifdef ENABLE_DRAW_FLAGS
+    , const std::vector<int>* node_part_id
+#endif
+    ) : graph_ptr(graph),
       graph(*graph_ptr),
       negative_weight_obs_mask(0),
       negative_weight_sum(0),
-      rotating_buffer_idx(solver_set_idx) {
+      rotating_buffer_idx(solver_set_idx)
+#ifdef ENABLE_DRAW_FLAGS
+      , node_part_id_ptr(node_part_id)
+#endif
+    {
 }
 #endif
 
@@ -74,7 +88,11 @@ GraphFlooder::GraphFlooder(GraphFlooder&& flooder) noexcept
       negative_weight_observables(std::move(flooder.negative_weight_observables)),
       negative_weight_obs_mask(flooder.negative_weight_obs_mask),
       negative_weight_sum(flooder.negative_weight_sum),
-      rotating_buffer_idx(flooder.rotating_buffer_idx) {
+      rotating_buffer_idx(flooder.rotating_buffer_idx)
+#ifdef ENABLE_DRAW_FLAGS
+      , node_part_id_ptr(flooder.node_part_id_ptr)
+#endif
+      {
 }
 // ===============
 #else

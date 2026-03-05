@@ -113,6 +113,17 @@ struct StateHelper {
     std::ostream &out;
 
 #ifdef USE_THREADS
+#ifdef ENABLE_DRAW_FLAGS
+    bool should_include_node(size_t k) const {
+        if (mwpm.flooder.node_part_id_ptr == nullptr) {
+            std::cout << "should_include_node   its nullptr" << std::endl << std::flush;
+            return true;
+        }
+        int part_id = (*mwpm.flooder.node_part_id_ptr)[k];
+        if (part_id < 0) part_id = -(part_id + 1);
+        return part_id > mwpm.flooder.vb_left && part_id <= mwpm.flooder.vb_right;
+    }
+#endif
     inline const DetectorNodeEphemeralFields &node_state(const DetectorNode &node) const {
         return node.state(mwpm.flooder.rotating_buffer_idx);
     }
@@ -246,6 +257,11 @@ struct StateHelper {
     void draw_detector_graph_edges() {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
+#ifdef USE_THREADS
+#ifdef ENABLE_DRAW_FLAGS
+            if (!should_include_node(k)) continue;
+#endif
+#endif
             for (const auto *n2_ptr : n.neighbors) {
                 auto nc = neighbor_coords(n, n2_ptr);
                 if (n2_ptr != nullptr) {
@@ -265,6 +281,11 @@ struct StateHelper {
     void draw_unexcited_detector_nodes() {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
+#ifdef USE_THREADS
+#ifdef ENABLE_DRAW_FLAGS
+            if (!should_include_node(k)) continue;
+#endif
+#endif
             if (reached_from_source(n) != &n) {
                 out << " <circle cx=\"" << coords[k].first << "\" cy=\"" << coords[k].second << "\" r=\"" << 3
                     << "\" stroke=\"none"
@@ -278,7 +299,9 @@ struct StateHelper {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
 #ifdef USE_THREADS
-            if (n.vb >= 0 && (n.vb <= mwpm.flooder.vb_left || n.vb >= mwpm.flooder.vb_right)) continue;
+#ifdef ENABLE_DRAW_FLAGS
+            if (!should_include_node(k)) continue;
+#endif
 #endif
             GraphFillRegion *r = region_that_arrived(n);
             while (r != nullptr) {
@@ -302,6 +325,11 @@ struct StateHelper {
     void draw_detection_events() {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
+#ifdef USE_THREADS
+#ifdef ENABLE_DRAW_FLAGS
+            if (!should_include_node(k)) continue;
+#endif
+#endif
             if (reached_from_source(n) == &n) {
                 out << " <circle cx=\"" << coords[k].first << "\" cy=\"" << coords[k].second << "\" r=\"" << 3
                     << "\" stroke=\"none"
@@ -314,8 +342,9 @@ struct StateHelper {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
 #ifdef USE_THREADS
-            if (n.vb >= 0 && (n.vb <= mwpm.flooder.vb_left || n.vb >= mwpm.flooder.vb_right))
-                continue;
+#ifdef ENABLE_DRAW_FLAGS
+            if (!should_include_node(k)) continue;
+#endif
 #endif
             if (region_that_arrived_top(n) == nullptr) {
                 continue;

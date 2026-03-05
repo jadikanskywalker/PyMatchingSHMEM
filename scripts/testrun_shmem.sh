@@ -59,8 +59,8 @@ fi
 # need to find d=21 lattice surgery circuit
 stim gen \
     --rounds=$rounds \
-    --distance=21 \
-    --after_clifford_depolarization=0.001 \
+    --distance=5 \
+    --after_clifford_depolarization=0.01 \
     --code surface_code \
     --task rotated_memory_x \
     > circuit.stim
@@ -128,6 +128,8 @@ oshrun  \
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
 echo "SHMEM run completed in $parallel_time seconds."
+
+python3 ../scripts/combine_results.py predicted_obs_flips__shmem.01 2
 
 # Check work
 echo SHMEM
