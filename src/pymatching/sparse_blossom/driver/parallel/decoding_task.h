@@ -48,10 +48,10 @@ struct Task {
     uint64_t* signal_shm{ nullptr };
 #endif
 
-    const int task_id;
     // id of partition to solve or virtual boundary to fuse
     const int part;
     const bool is_fusion;
+    const int vb_left, vb_right;  // Assumes round-based partitioning
 
 #ifdef USE_SHMEM
     const size_t partition_assigned_pe{ 0 };
@@ -61,8 +61,6 @@ struct Task {
     bool iamleft;
 #endif
 
-    const int vb_left, vb_right;  // Assumes round-based partitioning
-
     uint64_t child_bit;
     Task* left_child{nullptr};
     Task* right_child{nullptr};
@@ -71,13 +69,12 @@ struct Task {
     std::vector<pm::GraphFillRegion*> regions_to_unmatch; // built from fusion children, unmatched at beginning
     std::vector<pm::GraphFillRegion*> regions_matched_to_virtual_boundary; // saved while solving
 
-    Task(int task_id, int partition
+    Task(int partition
 #ifdef USE_SHMEM
         , size_t assigned_pe
 #endif
     )
-        : task_id(task_id),
-          part(partition),
+        : part(partition),
           is_fusion(false),
 #ifdef USE_SHMEM
           partition_assigned_pe(assigned_pe),
@@ -87,7 +84,7 @@ struct Task {
     {
         status.store(-1, std::memory_order_release);
     }
-    Task(int task_id, int vb, Task* left_child, Task* right_child
+    Task(int vb, Task* left_child, Task* right_child
 #ifdef USE_SHMEM
         , uint64_t* status_ptr,
         uint64_t* signal_ptr
@@ -97,7 +94,6 @@ struct Task {
         status_shm(status_ptr),
         signal_shm(signal_ptr),
 #endif
-        task_id(task_id),
         part(vb),
         is_fusion(true),
 #ifdef USE_SHMEM
@@ -127,8 +123,7 @@ struct Task {
     Task(const Task&) = delete;
     Task& operator=(const Task&) = delete;
     Task(Task&& other) noexcept
-        : task_id(other.task_id),
-          part(other.part),
+        : part(other.part),
           is_fusion(other.is_fusion),
 #ifdef USE_SHMEM
           status_shm(other.status_shm),
@@ -198,7 +193,7 @@ struct Task {
             if (is_cross_pe_fusion) {
                 shmem_uint64_atomic_set(status_shm, 0, left_pid);
                 shmem_uint64_atomic_set(signal_shm, 0, my_pid);
-                shmem_quiet();
+                // shmem_quiet();
             } else {
                 status.store(0, std::memory_order_release);
             }
@@ -221,7 +216,6 @@ struct Task {
         int old;
 #ifdef USE_SHMEM
         if (parent->is_cross_pe_fusion) {
-            std::cout << "parent->status_shm: " << parent->status_shm << "  child_bit: " << child_bit << "  parent->left_pid: " << parent->left_pid << std::endl << std::flush;
             old = shmem_uint64_atomic_fetch_or(parent->status_shm, child_bit, parent->left_pid);
         } else {
 #endif

@@ -54,7 +54,7 @@ struct ShotContainer {
     ShotContainer(
 #ifdef USE_SHMEM
         uint64_t* current_buffer_round_ptr,
-        uint8_t *obs_crossed_ptr,
+        // uint8_t *obs_crossed_ptr,
 #endif
         int num_partitions, int num_virtual_boundaries, int num_observables);
 
@@ -89,8 +89,8 @@ struct ShotBuffer {
     ShotBuffer(
 #ifdef USE_SHMEM
         uint64_t* atomics_ptr,
-        uint8_t* obs_crossed_ptr,
-        size_t obs_crossed_stride,
+        // uint8_t* obs_crossed_ptr,
+        // size_t obs_crossed_stride,
 #endif
         std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
         std::unique_ptr<stim::MeasureRecordWriter> writer,

@@ -74,18 +74,30 @@ if $build_circuit; then
         --out_format b8
 
     # rerun serial for new circuit
-    start_serial=$(date +%s)
-    $serial_build predict \
-        --dem error_model.dem \
-        --in detection_events.b8 \
-        --in_format b8 \
-        --out predicted_obs_flips.01 \
-        --out_format 01 \
-        > log_0.out
-    end_serial=$(date +%s)
-    serial_time=$((end_serial - start_serial))
-    echo "0: $serial_time seconds"
+    # start_serial=$(date +%s)
+    # $serial_build predict \
+    #     --dem error_model.dem \
+    #     --in detection_events.b8 \
+    #     --in_format b8 \
+    #     --out predicted_obs_flips.01 \
+    #     --out_format 01 \
+    #     > log_0.out
+    # end_serial=$(date +%s)
+    # serial_time=$((end_serial - start_serial))
+    # echo "0: $serial_time seconds"
 fi
+
+start_serial=$(date +%s)
+$serial_build predict \
+    --dem error_model.dem \
+    --in detection_events.b8 \
+    --in_format b8 \
+    --out predicted_obs_flips.01 \
+    --out_format 01 \
+    > log_0.out
+end_serial=$(date +%s)
+serial_time=$((end_serial - start_serial))
+echo "0: $serial_time seconds"
 
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close

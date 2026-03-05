@@ -79,8 +79,8 @@ void ShotContainer::clear() {
 ShotBuffer::ShotBuffer(
 #ifdef USE_SHMEM
     uint64_t* atomics_ptr,
-    uint8_t* obs_crossed_ptr,
-    size_t obs_crossed_stride,
+    // uint8_t* obs_crossed_ptr,
+    // size_t obs_crossed_stride,
 #endif
     std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader_in,
     std::unique_ptr<stim::MeasureRecordWriter> writer_in,
