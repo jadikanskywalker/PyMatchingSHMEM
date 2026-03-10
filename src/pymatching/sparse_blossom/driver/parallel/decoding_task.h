@@ -30,7 +30,37 @@ class GraphFillRegion;
 
 enum Status { BUSY, FREE };
 
-struct Task {
+struct TaskBase {
+    int part;
+    int vb_left;
+    int vb_right;
+    bool is_fusion;
+
+    std::vector<pm::GraphFillRegion*> regions_to_unmatch;
+    std::vector<pm::GraphFillRegion*> regions_matched_to_virtual_boundary;
+
+    TaskBase(int part, int vb_left, int vb_right, bool is_fusion) 
+        : part(part), vb_left(vb_left), vb_right(vb_right), is_fusion(is_fusion) {}
+
+    virtual ~TaskBase() = default;
+
+    // TaskBase(const TaskBase&) = delete;
+    // TaskBase& operator=(const TaskBase&) = delete;
+
+    // TaskBase(TaskBase&& other) noexcept 
+    //     : part(other.part), vb_left(other.vb_left), vb_right(other.vb_right), is_fusion(other.is_fusion),
+    //       regions_to_unmatch(std::move(other.regions_to_unmatch)),
+    //       regions_matched_to_virtual_boundary(std::move(other.regions_matched_to_virtual_boundary))
+    // {}
+
+    // TaskBase& operator=(TaskBase&& other) noexcept {
+    //     regions_to_unmatch = std::move(other.regions_to_unmatch);
+    //     regions_matched_to_virtual_boundary = std::move(other.regions_matched_to_virtual_boundary);
+    //     return *this;
+    // }
+};
+
+struct Task : public TaskBase {
    private:
     // for partition solves,
     //    status = id of last shot for which task was claimed
@@ -43,67 +73,21 @@ struct Task {
     std::atomic<int> status{0};
 
    public:
-#ifdef USE_SHMEM
-    uint64_t* status_shm{ nullptr };
-    uint64_t* signal_shm{ nullptr };
-#endif
-
-    // id of partition to solve or virtual boundary to fuse
-    const int part;
-    const bool is_fusion;
-    const int vb_left, vb_right;  // Assumes round-based partitioning
-
-#ifdef USE_SHMEM
-    const size_t partition_assigned_pe{ 0 };
-    const bool is_cross_pe_fusion{ false };
-    size_t left_pid;
-    size_t right_pid;
-    bool iamleft;
-#endif
 
     uint64_t child_bit;
     Task* left_child{nullptr};
     Task* right_child{nullptr};
     Task* parent{nullptr};
 
-    std::vector<pm::GraphFillRegion*> regions_to_unmatch; // built from fusion children, unmatched at beginning
-    std::vector<pm::GraphFillRegion*> regions_matched_to_virtual_boundary; // saved while solving
-
-    Task(int partition
-#ifdef USE_SHMEM
-        , size_t assigned_pe
-#endif
-    )
-        : part(partition),
-          is_fusion(false),
-#ifdef USE_SHMEM
-          partition_assigned_pe(assigned_pe),
-#endif
-          vb_left(partition - 1),
-          vb_right(partition)  // Assumes round-based partitioning
+    Task(int partition)
+        : TaskBase(partition, partition - 1, partition, false)
+        // , part(partition)
     {
         status.store(-1, std::memory_order_release);
     }
-    Task(int vb, Task* left_child, Task* right_child
-#ifdef USE_SHMEM
-        , uint64_t* status_ptr,
-        uint64_t* signal_ptr
-#endif
-    ) : 
-#ifdef USE_SHMEM
-        status_shm(status_ptr),
-        signal_shm(signal_ptr),
-#endif
-        part(vb),
-        is_fusion(true),
-#ifdef USE_SHMEM
-        partition_assigned_pe(left_child->partition_assigned_pe),
-        is_cross_pe_fusion(left_child->partition_assigned_pe != right_child->partition_assigned_pe),
-        left_pid(left_child->partition_assigned_pe),
-        right_pid(right_child->partition_assigned_pe),
-#endif
-        vb_left(left_child->vb_left), // Assumes round-based partitioning
-        vb_right(right_child->vb_right),
+    Task(int vb, Task* left_child, Task* right_child) : 
+        TaskBase(vb, left_child->vb_left, right_child->vb_right, true),
+        // part(vb),
         left_child(left_child),
         right_child(right_child)
     {
@@ -111,53 +95,28 @@ struct Task {
         left_child->child_bit = 1;
         right_child->parent = this;
         right_child->child_bit = 2;
-#ifdef USE_SHMEM
-        if (is_cross_pe_fusion && status_shm == nullptr) {
-            throw std::invalid_argument("DecodingTask: Cross PE fusion task requires a symmetric status atomic");
-        }
-        *status_shm = 0;
-        *signal_shm = 0;
-#endif
     }
 
     Task(const Task&) = delete;
     Task& operator=(const Task&) = delete;
     Task(Task&& other) noexcept
-        : part(other.part),
-          is_fusion(other.is_fusion),
-#ifdef USE_SHMEM
-          status_shm(other.status_shm),
-          signal_shm(other.signal_shm),
-          partition_assigned_pe(other.partition_assigned_pe),
-          is_cross_pe_fusion(other.is_cross_pe_fusion),
-          left_pid(other.left_pid),
-          right_pid(other.right_pid),
-#endif
-          vb_left(other.vb_left),
-          vb_right(other.vb_right) {
+        : TaskBase(std::move(other))
+           {
         status.store(other.status.load());
         left_child = other.left_child;
         right_child = other.right_child;
         parent = other.parent;
+        // parent_right = other.parent_right;
         child_bit = other.child_bit;
-        regions_to_unmatch = std::move(other.regions_to_unmatch);
-        regions_matched_to_virtual_boundary = std::move(other.regions_matched_to_virtual_boundary);
     }
     Task& operator=(Task&& other) noexcept {
-#ifdef USE_SHMEM
-        status_shm = other.status_shm;
-        signal_shm = other.signal_shm;
-        // const members assignments are invalid here, but checks are needed.
-        // Since we have const members, this operator= is likely ill-formed if invoked.
-        // Fortunately we might not be invoking it if we just use emplace_back on reserve.
-#endif
+        TaskBase::operator=(std::move(other));
         status.store(other.status.load());
         left_child = other.left_child;
         right_child = other.right_child;
         parent = other.parent;
+        // parent_right = other.parent_right;
         child_bit = other.child_bit;
-        regions_to_unmatch = std::move(other.regions_to_unmatch);
-        regions_matched_to_virtual_boundary = std::move(other.regions_matched_to_virtual_boundary);
         return *this;
     }
 
@@ -182,24 +141,9 @@ struct Task {
     };
 
     /* Sychnorization Methods */
-    // Should be called on both PE's for a cross-PE fusion
-    inline void mark_solved(
-#ifdef USE_SHMEM
-        size_t my_pid
-#endif
-    ) {
+    inline void mark_solved() {
         if (is_fusion) {
-#ifdef USE_SHMEM
-            if (is_cross_pe_fusion) {
-                shmem_uint64_atomic_set(status_shm, 0, left_pid);
-                shmem_uint64_atomic_set(signal_shm, 0, my_pid);
-                // shmem_quiet();
-            } else {
-                status.store(0, std::memory_order_release);
-            }
-#else
             status.store(0, std::memory_order_release);
-#endif
         }
     }
 
@@ -208,21 +152,8 @@ struct Task {
         return status.compare_exchange_strong(expected, next, std::memory_order_acq_rel);
     }
 
-    inline bool try_to_steal_parent(
-#ifdef USE_SHMEM
-        size_t my_pid
-#endif
-    ) {
-        int old;
-#ifdef USE_SHMEM
-        if (parent->is_cross_pe_fusion) {
-            old = shmem_uint64_atomic_fetch_or(parent->status_shm, child_bit, parent->left_pid);
-        } else {
-#endif
-            old = parent->status.fetch_or(child_bit, std::memory_order_acq_rel);
-#ifdef USE_SHMEM
-        }
-#endif
+    inline bool try_to_steal_parent() {
+        int old = parent->status.fetch_or(child_bit, std::memory_order_acq_rel);
         if ((old | child_bit) == 3) {
             return old != 3;
         } else {
@@ -263,5 +194,86 @@ struct Task {
     //     return t;
     // }
 };
+
+#ifdef USE_SHMEM
+struct CrossRankTask : public TaskBase {
+public:
+    Task* child;
+    bool iamleft;
+
+    size_t other_pid{ 0 };
+
+    // SHMEM resources
+    uint64_t* status_shm{ nullptr };
+    uint64_t* signal_shm{ nullptr };
+    shmem_ctx_t context_shm;
+
+    CrossRankTask(
+        int vb,
+        Task* child,
+        bool iamleft,
+        int vb_left,
+        int vb_right,
+        size_t other_pid,
+        uint64_t* status_ptr,
+        uint64_t* signal_ptr
+    ) : TaskBase(vb, vb_left, vb_right, true),
+        child(child),
+        iamleft(iamleft),
+        other_pid(other_pid),
+        status_shm(status_ptr),
+        signal_shm(signal_ptr)
+    {
+        if (status_shm == nullptr) {
+            throw std::invalid_argument("DecodingTask: Cross PE fusion task requires a symmetric status atomic");
+        }
+        // Create communication context
+        shmem_ctx_create(SHMEM_CTX_SERIALIZED, &context_shm);
+        *status_shm = 0;
+        *signal_shm = 0;
+    }
+
+    ~CrossRankTask() {
+        shmem_ctx_destroy(context_shm);
+    }
+
+    /* Helper Methods */
+    inline void setup() {
+        regions_to_unmatch.clear();
+        regions_matched_to_virtual_boundary.clear();
+        for (auto& region : child->regions_matched_to_virtual_boundary) {
+            if (region->match.edge.loc_to->vb == part)
+                regions_to_unmatch.push_back(region);
+            else
+                regions_matched_to_virtual_boundary.push_back(region);
+        }
+    };
+
+
+    /* Sychnorization Methods */
+    // Should be called on both PE's for a cross-PE fusion
+    inline void mark_solved(size_t my_pid) {
+        shmem_ctx_uint64_atomic_set(context_shm, status_shm, 0, (iamleft) ? my_pid : other_pid);
+        shmem_ctx_uint64_atomic_set(context_shm, signal_shm, 0, my_pid);
+    }
+
+    inline bool try_to_steal(size_t my_pid) {
+        int old, news;
+        if (iamleft) {
+            old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 1, my_pid);
+            news = old | 1;
+        } else {
+            old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 2, other_pid);
+            news = old | 2;
+        }
+        if (news == 3) {
+            return old != 3;
+        } else {
+            return false;
+        }
+    }
+
+};
+#endif
 
 #endif  // PYMATCHING2_DECODING_TASK_H

@@ -28,7 +28,6 @@ namespace pm {
 ShotContainer::ShotContainer(
 #ifdef USE_SHMEM
     uint64_t* current_buffer_round_ptr,
-    uint8_t *obs_crossed_ptr,
 #endif
     int num_partitions, int num_virtual_boundaries, int num_observables_in)
     : partition_hits(num_partitions),
@@ -39,11 +38,7 @@ ShotContainer::ShotContainer(
       i_solved_p(num_partitions, false),
       i_solved_vb(num_virtual_boundaries, false),
 #endif
-      res(
-#ifdef USE_SHMEM
-        obs_crossed_ptr,
-#endif
-        num_observables_in) {}
+      res(num_observables_in) {}
 
 ShotContainer::ShotContainer(ShotContainer&& other) noexcept
     : sparse_shot(std::move(other.sparse_shot)),
@@ -79,8 +74,6 @@ void ShotContainer::clear() {
 ShotBuffer::ShotBuffer(
 #ifdef USE_SHMEM
     uint64_t* atomics_ptr,
-    // uint8_t* obs_crossed_ptr,
-    // size_t obs_crossed_stride,
 #endif
     std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader_in,
     std::unique_ptr<stim::MeasureRecordWriter> writer_in,
@@ -89,19 +82,11 @@ ShotBuffer::ShotBuffer(
     int num_observables)
     : reader(std::move(reader_in)), writer(std::move(writer_in))
 {
-// #ifdef USE_SHMEM
-//     shot_container_status = atomics_ptr;
-//     for (size_t i = 0; i < 2*NUM_BUFFERS_PER_UNIT; i+=2) {
-//         shot_container_status[i] = 0;
-//         shot_container_status[i+1] = 0;
-//     }
-// #endif
     buffer.reserve(static_cast<size_t>(NUM_BUFFERS_PER_UNIT));
     for (size_t i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
         buffer.emplace_back(
 #ifdef USE_SHMEM
             atomics_ptr + i,
-            obs_crossed_ptr + i * obs_crossed_stride,
 #endif
             num_partitions, num_virtual_boundaries, num_observables);
     }

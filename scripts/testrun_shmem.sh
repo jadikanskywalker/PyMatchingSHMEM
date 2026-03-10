@@ -6,18 +6,17 @@
 
 # export SHMEM_OFI_PROVIDER=ofi_rxm
 
-if [ $# -le 3 ]
+if [ $# -le 4 ]
   then
-    echo "Args: [nthreads] [shots] [rounds] [M]"
+    echo "Args: [ppn] [nthreads] [shots] [rounds] [M]"
     exit 1
 else
-    nthreads=$1
-    shots=$2
-    rounds=$(($3-1))
-    M=$4
+    ppn=$1
+    nthreads=$2
+    shots=$3
+    rounds=$(($4-1))
+    M=$5
 fi
-
-ppn=2
 
 if [ ! -d "run" ]
   then
@@ -28,18 +27,18 @@ cd run
 
 rm *.out
 
-hosts=$(srun hostname | sort | uniq | paste -sd, -)
-# Function to create a hostfile with specified slots per host
-create_hostfile() {
-  local hostfile="hostfile.txt"
-  # Clear the hostfile if it exists
-  > "$hostfile"
-  # Write each host and its slots to the hostfile
-  for host in ${hosts//,/ }; do
-    echo "$host slots=$ppn" >> "$hostfile"
-  done
-}
-create_hostfile
+# hosts=$(srun hostname | sort | uniq | paste -sd, -)
+# # Function to create a hostfile with specified slots per host
+# create_hostfile() {
+#   local hostfile="hostfile.txt"
+#   # Clear the hostfile if it exists
+#   > "$hostfile"
+#   # Write each host and its slots to the hostfile
+#   for host in ${hosts//,/ }; do
+#     echo "$host slots=$ppn" >> "$hostfile"
+#   done
+# }
+# create_hostfile
 
 rm *.01 circuit.stim *.b8 *.dem
 
@@ -87,7 +86,7 @@ fi
 
 echo "Starting threads run..."
 start_serial=$(date +%s)
-~/PyMatchingSHMEM/build_threads_release/pymatching predict \
+~/PyMatchingSHMEM/build_threads/pymatching predict \
     --dem error_model.dem \
     --in detection_events.b8 \
     --in_format b8 \
@@ -95,6 +94,7 @@ start_serial=$(date +%s)
     --out_format 01 \
     --rounds_per_partition $M \
     --use_threads \
+    --draw-frames
     > log_threads.out
 end_serial=$(date +%s)
 serial_time=$((end_serial - start_serial))
@@ -114,7 +114,7 @@ start_parallel=$(date +%s)
 oshrun  \
     --map-by ppr:${ppn}:node:pe=${OMP_NUM_THREADS} \
     --bind-to core \
-    -hostfile hostfile.txt \
+    --report-bindings \
     ~/PyMatchingSHMEM/build_sos/pymatching predict \
     --dem error_model.dem \
     --in detection_events.b8 \
@@ -123,6 +123,7 @@ oshrun  \
     --out_format 01 \
     --rounds_per_partition $M \
     --use_threads \
+    --draw_frames \
     > log_shmem.out
 
 end_parallel=$(date +%s)

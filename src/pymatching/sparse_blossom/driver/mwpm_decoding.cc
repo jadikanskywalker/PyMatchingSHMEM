@@ -44,25 +44,11 @@ bool pm::ExtendedMatchingResult::operator!=(const ExtendedMatchingResult& rhs) c
     return !(rhs == *this);
 }
 
-pm::ExtendedMatchingResult::ExtendedMatchingResult(
-#ifdef USE_SHMEM
-    uint8_t* arr,
-#endif
-    size_t num_observables)
-    : obs_crossed(
-#ifdef USE_SHMEM
-        arr,
-#endif
-        num_observables, 0), weight(0) {
+pm::ExtendedMatchingResult::ExtendedMatchingResult(size_t num_observables)
+    : obs_crossed(num_observables, 0), weight(0) {
 }
 
-pm::ExtendedMatchingResult::ExtendedMatchingResult(
-#ifdef USE_SHMEM
-    VectorWrapper<uint8_t> obs_crossed_,
-#else
-    std::vector<uint8_t> obs_crossed,
-#endif
-    total_weight_int weight)
+pm::ExtendedMatchingResult::ExtendedMatchingResult(std::vector<uint8_t> obs_crossed, total_weight_int weight)
     : obs_crossed(std::move(obs_crossed)), weight(weight) {
 }
 
@@ -135,7 +121,7 @@ pm::Mwpm pm::detector_error_model_to_mwpm(
 void pm::process_timeline_until_completion(
     pm::Mwpm& mwpm,
     const std::vector<uint64_t>& detection_events,
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
     bool draw_frames,
 #endif
     bool parallel,
@@ -230,7 +216,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
     }
 
 #ifdef USE_THREADS
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
 // ===============
     int frame = 0;
     if (draw_frames) {
@@ -244,7 +230,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
     while (true) {
         auto event = mwpm.flooder.run_until_next_mwpm_notification();
 #ifdef USE_THREADS
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
 // ===============
         if (draw_frames) {
             draw_frame(mwpm, event, frame, parallel, tid);
@@ -386,7 +372,7 @@ void pm::decode_detection_events(
 #ifdef USE_THREADS
 // ===============
     , int shot
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
     , bool draw_frames
 #endif
 // ===============
@@ -407,7 +393,7 @@ void pm::decode_detection_events(
 // ===============
     if (DEBUG)
         output_detection_events(mwpm, detection_events, shot, false);
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
     if (draw_frames)
         std::filesystem::create_directory("out_serial/frames/" + std::to_string(shot));
 #endif
@@ -418,7 +404,7 @@ void pm::decode_detection_events(
     process_timeline_until_completion(mwpm, detection_events
 #ifdef USE_THREADS
 // ===============
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
         , draw_frames
 #endif
 // ===============
@@ -561,13 +547,13 @@ void pm::decode_detection_events_to_edges_with_edge_correlations(
 // ===============
 // DEBUG Functions
 void pm::setup_output_dirs(
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
     bool draw_frames,
 #endif
     bool parallel) {
     std::string out_dir = parallel ? "out_parallel" : "out_serial";
     std::filesystem::create_directory(out_dir);
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
     if (draw_frames)
         std::filesystem::create_directory(out_dir + "/frames");
 #endif

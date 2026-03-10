@@ -50,11 +50,13 @@ struct ShotContainer {
     std::vector<bool> i_solved_p;
     std::vector<bool> i_solved_vb;
     std::vector<Task> tasks;  // Tasks handle dynamic fusion tree synchonization
+#ifdef USE_SHMEM
+    std::vector<CrossRankTask> cross_rank_tasks;
+#endif
 
     ShotContainer(
 #ifdef USE_SHMEM
         uint64_t* current_buffer_round_ptr,
-        // uint8_t *obs_crossed_ptr,
 #endif
         int num_partitions, int num_virtual_boundaries, int num_observables);
 
@@ -75,10 +77,6 @@ struct ShotBuffer {
 
     std::vector<ShotContainer> buffer;
 
-// #ifdef USE_SHMEM
-    // Symmetric memory pointers
-    // uint64_t* shot_container_status;
-// #endif
     int next_shot_container_id{ 0 };
     int last_shot_container_id{ -1 };
 
@@ -89,8 +87,6 @@ struct ShotBuffer {
     ShotBuffer(
 #ifdef USE_SHMEM
         uint64_t* atomics_ptr,
-        // uint8_t* obs_crossed_ptr,
-        // size_t obs_crossed_stride,
 #endif
         std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
         std::unique_ptr<stim::MeasureRecordWriter> writer,

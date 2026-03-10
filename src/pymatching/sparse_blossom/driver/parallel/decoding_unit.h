@@ -35,7 +35,6 @@ namespace pm {
 #ifdef USE_SHMEM
 struct FusionSummary {
     GraphFillRegion* regions_ptr_base; // index where solving partition's arena begins
-    // DetectorNodeEphemeralFields* nodes_ptr_base; // index where solving partition's nodes begin
     DetectorNode* static_nodes_base; // Base address of graph.nodes on the sender PE
     size_t blossom_children_size;
     size_t regions_matched_to_vb_size;
@@ -58,7 +57,7 @@ struct DecodingUnit {
     // Params
     bool ensure_search_flooder_included;
     bool enable_correlations;
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
     bool draw_frames;
 #endif
 
@@ -71,31 +70,39 @@ struct DecodingUnit {
     std::vector<size_t> my_partitions;
 
 #ifdef USE_SHMEM
+    
     int pid;
+    int n_pes;
 
     // Symmetric memory
-    DetectorNodeEphemeralFields* node_ephemeral_fields_ptr{ nullptr };
-    GraphFillRegion* regions_ptr{ nullptr };
-    BlossomChild* child_edges_ptr{ nullptr };
-    // One atomic sychronizer per shot container
-    uint64_t* atomics_ptr{ nullptr };
-    uint64_t* task_status_ptr{ nullptr };
-    FusionSummary* task_fusion_summary_ptr { nullptr };
-    // uint32_t* obs_crossed_ptr{ nullptr };
-
+    DetectorNodeEphemeralFields* node_ephemeral_fields_ptr{ nullptr }; // ephemeral field buffers for DetectorNodes
+    GraphFillRegion* regions_ptr{ nullptr }; // buffers for region SHMEMArenas
+    BlossomChild* child_edges_ptr{ nullptr }; // blossom parent-child relationship buffer
+    uint64_t* atomics_ptr{ nullptr }; // shot counter for each shot container
+    uint64_t* task_status_ptr{ nullptr }; // status and signal for each fusion task
+    FusionSummary* task_fusion_summary_ptr { nullptr }; // fusion summary for each fusion task
     // Info used for symmetric memory accesses
     size_t nodes_nelems_per_buffer;
     size_t regions_nelems_per_solver;
     size_t child_edges_nelems_per_solver;
     size_t task_fusion_summary_size_per_task;
     size_t regions_matched_to_vb_nelems;
-    // size_t obs_crossed_nelems_per_buffer;
 
-    inline FusionSummary* get_fusion_summary_ptr(size_t shot_container_id, int partition_id) {
+    inline FusionSummary* get_fusion_summary_ptr(size_t shot_container_id, int slot_id) {
         return reinterpret_cast<FusionSummary*>(
             reinterpret_cast<char*>(task_fusion_summary_ptr)
-            + (shot_container_id * graph.num_partitions + partition_id) * task_fusion_summary_size_per_task
+            + (shot_container_id * SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER + slot_id) * task_fusion_summary_size_per_task
         );
+    }
+
+    inline uint64_t* get_task_status_ptr(size_t shot_container_id, bool iamleft) {
+        // There are two uint64s per slot: status and signal
+        //   Simple left/right case: NUM_CROSS_RANK_FUSIONS_PER_BUFFER=2 slots per buffer
+        //   Even PEs map slots (to left, to right), odd PEs (to right, to left)
+        //     (This ensures tasks correspond on each PE)
+        bool even = !(pid % 2);
+        bool take_second_slot = (even && iamleft) || (!even && !iamleft);
+        return task_status_ptr + 2*(SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER*shot_container_id + take_second_slot);
     }
 
     inline DetectorNodeEphemeralFields* get_node_fields_ptr(size_t shot_container_id, int partition_id) {
@@ -111,6 +118,10 @@ struct DecodingUnit {
         return child_edges_ptr + (shot_container_id * graph.num_partitions + partition_id) * child_edges_nelems_per_solver;
     }
 
+    inline size_t get_cross_rank_fusion_idx(size_t shot_container_id, size_t index) {
+        return SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER * shot_container_id + index;
+    }
+
 #endif
 
     // Initialization Functions
@@ -121,18 +132,14 @@ struct DecodingUnit {
         weight_int num_distinct_weights,
         bool ensure_search_flooder_included,
         bool enable_correlations
-    #if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
         , bool draw_frames
-    #endif
+#endif
         );
 
     ~DecodingUnit();
 
-    void build_tasks_for_round_partitioning(
-#ifdef USE_SHMEM
-        size_t n_pes
-#endif
-    );
+    void build_tasks_for_round_partitioning();
 
     void build_solvers();
 
@@ -149,8 +156,8 @@ struct DecodingUnit {
 
     // Decoding Functions
 #ifdef USE_SHMEM
-    void send_solution_to_remote_pe(size_t shot_container_id, Task &task, std::ofstream &t_out);
-    bool get_solution_from_remote_pe(size_t shot_container_id, Task &task, std::ofstream &t_out, std::vector<uint64_t>& hitsref); // returns whether solving is necessary
+    void send_solution_to_remote_pe(size_t shot_container_id, CrossRankTask &task, std::ofstream &t_out);
+    bool get_solution_from_remote_pe(size_t shot_container_id, CrossRankTask &task, std::ofstream &t_out, std::vector<uint64_t>& hitsref); // returns whether solving is necessary
     // void fuse_results_across_pes(size_t shot_container_id);
     void solve_cross_process_fusion_and_get_next_shot(size_t shot_container_id, Task* t, size_t tid, size_t num_threads, size_t solver_id, size_t shot_id);
 #endif
@@ -160,7 +167,7 @@ struct DecodingUnit {
     void decode_shots();
 
 //     void solve_task(Mwpm& solver, std::vector<uint64_t>& hits, Task* task, int tid
-// #if ENABLE_DRAW_FLAGS
+// #ifdef ENABLE_DRAW_FLAGS
 //         , int draw_frames
 // #endif
 //         , int shot_id);
