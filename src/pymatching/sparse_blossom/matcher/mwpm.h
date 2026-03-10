@@ -49,7 +49,7 @@ struct Mwpm {
 
 #ifdef USE_THREADS
     std::pair<std::vector<std::pair<float, float>>, std::vector<std::pair<float, float>>> coords;
-    Task* task{ nullptr };
+    TaskBase* task{ nullptr };
     int current_shot{ -1 };
 #endif
 
@@ -92,7 +92,7 @@ struct Mwpm {
 #ifdef USE_THREADS
     // Removes matchings to virtual boundaries, turning matched regions into alternating trees
     void unmatch_virtual_boundaries_between_partitions();
-    void prepare_for_task(Task* task, int shot_id);
+    void prepare_for_task(TaskBase* task, int shot_id);
 #endif
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_matches(GraphFillRegion* region, MatchingResult& res);
     MatchingResult shatter_blossom_and_extract_matches(GraphFillRegion* region);

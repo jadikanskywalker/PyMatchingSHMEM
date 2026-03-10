@@ -649,7 +649,7 @@ void Mwpm::extract_paths_from_match_edges(
 
 #ifdef USE_THREADS
 // Prepare the flooder to solve task
-void Mwpm::prepare_for_task(Task* t, int shot_id) {
+void Mwpm::prepare_for_task(TaskBase* t, int shot_id) {
     flooder.vb_left = t->vb_left; // DEPENDENT ON ROUND PARTITIONING
     flooder.vb_right = t->vb_right; // DEPENDENT ON ROUND PARTITIONING
     task = t;

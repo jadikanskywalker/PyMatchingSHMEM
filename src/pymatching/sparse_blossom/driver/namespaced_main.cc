@@ -52,10 +52,13 @@ int main_predict(int argc, const char** argv) {
 #ifdef USE_THREADS
             ,
             "--rounds_per_partition",
-#if ENABLE_DRAW_FLAGS
+            "--use_threads",
+#endif
+#ifdef ENABLE_DRAW_FLAGS
             "--draw_frames",
 #endif
-            "--use_threads",
+#ifdef USE_SHMEM
+            "--cross_pe_fusion_window_size"
 #endif
         },
         {},
@@ -98,11 +101,14 @@ int main_predict(int argc, const char** argv) {
 #ifdef USE_THREADS
     // ===============
     config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
-#if ENABLE_DRAW_FLAGS
-    bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
-#endif
     bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);
 // ===============
+#endif
+#ifdef ENABLE_DRAW_FLAGS
+    bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
+#endif
+#ifdef USE_SHMEM
+    config_parallel::k = stim::find_int64_argument("--cross_pe_fusion_window_size", 1, 1, INT64_MAX, argc, argv);
 #endif
 
     stim::DetectorErrorModel dem = stim::DetectorErrorModel::from_file(dem_file);
@@ -124,12 +130,12 @@ int main_predict(int argc, const char** argv) {
         num_buckets,
         enable_correlations,
         enable_correlations
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
         , draw_frames
 #endif
     );
     if (DEBUG) {
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
         pm::setup_output_dirs(draw_frames, use_threads);
 #else
         pm::setup_output_dirs(use_threads);

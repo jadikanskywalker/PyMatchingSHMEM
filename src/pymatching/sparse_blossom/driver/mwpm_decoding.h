@@ -33,31 +33,18 @@ namespace pm {
 class DecodingUnit;
 
 struct ExtendedMatchingResult {
-#ifdef USE_SHMEM
-    VectorWrapper<uint8_t> obs_crossed;
-#else
     std::vector<uint8_t> obs_crossed;
-#endif
 
     total_weight_int weight;
     ExtendedMatchingResult();
-    explicit ExtendedMatchingResult(
-#ifdef USE_SHMEM
-        uint8_t* arr,
-#endif
-        size_t num_observables
-    );
+    explicit ExtendedMatchingResult(size_t num_observables);
 
     bool operator==(const ExtendedMatchingResult& rhs) const;
 
     bool operator!=(const ExtendedMatchingResult& rhs) const;
 
     ExtendedMatchingResult(
-#ifdef USE_SHMEM
-        VectorWrapper<uint8_t> obs_crossed,
-#else
         std::vector<uint8_t> obs_crossed,
-#endif
         total_weight_int weight);
 
     void reset();
@@ -67,13 +54,7 @@ struct ExtendedMatchingResult {
 };
 
 inline void ExtendedMatchingResult::reset() {
-#ifdef USE_SHMEM
-    for (size_t i=0; i < obs_crossed.size_; ++i) {
-        obs_crossed[i] = 0;
-    }
-#else
     std::fill(obs_crossed.begin(), obs_crossed.end(), 0);
-#endif
     weight = 0;
 }
 
@@ -81,7 +62,7 @@ inline void ExtendedMatchingResult::reset() {
 void process_timeline_until_completion(
     pm::Mwpm& mwpm,
     const std::vector<uint64_t>& detection_events,
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
     bool draw_frames = false,
 #endif
     bool parallel = false,
@@ -128,7 +109,7 @@ void decode_detection_events(
     bool edge_correlations
 #ifdef USE_THREADS
     , int shot = 0
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
     , bool draw_frames = false
 #endif
 #endif
@@ -151,7 +132,7 @@ void decode_detection_events_to_edges_with_edge_correlations(
  
 #ifdef USE_THREADS
 void setup_output_dirs(
-#if ENABLE_DRAW_FLAGS
+#ifdef ENABLE_DRAW_FLAGS
     bool draw_frames,
 #endif
     bool parallel = false);
