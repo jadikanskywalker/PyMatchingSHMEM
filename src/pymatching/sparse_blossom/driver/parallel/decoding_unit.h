@@ -88,10 +88,12 @@ struct DecodingUnit {
     size_t task_fusion_summary_size_per_task;
     size_t regions_matched_to_vb_nelems;
 
-    inline FusionSummary* get_fusion_summary_ptr(size_t shot_container_id, int slot_id) {
+    inline FusionSummary* get_fusion_summary_ptr(size_t shot_container_id, bool iamleft) {
+        bool even = !(pid % 2);
+        bool take_second_slot = (even && iamleft) || (!even && !iamleft);
         return reinterpret_cast<FusionSummary*>(
             reinterpret_cast<char*>(task_fusion_summary_ptr)
-            + (shot_container_id * SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER + slot_id) * task_fusion_summary_size_per_task
+            + (shot_container_id * SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER + take_second_slot) * task_fusion_summary_size_per_task
         );
     }
 
@@ -99,7 +101,7 @@ struct DecodingUnit {
         // There are two uint64s per slot: status and signal
         //   Simple left/right case: NUM_CROSS_RANK_FUSIONS_PER_BUFFER=2 slots per buffer
         //   Even PEs map slots (to left, to right), odd PEs (to right, to left)
-        //     (This ensures tasks correspond on each PE)
+        //   This ensures tasks correspond on each PE
         bool even = !(pid % 2);
         bool take_second_slot = (even && iamleft) || (!even && !iamleft);
         return task_status_ptr + 2*(SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER*shot_container_id + take_second_slot);
@@ -162,7 +164,9 @@ struct DecodingUnit {
     void solve_cross_process_fusion_and_get_next_shot(size_t shot_container_id, Task* t, size_t tid, size_t num_threads, size_t solver_id, size_t shot_id);
 #endif
 
-    void write_result_and_get_next_shot(int shot_container_id);
+
+    void extract_match_edges(Mwpm& solver, ShotContainer& shot, std::vector<uint64_t>& hitsref, size_t tid, std::ostream& t_out);
+    void extract_obs_mask(Mwpm& solver, ShotContainer& shot, std::vector<uint64_t>& hitsref, size_t tid, std::ostream& t_out);
 
     void decode_shots();
 

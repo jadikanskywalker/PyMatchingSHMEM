@@ -26,6 +26,7 @@
 // Forward declare to avoid cyclic include with mwpm_decoding.h
 namespace pm {
 class GraphFillRegion;
+struct FusionSummary;
 }
 
 enum Status { BUSY, FREE };
@@ -206,6 +207,7 @@ public:
     // SHMEM resources
     uint64_t* status_shm{ nullptr };
     uint64_t* signal_shm{ nullptr };
+    pm::FusionSummary* fusion_summary_shm { nullptr };
     shmem_ctx_t context_shm;
 
     CrossRankTask(
@@ -216,13 +218,15 @@ public:
         int vb_right,
         size_t other_pid,
         uint64_t* status_ptr,
-        uint64_t* signal_ptr
+        uint64_t* signal_ptr,
+        pm::FusionSummary* fusion_summary_ptr
     ) : TaskBase(vb, vb_left, vb_right, true),
         child(child),
         iamleft(iamleft),
         other_pid(other_pid),
         status_shm(status_ptr),
-        signal_shm(signal_ptr)
+        signal_shm(signal_ptr),
+        fusion_summary_shm(fusion_summary_ptr)
     {
         if (status_shm == nullptr) {
             throw std::invalid_argument("DecodingTask: Cross PE fusion task requires a symmetric status atomic");
