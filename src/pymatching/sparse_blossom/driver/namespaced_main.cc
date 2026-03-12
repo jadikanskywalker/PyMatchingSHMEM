@@ -58,7 +58,7 @@ int main_predict(int argc, const char** argv) {
             "--draw_frames",
 #endif
 #ifdef USE_SHMEM
-            "--cross_pe_fusion_window_size"
+            "--cross_rank_fusion_window_size"
 #endif
         },
         {},
@@ -108,7 +108,7 @@ int main_predict(int argc, const char** argv) {
     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
 #endif
 #ifdef USE_SHMEM
-    config_parallel::k = stim::find_int64_argument("--cross_pe_fusion_window_size", 1, 1, INT64_MAX, argc, argv);
+    config_parallel::k = stim::find_int64_argument("--cross_rank_fusion_window_size", 1, 1, INT64_MAX, argc, argv);
 #endif
 
     stim::DetectorErrorModel dem = stim::DetectorErrorModel::from_file(dem_file);

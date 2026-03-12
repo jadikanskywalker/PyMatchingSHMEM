@@ -6,9 +6,9 @@
 
 # export SHMEM_OFI_PROVIDER=ofi_rxm
 
-if [ $# -le 4 ]
+if [ $# -le 5 ]
   then
-    echo "Args: [ppn] [nthreads] [shots] [rounds] [M]"
+    echo "Args: [ppn] [nthreads] [shots] [rounds] [M] [k]"
     exit 1
 else
     ppn=$1
@@ -16,6 +16,7 @@ else
     shots=$3
     rounds=$(($4-1))
     M=$5
+    k=$6
 fi
 
 if [ ! -d "run" ]
@@ -58,10 +59,10 @@ fi
 # need to find d=21 lattice surgery circuit
 stim gen \
     --rounds=$rounds \
-    --distance=5 \
+    --distance=12 \
     --after_clifford_depolarization=0.01 \
-    --code surface_code \
-    --task rotated_memory_x \
+    --code repetition_code \
+    --task memory \
     > circuit.stim
 stim analyze_errors \
     --decompose_errors \
@@ -94,7 +95,6 @@ start_serial=$(date +%s)
     --out_format 01 \
     --rounds_per_partition $M \
     --use_threads \
-    --draw-frames
     > log_threads.out
 end_serial=$(date +%s)
 serial_time=$((end_serial - start_serial))
@@ -122,6 +122,7 @@ oshrun  \
     --out predicted_obs_flips__shmem.01 \
     --out_format 01 \
     --rounds_per_partition $M \
+    --cross_rank_fusion_window_size $k \
     --use_threads \
     --draw_frames \
     > log_shmem.out
