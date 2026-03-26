@@ -461,6 +461,18 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
     if (DEBUG)
         t_out << "    sending (p" << partition_start << ", k=" << k << ") to " << other_pid << std::endl;
 
+    // We use the LOCAL slot buffer to construct the payload, then PUT it to the REMOTE slot buffer.
+    FusionSummary*& fusion_summary_base = t.fusion_summary_shm;
+
+    // Populate FusionSummary header and regions_to_unmatch first; bitmap area is used as temporary checked map.
+    fusion_summary_base->regions_to_unmatch_size = t.regions_to_unmatch.size();
+    fusion_summary_base->regions_ptr_base = regions_ptr;
+    fusion_summary_base->static_nodes_base = graph.graph_ptr->nodes.data();
+    for (size_t i = 0; i < t.regions_to_unmatch.size(); ++i) {
+        fusion_summary_base->regions_to_unmatch[i] = t.regions_to_unmatch[i];
+        if (DEBUG) t_out << "      " << t.regions_to_unmatch[i] << std::endl << std::flush;
+    }
+
     // 1. Isolate Solution
     auto* regions_start_ptr = get_regions_ptr(shot_container_id, partition_start);
     size_t regions_total_bytes = k * regions_nelems_per_solver * sizeof(GraphFillRegion);
@@ -477,7 +489,6 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
               << "    node_start_bound: " << nodes_start_bounds.first << std::endl
               << "    node_end_bound: " << nodes_end_bounds.second << " (" << nodes_nelems_total << ")" << std::endl
               << "    isolate_end_bound: " << isolate_end_bound << std::endl << std::flush;
-    
     }
 
     auto& solver = *solvers[get_solver_id(shot_container_id, partition_start)];
@@ -505,11 +516,17 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
 
     std::vector<pm::BlossomChild> discovered_child_edges;
     discovered_child_edges.reserve(64);
-
-    std::vector<pm::GraphFillRegion*> blossom_roots_checked;
     
     // Validation Pass: scan all live regions in the k-partition send window.
     size_t solver_id = get_solver_id(shot_container_id, partition_start);
+    uint64_t* bitmap_base = (uint64_t*)((char*)fusion_summary_base->regions_to_unmatch
+                                        + sizeof(GraphFillRegion*) * fusion_summary_base->regions_to_unmatch_size);
+    // reset to 1's for safety
+    size_t bitmap_words = solvers[solver_id]->flooder.region_arena.shmem_bitmap.size() * k;
+    for (size_t w = 0; w < bitmap_words; ++w) {
+        bitmap_base[w] = ~0ULL;
+    }
+
     for (size_t i = 0; i < k; ++i) {
         int p_scan = partition_start + i;
         auto& solver_scan = *solvers[solver_id + i];
@@ -527,32 +544,45 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                 }
                 size_t local_idx = word_id * 64 + bit;
                 GraphFillRegion* r = p_regions_base + local_idx;
-                pm::GraphFillRegion* blossom_root = r->blossom_parent_top ? r->blossom_parent_top : r;
+                pm::GraphFillRegion*& blossom_root = (r->blossom_parent_top) ? r->blossom_parent_top :  r;
 
-                // If we've already validated this root, skip re-checking.
-                if (std::find(blossom_roots_checked.begin(), blossom_roots_checked.end(), blossom_root) != blossom_roots_checked.end()) {
-                    continue;
-                }
+                bool valid = false;
 
-                if (DEBUG) t_out << "    checking blossom_root: " << blossom_root << std::endl << std::flush;
-                discovered_child_edges.clear();
+                if (ptr_in_range(blossom_root, region_range)) {
+                    size_t root_idx = (size_t)(blossom_root - region_range.first);
+                    size_t root_word = root_idx / 64;
+                    uint64_t root_mask = 1ULL << (root_idx % 64);
+                    // If root bit is 0, it is already processed.
+                    if ((bitmap_base[root_word] & root_mask) == 0ULL) {
+                        continue;
+                    }
+                    // Mark root as seen
+                    bitmap_base[root_word] &= ~root_mask;
 
-                bool valid = check_pointers_for_self_and_all_descendents(
-                    blossom_root,
-                    region_range,
-                    node_range,
-                    &discovered_child_edges);
+                    if (DEBUG) t_out << "    checking blossom_root: " << blossom_root << std::endl << std::flush;
+                    discovered_child_edges.clear();
 
-                // Also check match partner if present.
-                if (valid && blossom_root->match.region) {
-                    if (DEBUG) t_out << "      checking matched region: " << blossom_root->match.region << std::endl << std::flush;
                     valid = check_pointers_for_self_and_all_descendents(
-                        blossom_root->match.region,
+                        blossom_root,
                         region_range,
                         node_range,
                         &discovered_child_edges);
-                }
 
+                    // Also check match partner if present.
+                    if (valid && blossom_root->match.region) {
+                        if (ptr_in_range(blossom_root->match.region, region_range)) {
+                            size_t match_idx = (size_t)(blossom_root->match.region - region_range.first);
+                            bitmap_base[match_idx / 64] &= ~(1ULL << (match_idx % 64));
+                            if (DEBUG) t_out << "      checking matched region: " << blossom_root->match.region << std::endl << std::flush;
+                            
+                            valid = check_pointers_for_self_and_all_descendents(
+                                blossom_root->match.region,
+                                region_range,
+                                node_range,
+                                &discovered_child_edges);
+                        } else valid = false;
+                    }
+                }
                 if (!valid) {
                     if (DEBUG) t_out << "      SHATTERING blossom_root\n" << std::flush;
                     res += solver.shatter_blossom_and_extract_matches(blossom_root);
@@ -561,10 +591,6 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                         if (child_edges_counter < child_edges_nelems_per_solver) {
                             child_edges_buff_base[child_edges_counter++] = child_edge;
                         }
-                    }
-                    blossom_roots_checked.push_back(blossom_root);
-                    if (blossom_root->match.region) {
-                        blossom_roots_checked.push_back(blossom_root->match.region);
                     }
                 }
             }
@@ -621,23 +647,8 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                                 1, SHMEM_SIGNAL_ADD, 
                                 other_pid);
 
-    // We use the LOCAL slot buffer to construct the payload, then PUT it to the REMOTE slot buffer.
-    FusionSummary*& fusion_summary_base = t.fusion_summary_shm;
-    
-    // 1. Populate FusionSummary
-    fusion_summary_base->regions_to_unmatch_size = t.regions_to_unmatch.size();
-    fusion_summary_base->regions_ptr_base = regions_ptr;
-    fusion_summary_base->static_nodes_base = graph.graph_ptr->nodes.data();
-    
-    // Copy regions to unmatch (which are the regions matched to the vb in the child task)
-    for (size_t i=0; i<t.regions_to_unmatch.size(); ++i) {
-        fusion_summary_base->regions_to_unmatch[i] = t.regions_to_unmatch[i];
-        if (DEBUG) t_out << "      " << t.regions_to_unmatch[i] << std::endl << std::flush;
-    }
-
     // Copy Bitmap & Construct BlossomChild array (sparse edge list from bitmap)
-    uint64_t* bitmap_base = (uint64_t*)((char*)fusion_summary_base->regions_to_unmatch 
-                                        + sizeof(GraphFillRegion*) * fusion_summary_base->regions_to_unmatch_size);
+
     size_t total_bitmap_bytes = 0;
     for (size_t i = 0; i < k; ++i) {
         int p = partition_start + i;
@@ -687,9 +698,8 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
             }
         }
     }
-    if (DEBUG) t_out << "  shattered sent blossoms" << std::endl << std::flush;
-    
-    if (DEBUG) t_out << "    sent all data to " << other_pid << std::endl;
+    if (DEBUG) t_out << "  shattered sent blossoms" << std::endl
+                     << "  sent all data to " << other_pid << std::endl << std::flush;
 }
 
 bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, CrossRankTask &t, std::ofstream &t_out, std::vector<uint64_t> &hitsref) {
@@ -966,10 +976,8 @@ inline void pm::DecodingUnit::extract_obs_mask(pm::Mwpm& solver, pm::ShotContain
 //                     }
 //                 }
 //             }
-
 //         }
 //     }
-
 // //         bit_packed_res +=
 // //             pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
 // //                 solver, hitsref);
@@ -1378,8 +1386,10 @@ void pm::DecodingUnit::decode_shots() {
                             auto& solver = *solvers[get_solver_id(shot_container_id, p)];
                             bool good = true;
                             for (auto word : solver.flooder.region_arena.shmem_bitmap) {
-                                if (word != ~0ULL)
+                                if (word != ~0ULL) {
                                     good = false;
+                                    break;
+                                }
                             }
                             if (!good) t_out << "  ERROR: solver for p" << p << " not empty\n" << std::flush; 
                         }
