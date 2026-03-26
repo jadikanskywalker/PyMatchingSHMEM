@@ -461,21 +461,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
     if (DEBUG)
         t_out << "    sending (p" << partition_start << ", k=" << k << ") to " << other_pid << std::endl;
 
-    // We use the LOCAL slot buffer to construct the payload, then PUT it to the REMOTE slot buffer.
-    FusionSummary*& fusion_summary_base = t.fusion_summary_shm;
-    
-    // 1. Populate FusionSummary
-    fusion_summary_base->regions_to_unmatch_size = t.regions_to_unmatch.size();
-    fusion_summary_base->regions_ptr_base = regions_ptr;
-    fusion_summary_base->static_nodes_base = graph.graph_ptr->nodes.data();
-    
-    // Copy regions to unmatch (which are the regions matched to the vb in the child task)
-    for (size_t i=0; i<t.regions_to_unmatch.size(); ++i) {
-        fusion_summary_base->regions_to_unmatch[i] = t.regions_to_unmatch[i];
-        if (DEBUG) t_out << "      " << t.regions_to_unmatch[i] << std::endl << std::flush;
-    }
-
-    // 2. Isolate Solution
+    // 1. Isolate Solution
     auto* regions_start_ptr = get_regions_ptr(shot_container_id, partition_start);
     size_t regions_total_bytes = k * regions_nelems_per_solver * sizeof(GraphFillRegion);
 
@@ -493,14 +479,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
               << "    isolate_end_bound: " << isolate_end_bound << std::endl << std::flush;
     
     }
-    // isolate_solution_before_sending(
-    //     res,
-    //     solver,
-    //     shot_buffer->buffer[shot_container_id], shot_container_id,
-    //     (std::pair<size_t, size_t>){partition_start, partition_start+k},
-    //     (std::pair<pm::GraphFillRegion *, pm::GraphFillRegion *>){regions_start_ptr, regions_start_ptr + k * regions_nelems_per_solver},
-    //     (std::pair<pm::DetectorNode*, pm::DetectorNode*>){graph.graph_ptr->nodes.data() + isolate_start_bound, graph.graph_ptr->nodes.data() + isolate_end_bound},
-    //     t_out);
+
     auto& solver = *solvers[get_solver_id(shot_container_id, partition_start)];
     auto& shot = shot_buffer->buffer[shot_container_id];
     std::vector<std::vector<uint64_t>*> hits;
@@ -520,17 +499,20 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
 
     std::pair<pm::GraphFillRegion *, pm::GraphFillRegion *> region_range = {regions_start_ptr, regions_start_ptr + k * regions_nelems_per_solver};
     std::pair<pm::DetectorNode*, pm::DetectorNode*> node_range = {graph.graph_ptr->nodes.data() + isolate_start_bound, graph.graph_ptr->nodes.data() + isolate_end_bound};
+    
     BlossomChild* child_edges_buff_base = get_child_edges_ptr(shot_container_id, partition_start);
     size_t child_edges_counter = 0;
+
     std::vector<pm::BlossomChild> discovered_child_edges;
     discovered_child_edges.reserve(64);
-    
+
     std::vector<pm::GraphFillRegion*> blossom_roots_checked;
     
     // Validation Pass: scan all live regions in the k-partition send window.
+    size_t solver_id = get_solver_id(shot_container_id, partition_start);
     for (size_t i = 0; i < k; ++i) {
         int p_scan = partition_start + i;
-        auto& solver_scan = *solvers[get_solver_id(shot_container_id, p_scan)];
+        auto& solver_scan = *solvers[solver_id + i];
         auto& bitmap = solver_scan.flooder.region_arena.shmem_bitmap;
         GraphFillRegion* p_regions_base = get_regions_ptr(shot_container_id, p_scan);
 
@@ -639,13 +621,27 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                                 1, SHMEM_SIGNAL_ADD, 
                                 other_pid);
 
+    // We use the LOCAL slot buffer to construct the payload, then PUT it to the REMOTE slot buffer.
+    FusionSummary*& fusion_summary_base = t.fusion_summary_shm;
+    
+    // 1. Populate FusionSummary
+    fusion_summary_base->regions_to_unmatch_size = t.regions_to_unmatch.size();
+    fusion_summary_base->regions_ptr_base = regions_ptr;
+    fusion_summary_base->static_nodes_base = graph.graph_ptr->nodes.data();
+    
+    // Copy regions to unmatch (which are the regions matched to the vb in the child task)
+    for (size_t i=0; i<t.regions_to_unmatch.size(); ++i) {
+        fusion_summary_base->regions_to_unmatch[i] = t.regions_to_unmatch[i];
+        if (DEBUG) t_out << "      " << t.regions_to_unmatch[i] << std::endl << std::flush;
+    }
+
     // Copy Bitmap & Construct BlossomChild array (sparse edge list from bitmap)
     uint64_t* bitmap_base = (uint64_t*)((char*)fusion_summary_base->regions_to_unmatch 
                                         + sizeof(GraphFillRegion*) * fusion_summary_base->regions_to_unmatch_size);
     size_t total_bitmap_bytes = 0;
     for (size_t i = 0; i < k; ++i) {
         int p = partition_start + i;
-        auto& solver = *solvers[get_solver_id(shot_container_id, p)];
+        auto& solver = *solvers[solver_id + i];
         auto& bitmap = solver.flooder.region_arena.shmem_bitmap;
         size_t bitmap_len = bitmap.size();
         // Copy bitmap to FusiionSummary
@@ -692,26 +688,6 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
         }
     }
     if (DEBUG) t_out << "  shattered sent blossoms" << std::endl << std::flush;
-    // for (size_t i = 0; i < k; ++i) {
-    //     int p = partition_start + i;
-    //     auto& solver = *solvers[get_solver_id(shot_container_id, p)];
-    //     auto& bitmap_src = solver.flooder.region_arena.shmem_bitmap;
-    //     GraphFillRegion* p_regions = get_regions_ptr(shot_container_id, p);   
-    //     for (size_t word_id = 0; word_id < bitmap_src.size(); ++word_id) {
-    //         uint64_t word = bitmap_src[word_id];
-    //         if (word != ~0ULL) {
-    //             for (size_t bit = 0; bit < 64; ++bit) {
-    //                 if (!((word >> bit) & 1ULL)) { // taken
-    //                     size_t index = word_id * 64 + bit;
-    //                     GraphFillRegion* r = p_regions + index;
-    //                     r->cleanup_shell_area();
-    //                     r->owner_arena->del(r);
-    //                     // if (DEBUG) t_out << "    deleted r=" << r << std::endl << std::flush;
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
     
     if (DEBUG) t_out << "    sent all data to " << other_pid << std::endl;
 }
@@ -752,8 +728,6 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, Cro
     auto& nodes_start_bounds = graph.partition_bounds[partition_start];
     auto& nodes_end_bounds = graph.partition_bounds[partition_start + k - 1];
     size_t nodes_nelems_total = nodes_end_bounds.second - nodes_start_bounds.first + 1;
-    // DetectorNode* k_block_nodes_base = &graph.graph_ptr->nodes[node_start_bounds.first];
-    // DetectorNode* k_block_nodes_end = k_block_nodes_base + nodes_nelems_total;
     ptrdiff_t nodes_start_bound_with_vb = (t.iamleft) ? graph.vb_bounds[partition_start-1].first : nodes_start_bounds.first;
     ptrdiff_t nodes_end_bound_with_vb = (!t.iamleft) ? graph.vb_bounds[partition_start + k - 1].second : nodes_end_bounds.second;
     if (DEBUG) t_out << "  node_start_bound: " << nodes_start_bounds.first << std::endl
@@ -773,9 +747,7 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, Cro
         return rebased;
     };
     auto rebase_node_ptr = [&](DetectorNode* ptr) -> DetectorNode* {
-        // if (!ptr) return nullptr;
         // Rebase to local memory
-        // DetectorNode* rebased = (DetectorNode*)((char*)ptr - (char*)remote_static_nodes_base + (char*)local_static_nodes_base);
         ptrdiff_t index = ptr - remote_static_nodes_base;
         // Check if remote pointer is within the valid range of the transmitted block
         if (index < nodes_start_bound_with_vb || index > nodes_end_bound_with_vb) {
@@ -794,46 +766,29 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, Cro
               << "      Blossom Children Size: " << fusion_summary_base->blossom_children_size << std::endl << std::flush;
     }
 
-    // // 2. Reconstruct regions_to_unmatch
-    // for (size_t i = 0; i < fusion_summary_base->regions_to_unmatch_size; ++i) {
-    //     GraphFillRegion* rebased = rebase_region_ptr(fusion_summary_base->regions_to_unmatch[i]);
-    //     if (rebased) {
-    //         if (DEBUG) t_out << "      " << rebased << std::endl << std::flush;
-    //         t.regions_to_unmatch.push_back(rebased);
-    //     }
-    // }
+    // 1. Reconstruct regions_to_unmatch using post-prune liveness.
+    for (size_t i = 0; i < fusion_summary_base->regions_to_unmatch_size; ++i) {
+        GraphFillRegion* rebased = rebase_region_ptr(fusion_summary_base->regions_to_unmatch[i]);
+        if (rebased) {
+            if (DEBUG) t_out << "      " << rebased << std::endl << std::flush;
+            t.regions_to_unmatch.push_back(rebased);
+        }
+    }
 
-    // 3. Copy Bitmaps & Reconstruct GraphFillRegions (Iterate all k partitions)
+    // 2. Copy Bitmaps & Reconstruct GraphFillRegions (Iterate k partitions)
     if (DEBUG) {
         t_out << "    reconstructing solution state\n"
               << "      Remote Regions To Unmatch Size: " << fusion_summary_base->regions_to_unmatch_size << std::endl << std::flush;
     }
     uint64_t* bitmap_base = (uint64_t*)((char*)fusion_summary_base->regions_to_unmatch 
                                         + sizeof(GraphFillRegion*) * fusion_summary_base->regions_to_unmatch_size);
-    // std::vector<uint64_t*> bitmap_payload_bases(k, nullptr);
-    size_t bitmap_len = solvers[partition_start]->flooder.region_arena.shmem_bitmap.size();
-    // auto is_region_live = [&](GraphFillRegion* region) -> bool {
-    //     if (region == nullptr) {
-    //         return false;
-    //     }
-    //     ptrdiff_t idx = region - k_block_regions_base;
-    //     if (idx < 0 || (size_t)idx >= (size_t)k * regions_nelems_per_solver) {
-    //         return false;
-    //     }
-    //     size_t part_offset = (size_t)idx / regions_nelems_per_solver;
-    //     size_t local_idx = (size_t)idx % regions_nelems_per_solver;
-    //     uint64_t* part_bitmap = bitmap_payload_bases[part_offset];
-    //     return ((part_bitmap[local_idx / 64] >> (local_idx % 64)) & 1ULL) == 0ULL;
-    // };
-        // 6. Copy updated bitmap payloads into solver arenas after node-field rebasing.
+    size_t solver_id = get_solver_id(shot_container_id, partition_start);
+    size_t bitmap_len = solvers[solver_id]->flooder.region_arena.shmem_bitmap.size();
     for (size_t i = 0; i < k; ++i) {
         int p = partition_start + i;
-        auto& solver = *solvers[get_solver_id(shot_container_id, p)];
-    }
-    for (size_t i = 0; i < k; ++i) {
-        int p = partition_start + i;
-        auto& solver = *solvers[get_solver_id(shot_container_id, p)];
+        auto& solver = *solvers[solver_id + i];
         auto& bitmap_dst = solver.flooder.region_arena.shmem_bitmap;
+        // Copy bitmap
         memcpy(bitmap_dst.data(), bitmap_base + i*bitmap_len, bitmap_dst.size() * sizeof(uint64_t));
 
         GraphFillRegion* p_regions_base = get_regions_ptr(shot_container_id, p);
@@ -845,36 +800,22 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, Cro
                     if (!((word >> bit) & 1ULL)) { // taken
                         size_t index = word_id * 64 + bit;
                         GraphFillRegion* r = p_regions_base + index;
-                        // bool has_oob_ref = false;
                         // Rebase pointers with OOB check
                         if (r->blossom_parent) {
                             r->blossom_parent = rebase_region_ptr(r->blossom_parent);
-                            // if (r->blossom_parent == nullptr) has_oob_ref = true;
                         }
                         if (r->blossom_parent_top) {
                             r->blossom_parent_top = rebase_region_ptr(r->blossom_parent_top);
-                            // if (r->blossom_parent_top == nullptr) has_oob_ref = true;
                         }
                         if (r->match.region) {
                             r->match.region = rebase_region_ptr(r->match.region);
-                            // if (r->match.region == nullptr) has_oob_ref = true;
                         }
                         if (r->match.edge.loc_from) {
                             r->match.edge.loc_from = rebase_node_ptr(r->match.edge.loc_from);
-                            // if (r->match.edge.loc_from == nullptr) has_oob_ref = true;
                         }
                         if (r->match.edge.loc_to) {
                             r->match.edge.loc_to = rebase_node_ptr(r->match.edge.loc_to);
-                            // if (r->match.edge.loc_to == nullptr) has_oob_ref = true;
                         }
-                        // if (has_oob_ref) {
-                        //     bitmap_payload[word_id] |= (1ULL << bit);  // free/delete region slot
-                        //     r->blossom_parent = nullptr;
-                        //     r->blossom_parent_top = nullptr;
-                        //     r->match.region = nullptr;
-                        //     r->match.edge.loc_from = nullptr;
-                        //     r->match.edge.loc_to = nullptr;
-                        // }
                         // Reset vectors (they contain pointers that need manual reconstruction)
                         new (&r->blossom_children) std::vector<RegionEdge>();
                         new (&r->shell_area) std::vector<DetectorNode*>();
@@ -896,15 +837,6 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, Cro
         t_out << "    rebased regions" << std::endl << std::flush;
     }
 
-    // 3. Reconstruct regions_to_unmatch using post-prune liveness.
-    for (size_t i = 0; i < fusion_summary_base->regions_to_unmatch_size; ++i) {
-        GraphFillRegion* rebased = rebase_region_ptr(fusion_summary_base->regions_to_unmatch[i]);
-        if (rebased) {
-            if (DEBUG) t_out << "      " << rebased << std::endl << std::flush;
-            t.regions_to_unmatch.push_back(rebased);
-        }
-    }
-
     // 4. Reconstruct Blossom Children
     //   Blossom children for all K partitions are packed in the buffer starting at `partition_start`.
     BlossomChild* child_edges_buff_base = get_child_edges_ptr(shot_container_id, partition_start);
@@ -912,9 +844,6 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, Cro
     for (size_t i=0; i < fusion_summary_base->blossom_children_size; ++i) {
         BlossomChild& child = child_edges_buff_base[i];
         GraphFillRegion* parent = k_block_regions_base + child.blossom_parent;
-        // if (!is_region_live(parent)) {
-        //     continue;
-        // }
 
         RegionEdge local_edge = child.region_edge;
         local_edge.region = rebase_region_ptr(local_edge.region);
@@ -946,21 +875,10 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, Cro
         }
         if (fields.region_that_arrived_top) {
             fields.region_that_arrived_top = rebase_region_ptr(fields.region_that_arrived_top);
-            // if (fields.region_that_arrived_top == nullptr || !is_region_live(fields.region_that_arrived_top)) {
-            //     clear_node = true;
-            // }
         }
         if (fields.reached_from_source) {
             fields.reached_from_source = rebase_node_ptr(fields.reached_from_source);
-            // if (fields.reached_from_source == nullptr) {
-            //     clear_node = true;
-            // }
         }
-        // if (clear_node) {
-        //     fields.region_that_arrived = nullptr;
-        //     fields.region_that_arrived_top = nullptr;
-        //     fields.reached_from_source = nullptr;
-        // }
     }
 
     if (DEBUG) {
