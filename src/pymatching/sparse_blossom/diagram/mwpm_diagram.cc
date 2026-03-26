@@ -120,8 +120,9 @@ struct StateHelper {
             return true;
         }
         int part_id = (*mwpm.flooder.node_part_id_ptr)[k];
-        if (part_id < 0) part_id = -(part_id + 1);
-        return part_id > mwpm.flooder.vb_left && part_id <= mwpm.flooder.vb_right;
+        int is_vb = (part_id < 0);
+        if (is_vb) part_id = -(part_id + 1);
+        return ((!is_vb && part_id > mwpm.flooder.vb_left) || (is_vb && part_id >= mwpm.flooder.vb_left)) && part_id <= mwpm.flooder.vb_right;
     }
 #endif
     inline const DetectorNodeEphemeralFields &node_state(const DetectorNode &node) const {

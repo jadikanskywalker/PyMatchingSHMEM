@@ -60,7 +60,7 @@ fi
 stim gen \
     --rounds=$rounds \
     --distance=12 \
-    --after_clifford_depolarization=0.01 \
+    --after_clifford_depolarization=0.08 \
     --code repetition_code \
     --task memory \
     > circuit.stim
@@ -131,7 +131,7 @@ end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
 echo "SHMEM run completed in $parallel_time seconds."
 
-python3 ../scripts/combine_results.py predicted_obs_flips__shmem.01 2
+python3 ../scripts/combine_results.py predicted_obs_flips__shmem.01 $ppn
 
 # Check work
 echo SHMEM

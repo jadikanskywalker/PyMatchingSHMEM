@@ -45,6 +45,7 @@ struct ShotContainer {
     std::vector<std::vector<uint64_t>> virtual_boundary_hits;
 
     int num_observables;
+    pm::MatchingResult obs_mask;
     pm::ExtendedMatchingResult res;
 
     std::vector<bool> i_solved_p;

@@ -37,8 +37,8 @@ struct FusionSummary {
     GraphFillRegion* regions_ptr_base; // index where solving partition's arena begins
     DetectorNode* static_nodes_base; // Base address of graph.nodes on the sender PE
     size_t blossom_children_size;
-    size_t regions_matched_to_vb_size;
-    GraphFillRegion* regions_matched_to_vb[]; 
+    size_t regions_to_unmatch_size;
+    GraphFillRegion* regions_to_unmatch[]; 
     // uint64_t shmem_bitmap[]; // implicitly follows
 };
 #endif
@@ -158,10 +158,10 @@ struct DecodingUnit {
 
     // Decoding Functions
 #ifdef USE_SHMEM
-    void send_solution_to_remote_pe(size_t shot_container_id, CrossRankTask &task, std::ofstream &t_out);
+    void send_solution_to_remote_pe(size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &task, std::ofstream &t_out);
     bool get_solution_from_remote_pe(size_t shot_container_id, CrossRankTask &task, std::ofstream &t_out, std::vector<uint64_t>& hitsref); // returns whether solving is necessary
+    void isolate_solution_before_sending(pm::MatchingResult& bit_packed_res, pm::Mwpm& solver, pm::ShotContainer& shot, size_t shot_container_id, std::pair<int, int> p_range, std::pair<pm::GraphFillRegion*, pm::GraphFillRegion*> region_range, std::pair<pm::DetectorNode*, pm::DetectorNode*> node_range, std::ofstream& t_out);
     // void fuse_results_across_pes(size_t shot_container_id);
-    void solve_cross_process_fusion_and_get_next_shot(size_t shot_container_id, Task* t, size_t tid, size_t num_threads, size_t solver_id, size_t shot_id);
 #endif
 
 
