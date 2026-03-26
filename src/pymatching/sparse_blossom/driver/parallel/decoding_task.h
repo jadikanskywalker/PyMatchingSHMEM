@@ -209,6 +209,7 @@ public:
     uint64_t* signal_shm{ nullptr };
     pm::FusionSummary* fusion_summary_shm { nullptr };
     shmem_ctx_t context_shm;
+    bool owns_context{ true };
 
     CrossRankTask(
         int vb,
@@ -232,24 +233,43 @@ public:
             throw std::invalid_argument("DecodingTask: Cross PE fusion task requires a symmetric status atomic");
         }
         // Create communication context
-        shmem_ctx_create(SHMEM_CTX_SERIALIZED, &context_shm);
+        if (shmem_ctx_create(SHMEM_CTX_SERIALIZED, &context_shm)) {
+            throw std::invalid_argument("PE" + std::to_string(shmem_my_pe()) + " DecodingTask: Cross PE fusion task failed to create context");
+        }
         *status_shm = 0;
         *signal_shm = 0;
     }
 
-    ~CrossRankTask() {
-        shmem_ctx_destroy(context_shm);
+    CrossRankTask(CrossRankTask&& other) noexcept : TaskBase(std::move(other)) {
+        if (DEBUG) std::cout << "PE" << shmem_n_pes() << " CrossRankTask move constructor was called" << std::endl << std::flush;
+        child = other.child;
+        iamleft = other.iamleft;
+        other_pid = other.other_pid;
+        status_shm = other.status_shm;
+        signal_shm = other.signal_shm;
+        fusion_summary_shm = other.fusion_summary_shm;
+        context_shm = other.context_shm;
+        owns_context = other.owns_context;
+        
+        // Nullify other's ownership so destructor skips it
+        other.owns_context = false;
     }
+
+    ~CrossRankTask() {
+        if (owns_context)
+            shmem_ctx_destroy(context_shm);
+    }
+
 
     /* Helper Methods */
     inline void setup() {
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
         for (auto& region : child->regions_matched_to_virtual_boundary) {
-            if (region->match.edge.loc_to->vb == part)
+            if (region->match.edge.loc_to && region->match.edge.loc_to->vb == part)
                 regions_to_unmatch.push_back(region);
-            else
-                regions_matched_to_virtual_boundary.push_back(region);
+            // else
+            //     regions_matched_to_virtual_boundary.push_back(region);
         }
     };
 
@@ -261,15 +281,18 @@ public:
         shmem_ctx_uint64_atomic_set(context_shm, signal_shm, 0, my_pid);
     }
 
-    inline bool try_to_steal(size_t my_pid) {
+    inline bool try_to_steal(size_t my_pid, std::ostream& t_out) {
         int old, news;
         if (iamleft) {
+            if (DEBUG) t_out << "  performing fetch_or on " << status_shm << " my_pid=" << my_pid << " with child_bit=" << 1 << std::endl << std::flush;
             old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 1, my_pid);
             news = old | 1;
         } else {
+            if (DEBUG) t_out << "  performing fetch_or on " << status_shm << " other_pid=" << other_pid << " with child_bit=" << 2 << std::endl << std::flush;
             old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 2, other_pid);
             news = old | 2;
         }
+        if (DEBUG) t_out << "  done with fetch_or" << std::endl << std::flush;
         if (news == 3) {
             return old != 3;
         } else {
