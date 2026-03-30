@@ -48,8 +48,11 @@ struct ShotContainer {
     pm::MatchingResult obs_mask;
     pm::ExtendedMatchingResult res;
 
-    std::vector<bool> i_solved_p;
-    std::vector<bool> i_solved_vb;
+#ifdef USE_SHMEM
+    std::vector<uint8_t> i_solved_p;
+    std::vector<uint8_t> i_solved_vb;
+#endif
+
     std::vector<Task> tasks;  // Tasks handle dynamic fusion tree synchonization
 #ifdef USE_SHMEM
     std::vector<CrossRankTask> cross_rank_tasks;

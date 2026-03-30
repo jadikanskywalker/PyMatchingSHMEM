@@ -653,6 +653,8 @@ void Mwpm::prepare_for_task(TaskBase* t, int shot_id) {
     flooder.vb_left = t->vb_left; // DEPENDENT ON ROUND PARTITIONING
     flooder.vb_right = t->vb_right; // DEPENDENT ON ROUND PARTITIONING
     task = t;
+    flooder.task = t;
+    flooder.current_shot = shot_id;
     current_shot = shot_id;
 }
 #endif

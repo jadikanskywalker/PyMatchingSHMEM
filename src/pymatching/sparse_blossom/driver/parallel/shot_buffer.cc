@@ -35,9 +35,9 @@ ShotContainer::ShotContainer(
       num_observables(num_observables_in),
 #ifdef USE_SHMEM
       current_buffer_round_shm(current_buffer_round_ptr),
+      i_solved_p(num_partitions, 0),
+      i_solved_vb(num_virtual_boundaries, 0),
 #endif
-      i_solved_p(num_partitions, false),
-      i_solved_vb(num_virtual_boundaries, false),
       res(num_observables_in) {}
 
 ShotContainer::ShotContainer(ShotContainer&& other) noexcept

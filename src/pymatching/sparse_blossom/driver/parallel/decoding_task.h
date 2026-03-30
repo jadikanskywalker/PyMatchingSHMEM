@@ -37,11 +37,13 @@ struct TaskBase {
     int vb_right;
     bool is_fusion;
 
+    bool is_cross_rank_fusion;
+
     std::vector<pm::GraphFillRegion*> regions_to_unmatch;
     std::vector<pm::GraphFillRegion*> regions_matched_to_virtual_boundary;
 
-    TaskBase(int part, int vb_left, int vb_right, bool is_fusion) 
-        : part(part), vb_left(vb_left), vb_right(vb_right), is_fusion(is_fusion) {}
+    TaskBase(int part, int vb_left, int vb_right, bool is_fusion, bool is_cross_rank_fusion) 
+        : part(part), vb_left(vb_left), vb_right(vb_right), is_fusion(is_fusion), is_cross_rank_fusion(is_cross_rank_fusion) {}
 
     virtual ~TaskBase() = default;
 
@@ -81,13 +83,13 @@ struct Task : public TaskBase {
     Task* parent{nullptr};
 
     Task(int partition)
-        : TaskBase(partition, partition - 1, partition, false)
+        : TaskBase(partition, partition - 1, partition, false, false)
         // , part(partition)
     {
         status.store(-1, std::memory_order_release);
     }
     Task(int vb, Task* left_child, Task* right_child) : 
-        TaskBase(vb, left_child->vb_left, right_child->vb_right, true),
+        TaskBase(vb, left_child->vb_left, right_child->vb_right, true, false),
         // part(vb),
         left_child(left_child),
         right_child(right_child)
@@ -221,7 +223,7 @@ public:
         uint64_t* status_ptr,
         uint64_t* signal_ptr,
         pm::FusionSummary* fusion_summary_ptr
-    ) : TaskBase(vb, vb_left, vb_right, true),
+    ) : TaskBase(vb, vb_left, vb_right, true, true),
         child(child),
         iamleft(iamleft),
         other_pid(other_pid),

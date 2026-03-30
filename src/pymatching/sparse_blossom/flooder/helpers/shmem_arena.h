@@ -16,6 +16,9 @@
 
 #include <limits>
 
+#include <omp.h>
+#include <shmem.h>
+
 #include "pymatching/sparse_blossom/config_parallel.h"
 
 // The SHMEMArena, for typename T, :
@@ -64,7 +67,8 @@ struct SHMEMArena {
             }
         }
         if (result == nullptr) {  // fall back to heap memory
-            std::cout << "ERROR: Fallback to heap" << std::endl;
+            std::cout << "ERROR: Fallback to heap" << std::endl
+                      << "  Thread: " << omp_get_thread_num() << "    PE: " << shmem_my_pe() << std::endl;
             if (available.empty()) {
                 T* p = (T*)malloc(sizeof(T));
                 allocated.push_back(p);

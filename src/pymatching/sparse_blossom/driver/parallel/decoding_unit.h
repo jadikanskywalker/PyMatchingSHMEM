@@ -159,22 +159,10 @@ struct DecodingUnit {
     // Decoding Functions
 #ifdef USE_SHMEM
     void send_solution_to_remote_pe(size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &task, std::ofstream &t_out);
-    bool get_solution_from_remote_pe(size_t shot_container_id, CrossRankTask &task, std::ofstream &t_out, std::vector<uint64_t>& hitsref); // returns whether solving is necessary
-    void isolate_solution_before_sending(pm::MatchingResult& bit_packed_res, pm::Mwpm& solver, pm::ShotContainer& shot, size_t shot_container_id, std::pair<int, int> p_range, std::pair<pm::GraphFillRegion*, pm::GraphFillRegion*> region_range, std::pair<pm::DetectorNode*, pm::DetectorNode*> node_range, std::ofstream& t_out);
-    // void fuse_results_across_pes(size_t shot_container_id);
+    bool get_solution_from_remote_pe(size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &task, std::ofstream &t_out, std::vector<uint64_t>& hitsref); // returns whether solving is necessary
 #endif
 
-
-    void extract_match_edges(Mwpm& solver, ShotContainer& shot, std::vector<uint64_t>& hitsref, size_t tid, std::ostream& t_out);
-    void extract_obs_mask(Mwpm& solver, ShotContainer& shot, std::vector<uint64_t>& hitsref, size_t tid, std::ostream& t_out);
-
     void decode_shots();
-
-//     void solve_task(Mwpm& solver, std::vector<uint64_t>& hits, Task* task, int tid
-// #ifdef ENABLE_DRAW_FLAGS
-//         , int draw_frames
-// #endif
-//         , int shot_id);
 };
 
 }  // namespace pm

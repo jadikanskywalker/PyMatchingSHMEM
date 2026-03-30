@@ -31,6 +31,7 @@
 #endif
 #ifdef USE_THREADS
 #include <memory>
+#include "pymatching/sparse_blossom/driver/parallel/decoding_task.h"
 #endif
 
 namespace pm {
@@ -78,6 +79,8 @@ struct GraphFlooder {
     const int rotating_buffer_idx{-1};
     // int current_shot = -1;
     int vb_left, vb_right;
+    TaskBase *task;
+    int current_shot;
 #ifdef ENABLE_DRAW_FLAGS
     const std::vector<int>* node_part_id_ptr = nullptr;
 #endif
