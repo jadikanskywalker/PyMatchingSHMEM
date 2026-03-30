@@ -24,6 +24,10 @@
 #include <omp.h>
 
 #include "../config_parallel.h"
+
+#ifdef USE_SHMEM
+#include <shmem.h>
+#endif
 #endif
 
 using namespace pm;
@@ -296,7 +300,16 @@ void GraphFlooder::reschedule_events_at_detector_node(DetectorNode& detector_nod
 #ifdef USE_THREADS
     // ===============
     if (!is_active(&detector_node)) {
-        std::cout << "    NOTE: reschedule called on inactive node" << std::endl;
+        std::cout << "    NOTE: reschedule called on inactive node" << std::endl
+                  << "      Shot: " << current_shot << "    Task.part: " << task->part
+#ifdef USE_SHMEM
+                  << " (is_cross_rank_fusion: " << task->is_cross_rank_fusion << ")" << std::endl
+#endif
+                  << "      Thread: " << omp_get_thread_num()
+#ifdef USE_SHMEM
+                  << "    PE: " << shmem_my_pe()
+#endif
+                  << std::endl << std::flush;
         return;
     }
 // ===============

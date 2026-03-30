@@ -1,15 +1,17 @@
 #pragma once
 
-#define DEBUG 1
+#define DEBUG 0
 
 #define ENABLE_DRAW_FLAGS
 
 #define NUM_BUFFERS_PER_UNIT 1
 
-// per solver region buffer size = num_nodes_per_partition * SHMEM_ARENA_BUFFER_FACTOR
-//    1 ensures no heap overflow, can reduce for smaller p, currently could segfault
+// per solver region buffer size in SHMEM = num_nodes_per_partition * SHMEM_ARENA_BUFFER_FACTOR rounded up to a multiple of 64
+//    2 would ensure no heap overflow in absolute worst case, can reduce for smaller p & _should_ not segfault
 #define SHMEM_ARENA_BUFFER_FACTOR 1 
-#define SHMEM_INTERSECTION_BUFFER_FACTOR 2 // multiplied by d, maximum number of rounds that cross-PE fusion can last
+
+// region_matched_to_vb buffer size in SHMEM = num_nodes_per_round (eg., d for repetition_code, d^2 for surface_code) * SHMEM_INTERSECTION_BUFFER_FACTOR
+#define SHMEM_INTERSECTION_BUFFER_FACTOR 2
 
 #define SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER 2
 // #define SHMEM_USE_FLATTEN_FUSIONS true // not flattening is currently unsupported
