@@ -6,17 +6,19 @@
 
 # export SHMEM_OFI_PROVIDER=ofi_rxm
 
-if [ $# -le 5 ]
+if [ $# -le 7 ]
   then
-    echo "Args: [ppn] [nthreads] [shots] [rounds] [M] [k]"
+    echo "Args: [n] [ppn] [nthreads_shmem] [nthreads] [shots] [rounds] [M] [k]"
     exit 1
 else
-    ppn=$1
-    nthreads=$2
-    shots=$3
-    rounds=$(($4-1))
-    M=$5
-    k=$6
+    n=$1
+    ppn=$2
+    nthreads_shmem=$3
+    nthreads=$4
+    shots=$5
+    rounds=$(($6-1))
+    M=$7
+    k=$8
 fi
 
 if [ ! -d "run" ]
@@ -41,8 +43,6 @@ rm *.out
 # }
 # create_hostfile
 
-rm *.01 circuit.stim *.b8 *.dem
-
 if [ -d "out_parallel" ]
   then
     rm out_parallel -r
@@ -57,12 +57,13 @@ if [ -d "out_frames" ]
 fi
 
 # need to find d=21 lattice surgery circuit
+rm *.01 circuit.stim *.b8 *.dem
 stim gen \
     --rounds=$rounds \
-    --distance=12 \
-    --after_clifford_depolarization=0.08 \
-    --code repetition_code \
-    --task memory \
+    --distance=21 \
+    --after_clifford_depolarization=0.01 \
+    --code surface_code \
+    --task rotated_memory_x \
     > circuit.stim
 stim analyze_errors \
     --decompose_errors \
@@ -85,9 +86,9 @@ if [ $nthreads -gt 0 ]
     export OMP_PROC_BIND=true
 fi
 
-echo "Starting threads run..."
+# echo "Starting threads run..."
 start_serial=$(date +%s)
-~/PyMatchingSHMEM/build_threads/pymatching predict \
+~/PyMatchingSHMEM/build_threads_release/pymatching predict \
     --dem error_model.dem \
     --in detection_events.b8 \
     --in_format b8 \
@@ -111,8 +112,12 @@ echo
 # export ASAN_OPTIONS=detect_leaks=0
 echo "Starting SHMEM run..."
 start_parallel=$(date +%s)
+#    --map-by ppr:${ppn}:node:pe=${OMP_NUM_THREADS} \
+export OMP_NUM_THREADS=$nthreads_shmem
+export SHMEM_SYMMETRIC_SIZE=2G
 oshrun  \
-    --map-by ppr:${ppn}:node:pe=${OMP_NUM_THREADS} \
+    -n $n \
+    --map-by ppr:$ppn:node:PE=$nthreads_shmem \
     --bind-to core \
     --report-bindings \
     ~/PyMatchingSHMEM/build_sos/pymatching predict \
@@ -124,14 +129,15 @@ oshrun  \
     --rounds_per_partition $M \
     --cross_rank_fusion_window_size $k \
     --use_threads \
-    --draw_frames \
     > log_shmem.out
 
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
 echo "SHMEM run completed in $parallel_time seconds."
 
-python3 ../scripts/combine_results.py predicted_obs_flips__shmem.01 $ppn
+npes=$(($n * $ppn))
+
+python3 ../scripts/combine_results.py predicted_obs_flips__shmem.01 $n
 
 # Check work
 echo SHMEM

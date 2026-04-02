@@ -1,6 +1,7 @@
 #pragma once
 
-#define DEBUG 0
+#define DEBUG 0 // 0 = none; 1 = full;
+#define BARE_DEBUG 0
 
 #define ENABLE_DRAW_FLAGS
 

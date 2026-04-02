@@ -26,15 +26,15 @@
 namespace pm {
 
 ShotContainer::ShotContainer(
-#ifdef USE_SHMEM
-    uint64_t* current_buffer_round_ptr,
-#endif
+// #ifdef USE_SHMEM
+//     uint64_t* current_buffer_round_ptr,
+// #endif
     int num_partitions, int num_virtual_boundaries, int num_observables_in)
     : partition_hits(num_partitions),
       virtual_boundary_hits(num_virtual_boundaries),
       num_observables(num_observables_in),
 #ifdef USE_SHMEM
-      current_buffer_round_shm(current_buffer_round_ptr),
+    //   current_buffer_round_shm(current_buffer_round_ptr),
       i_solved_p(num_partitions, 0),
       i_solved_vb(num_virtual_boundaries, 0),
 #endif
@@ -72,9 +72,9 @@ void ShotContainer::clear() {
 }
 
 ShotBuffer::ShotBuffer(
-#ifdef USE_SHMEM
-    uint64_t* atomics_ptr,
-#endif
+// #ifdef USE_SHMEM
+//     uint64_t* atomics_ptr,
+// #endif
     std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader_in,
     std::unique_ptr<stim::MeasureRecordWriter> writer_in,
     int num_partitions,
@@ -85,9 +85,9 @@ ShotBuffer::ShotBuffer(
     buffer.reserve(static_cast<size_t>(NUM_BUFFERS_PER_UNIT));
     for (size_t i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
         buffer.emplace_back(
-#ifdef USE_SHMEM
-            atomics_ptr + i,
-#endif
+// #ifdef USE_SHMEM
+//             atomics_ptr + i,
+// #endif
             num_partitions, num_virtual_boundaries, num_observables);
     }
 }

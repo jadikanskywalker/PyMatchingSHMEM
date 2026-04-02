@@ -33,6 +33,8 @@
 namespace pm {
 
 #ifdef USE_SHMEM
+#define SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION 3
+
 struct FusionSummary {
     GraphFillRegion* regions_ptr_base; // index where solving partition's arena begins
     DetectorNode* static_nodes_base; // Base address of graph.nodes on the sender PE
@@ -78,7 +80,7 @@ struct DecodingUnit {
     DetectorNodeEphemeralFields* node_ephemeral_fields_ptr{ nullptr }; // ephemeral field buffers for DetectorNodes
     GraphFillRegion* regions_ptr{ nullptr }; // buffers for region SHMEMArenas
     BlossomChild* child_edges_ptr{ nullptr }; // blossom parent-child relationship buffer
-    uint64_t* atomics_ptr{ nullptr }; // shot counter for each shot container
+    // uint64_t* atomics_ptr{ nullptr }; // shot counter for each shot container
     uint64_t* task_status_ptr{ nullptr }; // status and signal for each fusion task
     FusionSummary* task_fusion_summary_ptr { nullptr }; // fusion summary for each fusion task
     // Info used for symmetric memory accesses
@@ -104,7 +106,7 @@ struct DecodingUnit {
         //   This ensures tasks correspond on each PE
         bool even = !(pid % 2);
         bool take_second_slot = (even && iamleft) || (!even && !iamleft);
-        return task_status_ptr + 2*(SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER*shot_container_id + take_second_slot);
+        return task_status_ptr + SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION*(SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER*shot_container_id + take_second_slot);
     }
 
     inline DetectorNodeEphemeralFields* get_node_fields_ptr(size_t shot_container_id, int partition_id) {

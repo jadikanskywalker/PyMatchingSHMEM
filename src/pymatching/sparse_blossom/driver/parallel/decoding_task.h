@@ -209,6 +209,7 @@ public:
     // SHMEM resources
     uint64_t* status_shm{ nullptr };
     uint64_t* signal_shm{ nullptr };
+    uint64_t* done_shm{ nullptr };
     pm::FusionSummary* fusion_summary_shm { nullptr };
     shmem_ctx_t context_shm;
     bool owns_context{ true };
@@ -222,6 +223,7 @@ public:
         size_t other_pid,
         uint64_t* status_ptr,
         uint64_t* signal_ptr,
+        uint64_t* done_ptr,
         pm::FusionSummary* fusion_summary_ptr
     ) : TaskBase(vb, vb_left, vb_right, true, true),
         child(child),
@@ -229,6 +231,7 @@ public:
         other_pid(other_pid),
         status_shm(status_ptr),
         signal_shm(signal_ptr),
+        done_shm(done_ptr),
         fusion_summary_shm(fusion_summary_ptr)
     {
         if (status_shm == nullptr) {
@@ -240,6 +243,7 @@ public:
         }
         *status_shm = 0;
         *signal_shm = 0;
+        *done_shm = 0;
     }
 
     CrossRankTask(CrossRankTask&& other) noexcept : TaskBase(std::move(other)) {
@@ -249,6 +253,7 @@ public:
         other_pid = other.other_pid;
         status_shm = other.status_shm;
         signal_shm = other.signal_shm;
+        done_shm = other.done_shm;
         fusion_summary_shm = other.fusion_summary_shm;
         context_shm = other.context_shm;
         owns_context = other.owns_context;
@@ -277,10 +282,18 @@ public:
 
 
     /* Sychnorization Methods */
-    // Should be called on both PE's for a cross-PE fusion
+    // Should be called on PE who solved fusion
     inline void mark_solved(size_t my_pid) {
         shmem_ctx_uint64_atomic_set(context_shm, status_shm, 0, (iamleft) ? my_pid : other_pid);
-        shmem_ctx_uint64_atomic_set(context_shm, signal_shm, 0, my_pid);
+        shmem_ctx_uint64_atomic_set(context_shm, signal_shm, 0, my_pid); // reset my signal
+    }
+
+    inline void report_done(int shot_buffer_round) {
+        shmem_ctx_uint64_atomic_set(context_shm, done_shm, shot_buffer_round+1, other_pid); // notify other PE we are done
+    }
+
+    inline void wait_until_done(size_t my_pid, int shot_buffer_round) {
+        shmem_wait_until(done_shm, SHMEM_CMP_GE, shot_buffer_round + 1);
     }
 
     inline bool try_to_steal(size_t my_pid, std::ostream& t_out) {
