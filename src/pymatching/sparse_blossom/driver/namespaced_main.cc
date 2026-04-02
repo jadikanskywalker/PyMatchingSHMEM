@@ -392,7 +392,11 @@ int pm::main(int argc, const char** argv) {
         if (strcmp(command, "predict") == 0) {
 #ifdef USE_SHMEM
             // ===============
-            shmem_init();
+            int provided;
+            shmem_init_thread(SHMEM_THREAD_SERIALIZED, &provided);
+            if (provided < SHMEM_THREAD_SERIALIZED) {
+                std::cerr << "Warning: OpenSHMEM failed to init with SHMEM_THREAD_SERIALED." << std::endl;
+            }
 #endif
             int status = main_predict(argc, argv);
 #ifdef USE_SHMEM

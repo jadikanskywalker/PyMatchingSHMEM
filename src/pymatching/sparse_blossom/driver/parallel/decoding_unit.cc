@@ -69,17 +69,31 @@ pm::DecodingUnit::DecodingUnit(
         throw std::invalid_argument("Graph partitioning produced no partitions. Check --rounds_per_partition.");
     }
 #ifdef USE_SHMEM
+    // Bound k
+    int p_per_pe = graph.num_partitions / n_pes;
+    if (n_pes == 2 && config_parallel::k > graph.num_partitions/2) {
+        config_parallel::k = graph.num_partitions/2;
+        std::cout << "NOTE: k set to " << config_parallel::k << " for 2 PEs" << std::endl << std::flush;
+    } else {
+        if (p_per_pe < 2) {
+            throw std::invalid_argument("The number of partitions per PE should be >= 2 for more than 2 ranks.");
+        } else if (config_parallel::k > p_per_pe / 2) {
+            // Bounding k for correctness
+            config_parallel::k = p_per_pe / 2;
+            std::cout << "NOTE: k bounded to " << config_parallel::k << std::endl << std::flush;
+        }
+    }
     // --- Allocate sychronization & summary memory ---
-    atomics_ptr = static_cast<uint64_t*>(shmem_align(sizeof(uint64_t), NUM_BUFFERS_PER_UNIT * sizeof(uint64_t)));
-    task_status_ptr = static_cast<uint64_t*>(shmem_align(sizeof(uint64_t), SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER * 2 * NUM_BUFFERS_PER_UNIT * sizeof(uint64_t))); // Space for two cross-rank fusions
+    // atomics_ptr = static_cast<uint64_t*>(shmem_align(sizeof(uint64_t), NUM_BUFFERS_PER_UNIT * sizeof(uint64_t)));
+    task_status_ptr = static_cast<uint64_t*>(shmem_align(sizeof(uint64_t), SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER * SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION * NUM_BUFFERS_PER_UNIT * sizeof(uint64_t))); // Space for two cross-rank fusions
     regions_nelems_per_solver = graph.node_part_id.size() / graph.num_partitions * SHMEM_ARENA_BUFFER_FACTOR;
     if (regions_nelems_per_solver % 64 > 0) {
         regions_nelems_per_solver =
             (regions_nelems_per_solver / 64 + 1) * 64;  // make multiple of 64
     }
     // regions_nelems_per_solver / 64 gives number of uint64_t for bitmap
-    child_edges_nelems_per_solver = regions_nelems_per_solver;
-    size_t regions_matched_to_vb_nelems = graph.node_part_id.size() / graph.num_rounds * SHMEM_INTERSECTION_BUFFER_FACTOR;
+    child_edges_nelems_per_solver = regions_nelems_per_solver; // Could reduce this
+    regions_matched_to_vb_nelems = graph.node_part_id.size() / graph.num_rounds * SHMEM_INTERSECTION_BUFFER_FACTOR;
     child_edges_ptr = static_cast<BlossomChild*>(shmem_malloc(child_edges_nelems_per_solver * graph.num_partitions * NUM_BUFFERS_PER_UNIT * sizeof(BlossomChild)));
     if (child_edges_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate symmetric blossom child buffer.");
@@ -88,18 +102,15 @@ pm::DecodingUnit::DecodingUnit(
                                         regions_matched_to_vb_nelems * sizeof(GraphFillRegion*) + 
                                         (config_parallel::k * regions_nelems_per_solver / 8); /* bit map in bytes (== nelems/64 * 8) */
     task_fusion_summary_ptr = static_cast<FusionSummary*>(shmem_malloc(task_fusion_summary_size_per_task * SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER * NUM_BUFFERS_PER_UNIT));
-    if (atomics_ptr == nullptr || task_status_ptr == nullptr || task_fusion_summary_ptr == nullptr) {
+    if (task_status_ptr == nullptr || task_fusion_summary_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate symmetric atomics buffer.");
     }
-    // closest_nb_nelems_per_buffer = graph.node_part_id.size() / graph.num_rounds * SHMEM_INTERSECTION_BUFFER_FACTOR;
-    // closest_nb_ptr = static_cast<std::pair<size_t, size_t>*>(
-    //     shmem_malloc(closest_nb_nelems_per_buffer * NUM_BUFFERS_PER_UNIT * sizeof(std::pair<size_t, size_t>)));
 #endif
     // --- Create shot buffer ---
     shot_buffer = std::make_shared<pm::ShotBuffer>(
-#ifdef USE_SHMEM
-        atomics_ptr,
-#endif
+// #ifdef USE_SHMEM
+//         atomics_ptr,
+// #endif
         std::move(reader),
         std::move(writer),
         graph.num_partitions,
@@ -118,25 +129,12 @@ pm::DecodingUnit::DecodingUnit(
     }
     int max_threads = omp_get_max_threads();
 #ifdef USE_SHMEM
-    int p_per_pe = graph.num_partitions / n_pes;
-    if (n_pes == 2 && config_parallel::k > graph.num_partitions/2) {
-        config_parallel::k = graph.num_partitions/2;
-        std::cout << "NOTE: k set to " << config_parallel::k << " for 2 PEs" << std::endl << std::flush;
-    } else {
-        if (p_per_pe < 2) {
-            throw std::invalid_argument("The number of partitions per PE should be >= 2 for more than 2 ranks.");
-        } else if (config_parallel::k > p_per_pe / 2) {
-            // Bounding k for correctness
-            config_parallel::k = p_per_pe / 2;
-            std::cout << "NOTE: k bounded to " << config_parallel::k << std::endl << std::flush;
-        }
-    }
     std::cout << "NOTE: For now, ensure the number of partitions and the number of ranks is a power of 2. This ensures clean divisions in the task tree.\n" << std::flush;
     num_threads = (max_threads < p_per_pe) ? max_threads : p_per_pe; 
     num_partition_units = 1; // FIX THIS??
     num_solvers_per_buffer = graph.num_partitions;
     // --- Populate my_partitions (should probably make multiple of power of 2)
-    //   THIS IS ALL BASED ON SIMPLE ROUND_BASE FUSION ACROSS PEs
+    //   THIS IS ALL BASED ON SIMPLE ROUND-BASED FUSION ACROSS PEs
     my_partitions.reserve(p_per_pe);
     int my_partitions_start = p_per_pe * pid;
     int my_partitions_end = my_partitions_start + p_per_pe;
@@ -175,8 +173,9 @@ pm::DecodingUnit::DecodingUnit(
                 (vb-config_parallel::k < -1) ? -1 : vb-config_parallel::k,
                 (vb+config_parallel::k < graph.num_virtual_boundaries) ? vb+config_parallel::k : graph.num_virtual_boundaries,
                 pid-1,
-                task_status_p,
-                task_status_p + 1,
+                task_status_p,     // status_shm
+                task_status_p + 1, // signal_shm
+                task_status_p + 2, // done_shm
                 fusion_summary_p
             );
             if (DEBUG) {
@@ -204,8 +203,9 @@ pm::DecodingUnit::DecodingUnit(
                 (vb-config_parallel::k < -1) ? -1 : vb-config_parallel::k,
                 (vb+config_parallel::k < graph.num_virtual_boundaries) ? vb+config_parallel::k : graph.num_virtual_boundaries,
                 pid+1,
-                task_status_p,
-                task_status_p + 1,
+                task_status_p,     // status_shm
+                task_status_p + 1, // signal_shm
+                task_status_p + 2, // done_shm
                 fusion_summary_p
             );
             if (DEBUG) {
@@ -218,7 +218,8 @@ pm::DecodingUnit::DecodingUnit(
                     << "    vb_right: " << t.vb_right << std::endl
                     << "    other_pid: " << t.other_pid << std::endl
                     << "    status_shm: " << t.status_shm << std::endl 
-                    << "    signal_shm: " << t.signal_shm << std::endl 
+                    << "    signal_shm: " << t.signal_shm << std::endl
+                    << "    done_shm: " << t.done_shm << std::endl
                     << "    fusion_summary_shm: " << t.fusion_summary_shm << std::endl << std::flush;
             }
         }
@@ -235,7 +236,7 @@ pm::DecodingUnit::DecodingUnit(
     if (DEBUG) {
         std::cout << "PE" << pid << " symmetric allocations:" << std::endl
                   << "  node_ephemeral_fields_ptr: " << node_ephemeral_fields_ptr << " (" << nodes_nelems_per_buffer * sizeof(DetectorNodeEphemeralFields) << " bytes)" << std::endl
-                  << "  atomics_ptr: " << atomics_ptr << " (" << NUM_BUFFERS_PER_UNIT * sizeof(uint64_t) << " bytes)" << std::endl
+                //   << "  atomics_ptr: " << atomics_ptr << " (" << NUM_BUFFERS_PER_UNIT * sizeof(uint64_t) << " bytes)" << std::endl
                   << "  task_status_ptr: " << task_status_ptr << " (" << (graph.num_partitions-1) * 2 * sizeof(uint64_t) << " bytes)" << std::endl
                   << "  task_fusion_summary_ptr: " << task_fusion_summary_ptr << " (" << task_fusion_summary_size_per_task * (graph.num_partitions-1) << " bytes)" << std::endl
                   << "  regions_ptr: " << regions_ptr << " (" << regions_nelems_per_solver * (num_threads) * 2 * NUM_BUFFERS_PER_UNIT * sizeof(GraphFillRegion) << " bytes)" << std::endl
@@ -266,7 +267,7 @@ pm::DecodingUnit::~DecodingUnit() {
     shmem_free(node_ephemeral_fields_ptr);
     shmem_free(regions_ptr);
     shmem_free(child_edges_ptr);
-    shmem_free(atomics_ptr);
+    // shmem_free(atomics_ptr);
     shmem_free(task_status_ptr);
     shmem_free(task_fusion_summary_ptr);
 #endif
@@ -411,7 +412,9 @@ bool check_pointers_for_self_and_all_descendents(
     pm::GraphFillRegion* root,
     std::pair<pm::GraphFillRegion*, pm::GraphFillRegion*> region_range,
     std::pair<pm::DetectorNode*, pm::DetectorNode*> node_range,
-    std::vector<pm::BlossomChild>* discovered_edges) {
+    std::vector<pm::BlossomChild>* discovered_edges
+    // , bool check_match
+    ) {
     if (!ptr_in_range(root, region_range)) return false;
     for (pm::DetectorNode* node : root->shell_area) {
         if (!ptr_in_range(node, node_range)) return false;
@@ -426,6 +429,17 @@ bool check_pointers_for_self_and_all_descendents(
         }
         discovered_edges->push_back(pm::BlossomChild{(size_t)(root - region_range.first), edge});
     }
+    // if (check_match && root->match.region) {
+    //     if (!check_pointers_for_self_and_all_descendents(
+    //         root->match.region,
+    //         region_range,
+    //         node_range,
+    //         discovered_edges,
+    //         false
+    //     )) {
+    //         return false;
+    //     }
+    // }
     return true;
 }
 
@@ -448,10 +462,17 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
     FusionSummary*& fusion_summary_base = t.fusion_summary_shm;
 
     // Populate FusionSummary header and regions_to_unmatch first; bitmap area is used as temporary checked map.
+    if (t.regions_to_unmatch.size() > regions_matched_to_vb_nelems) {
+        throw std::invalid_argument("Rank " + std::to_string(pid) + " Thread " + std::to_string(omp_get_thread_num())
+                                    + " Shot " + std::to_string(pid) + " Cross-Rank Fusion " + std::to_string(t.part)
+                                    + ": t.regions_to_unmatch (" + std::to_string(t.regions_to_unmatch.size())
+                                    + ") exceeds regions_matched_to_vb_nelems (" + std::to_string(regions_matched_to_vb_nelems) + ")"
+                                    );
+    }
     fusion_summary_base->regions_to_unmatch_size = t.regions_to_unmatch.size();
     fusion_summary_base->regions_ptr_base = regions_ptr;
     fusion_summary_base->static_nodes_base = graph.graph_ptr->nodes.data();
-    for (size_t i = 0; i < t.regions_to_unmatch.size(); ++i) {
+    for (size_t i = 0; i < t.regions_to_unmatch.size() && i < regions_matched_to_vb_nelems; ++i) {
         fusion_summary_base->regions_to_unmatch[i] = t.regions_to_unmatch[i];
         if (DEBUG) t_out << "      " << t.regions_to_unmatch[i] << std::endl << std::flush;
     }
@@ -547,7 +568,8 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                                 region_range,
                                 node_range,
                                 &discovered_child_edges);
-                        } else valid = false;
+                        } else
+                            valid = false;
                     }
                 }
                 if (!valid) {
@@ -557,6 +579,10 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                     for (const auto& child_edge : discovered_child_edges) {
                         if (child_edges_counter < k * child_edges_nelems_per_solver) {
                             child_edges_buff_base[child_edges_counter++] = child_edge;
+                        } else {
+                            throw std::invalid_argument("Rank " + std::to_string(pid) + " Thread " + std::to_string(omp_get_thread_num())
+                                                        + " Shot " + std::to_string(pid) + " Cross-Rank Fusion " + std::to_string(t.part)
+                                                        + ": # of blossom child edges exceeds k * child_edges_nelems_per_solver");
                         }
                     }
                 }
@@ -811,18 +837,23 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, pm:
                         // Rebase pointers with OOB check
                         if (r->blossom_parent) {
                             r->blossom_parent = rebase_region_ptr(r->blossom_parent);
+                            if (DEBUG && !r->blossom_parent) t_out << "        blossom_parent\n" << std::flush;
                         }
                         if (r->blossom_parent_top) {
                             r->blossom_parent_top = rebase_region_ptr(r->blossom_parent_top);
+                            if (DEBUG && !r->blossom_parent_top) t_out << "        blossom_parent_top\n" << std::flush;
                         }
                         if (r->match.region) {
                             r->match.region = rebase_region_ptr(r->match.region);
+                            if (DEBUG && !r->match.region) t_out << "        match.region\n" << std::flush;
                         }
                         if (r->match.edge.loc_from) {
                             r->match.edge.loc_from = rebase_node_ptr(r->match.edge.loc_from);
+                            if (DEBUG && !r->match.edge.loc_from) t_out << "        match.edge.loc_from\n" << std::flush;
                         }
                         if (r->match.edge.loc_to) {
                             r->match.edge.loc_to = rebase_node_ptr(r->match.edge.loc_to);
+                            if (DEBUG && !r->match.edge.loc_to) t_out << "        match.edge.loc_to\n" << std::flush;
                         }
                         // Reset vectors (they contain pointers that need manual reconstruction)
                         new (&r->blossom_children) std::vector<RegionEdge>();
@@ -875,14 +906,28 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, pm:
     for (size_t i = 0; i < nodes_nelems_total; ++i) {
         DetectorNodeEphemeralFields& fields = node_fields_base[i];
         // bool clear_node = false;
+        bool cleared_region_that_arrived = false;
         if (fields.region_that_arrived) {
             fields.region_that_arrived = rebase_region_ptr(fields.region_that_arrived);
             if (fields.region_that_arrived) {
                 fields.region_that_arrived->shell_area.push_back(&graph.graph_ptr->nodes[nodes_start_bounds.first + i]);
+            } else {
+                cleared_region_that_arrived = true;
             }
         }
         if (fields.region_that_arrived_top) {
             fields.region_that_arrived_top = rebase_region_ptr(fields.region_that_arrived_top);
+            if (fields.region_that_arrived_top) {
+                if (cleared_region_that_arrived) {
+                   throw std::invalid_argument("Rank " + std::to_string(pid) + " Thread " + std::to_string(omp_get_thread_num())
+                                                + " Shot " + std::to_string(pid) + " Cross-Rank Fusion " + std::to_string(t.part)
+                                                + ": reciever cleared node's region_that_arrived but not region_that_arrived_top");
+                }
+            } else if (!cleared_region_that_arrived) {
+                throw std::invalid_argument("Rank " + std::to_string(pid) + " Thread " + std::to_string(omp_get_thread_num())
+                            + " Shot " + std::to_string(pid) + " Cross-Rank Fusion " + std::to_string(t.part)
+                            + ": reciever cleared node's region_that_arrived_top but not region_that_arrived");
+            }
         }
         if (fields.reached_from_source) {
             fields.reached_from_source = rebase_node_ptr(fields.reached_from_source);
@@ -934,11 +979,11 @@ void pm::DecodingUnit::decode_shots() {
         int shot_id = shot_buffer_round * NUM_BUFFERS_PER_UNIT;
         try {
             while (true) {
-                // if (DEBUG) {
+                if (BARE_DEBUG) {
                     t_out << std::endl
                           << "Starting shot " << shot_id << ", buffer round " << shot_buffer_round << ", buffer_id "
                           << shot_container_id << std::endl << std::flush;
-                // }
+                }
 #ifdef ENABLE_DRAW_FLAGS
                 if (draw_frames) {
                     std::string frames_out = "out_parallel/frames/" + std::to_string(shot_id);
@@ -972,16 +1017,15 @@ void pm::DecodingUnit::decode_shots() {
                 bool stolen = t->try_to_steal_leaf(shot_buffer_round);
                 bool i_solved_root = false;
                 while (stolen) {  // Got task
-                    // if (DEBUG) {
-                        t_out << "Thread " << tid << " solving " << (t->is_fusion ? "f" : "p") << t->part << std::endl << std::flush;
-                    // }
+                    // if (DEBUG) t_out << "Thread " << tid << " solving " << (t->is_fusion ? "f" : "p") << t->part << std::endl << std::flush;
                     auto& hitsref = (t->is_fusion) ? shot.virtual_boundary_hits[t->part] : shot.partition_hits[t->part];
                     // Solve task
                     t->setup();
+                    // if (DEBUG) t_out << "  solvers[" << solver_id << "]\n";
                     pm::Mwpm& solver = *solvers[solver_id];
                     solver.prepare_for_task(t, shot_id);
 #ifdef USE_SHMEM
-                    t_out << "  solver bounds: " << solver.flooder.vb_left << "(vb_left) " << solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
+                    // if (DEBUG) t_out << "  solver bounds: " << solver.flooder.vb_left << "(vb_left) " << solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
 #endif
                     pm::process_timeline_until_completion(
                         solver,
@@ -994,13 +1038,14 @@ void pm::DecodingUnit::decode_shots() {
                         true,
                         tid);
 #ifdef USE_SHMEM
-                    if (DEBUG) t_out << "  solved " << (t->is_fusion ? "f" : "p") << t->part << std::endl << std::flush;
+                    // if (DEBUG) t_out << "  solved " << (t->is_fusion ? "f" : "p") << t->part << std::endl << std::flush;
                     (t->is_fusion) ? shot.i_solved_vb[t->part] = true : shot.i_solved_p[t->part] = true;
 #endif
                     t->mark_solved();
                     if (t->parent) {
                         bool iamleft = t->child_bit == 1;
                         Task* sibling = (iamleft) ? t->parent->right_child : t->parent->left_child;
+                        solver_id = get_solver_id(shot_container_id, t->parent->part, tid);
                         stolen = t->try_to_steal_parent();
                         t = t->parent;
                         // Try to steal sibling or descendent of sibling
@@ -1014,14 +1059,13 @@ void pm::DecodingUnit::decode_shots() {
                         if (!stolen && next_leaf_id < my_partitions.size()) {
                             t = &shot.tasks[next_leaf_id];
                             solver_id = get_solver_id(shot_container_id, t->part, tid);
-                            if (DEBUG) t_out << "solvers[" << solver_id << "]\n";
                             stolen = t->try_to_steal_leaf(shot_buffer_round);
                             next_leaf_id += next_leaf_inc;
                         }
                         if (DEBUG) {
                             if (t != nullptr) {
-                                t_out << (t->is_fusion ? "  f" : "  p") << t->part << " stolen = " << stolen
-                                      << std::endl << std::flush;
+                                // t_out << (t->is_fusion ? "  f" : "  p") << t->part << " stolen = " << stolen
+                                //       << std::endl << std::flush;
                             }
                         }
                     } else {
@@ -1045,7 +1089,7 @@ void pm::DecodingUnit::decode_shots() {
                                          << "  task_status_ptr: " << task_status_ptr << std::endl
                                          << std::flush;
                         if (t.try_to_steal(pid, t_out)) {
-                            t_out << "  Stole cross-rank fusion with " << t.other_pid << std::endl << std::flush;
+                          if (BARE_DEBUG) t_out << "  Stole cross-rank fusion with " << t.other_pid << std::endl << std::flush;
                             t.setup();
                             solver_id = get_solver_id(shot_container_id, t.part);
                             auto& solver = *solvers[solver_id];
@@ -1060,7 +1104,7 @@ void pm::DecodingUnit::decode_shots() {
                                 draw_frame(solver, pm::MwpmEvent::no_event(), 1000, true, tid);
                             }
 #endif
-                            t_out << "  Solving cross-pe fusion " << t.part 
+                            if (BARE_DEBUG) t_out << "  Solving cross-pe fusion " << t.part 
                                                 << " bounds " << solver.flooder.vb_left << " " << solver.flooder.vb_right << std::endl << std::flush;
                             pm::process_timeline_until_completion(
                                 solver,
@@ -1082,7 +1126,7 @@ void pm::DecodingUnit::decode_shots() {
 #endif
                         } else {
                             // I send
-                            t_out << "  Sending cross-rank fusion data to " << t.other_pid << std::endl;
+                            if (BARE_DEBUG) t_out << "  Sending cross-rank fusion data to " << t.other_pid << std::endl;
                             t.setup();
 #ifdef ENABLE_DRAW_FLAGS
                             if (draw_frames) {
@@ -1095,9 +1139,7 @@ void pm::DecodingUnit::decode_shots() {
                         }
                     }
 #endif
-                    // if (DEBUG) {
-                        t_out << "T" << tid << " extracting solution" << std::endl << std::flush;
-                    // }
+                    if (BARE_DEBUG) t_out << "T" << tid << " extracting solution" << std::endl << std::flush;
 #ifdef ENABLE_DRAW_FLAGS
                     if (draw_frames) {
                         auto& solver = *solvers[solver_id];
@@ -1213,9 +1255,15 @@ void pm::DecodingUnit::decode_shots() {
                     // }
                     // BARRIER needed to prevent race on extraction/putting mem
                     // Need to make more robust
-                    if (DEBUG) t_out << "    entering barrier" << std::endl << std::flush;
-                    shmem_barrier_all();
-                    if (DEBUG) t_out << "    exiting barrier" << std::endl << std::flush;
+                    if (BARE_DEBUG) t_out << "    reporting done" << std::endl << std::flush;
+                    for (auto& t : shot.cross_rank_tasks) {
+                        t.report_done(shot_buffer_round);
+                    }
+                    if (BARE_DEBUG) t_out << "    waiting until other PEs done" << std::endl << std::flush;
+                    for (auto& t : shot.cross_rank_tasks) {
+                        t.wait_until_done(pid, shot_buffer_round);
+                    }
+                    if (BARE_DEBUG) t_out << "    all done" << std::endl << std::flush;
 #endif
                     shot_buffer->write_result_and_get_next_shot(shot_container_id, graph.node_part_id);
                 }
