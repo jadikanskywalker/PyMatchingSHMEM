@@ -24,7 +24,7 @@ stim detect \
     --out detection_events.b8 \
     --out_format b8
 
-../build/pymatching animate \
+../build_sos/pymatching animate \
     --dem_in error_model.dem \
     --dets_in detection_events.b8 \
     --dets_in_format b8 \

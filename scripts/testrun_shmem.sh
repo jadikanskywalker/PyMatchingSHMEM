@@ -4,7 +4,11 @@
 # module unload python
 # module load python
 
-# export SHMEM_OFI_PROVIDER=ofi_rxm
+export FI_LOG_LEVEL=trace
+# export SHMEM_OFI_PROVIDER="verbs"
+export FI_VERBS_DEVICE_NAME="mlx5_2"
+# unset FI_VERBS_DEVICE_NAME
+# export SHMEM_OFI_PROVIDER=shm
 
 if [ $# -le 7 ]
   then
@@ -28,20 +32,20 @@ fi
 
 cd run
 
-rm *.out
+rm *.out *.err
 
-# hosts=$(srun hostname | sort | uniq | paste -sd, -)
-# # Function to create a hostfile with specified slots per host
-# create_hostfile() {
-#   local hostfile="hostfile.txt"
-#   # Clear the hostfile if it exists
-#   > "$hostfile"
-#   # Write each host and its slots to the hostfile
-#   for host in ${hosts//,/ }; do
-#     echo "$host slots=$ppn" >> "$hostfile"
-#   done
-# }
-# create_hostfile
+hosts=$(srun hostname | sort | uniq | paste -sd, -)
+# Function to create a hostfile with specified slots per host
+create_hostfile() {
+  local hostfile="hostfile.txt"
+  # Clear the hostfile if it exists
+  > "$hostfile"
+  # Write each host and its slots to the hostfile
+  for host in ${hosts//,/ }; do
+    echo "$host slots=$ppn" >> "$hostfile"
+  done
+}
+create_hostfile
 
 if [ -d "out_parallel" ]
   then
@@ -58,25 +62,40 @@ fi
 
 # need to find d=21 lattice surgery circuit
 rm *.01 circuit.stim *.b8 *.dem
-stim gen \
-    --rounds=$rounds \
-    --distance=21 \
-    --after_clifford_depolarization=0.01 \
-    --code surface_code \
-    --task rotated_memory_x \
-    > circuit.stim
-stim analyze_errors \
-    --decompose_errors \
-    --fold_loops \
-    --in circuit.stim \
+python3 ../scripts/gen_multi_obs.py \
+    --num_observables 2 \
+    --rounds $rounds \
+    --distance 5 \
+    --after_clifford_depolarization 0.1 \
+    --code repetition_code \
+    --task memory \
+    --num_surgery_gates 2 \
+    --surgery_duration 5 \
+    --circuit_out circuit.stim \
+    --output_dem \
     > error_model.dem
-stim detect \
-    --in circuit.stim \
+
+# Sample detection events FROM THE DEM (not the circuit) so seam errors fire
+stim sample_dem \
+    --in error_model.dem \
     --shots $shots \
-    --obs_out actual_obs_flips.01 \
-    --obs_out_format 01 \
     --out detection_events.b8 \
-    --out_format b8
+    --out_format b8 \
+    --obs_out actual_obs_flips.01 \
+    --obs_out_format 01
+
+# stim analyze_errors \
+#     --decompose_errors \
+#     --fold_loops \
+#     --in circuit.stim \
+#     > error_model.dem
+# stim detect \
+#     --in circuit.stim \
+#     --shots $shots \
+#     --obs_out actual_obs_flips.01 \
+#     --obs_out_format 01 \
+#     --out detection_events.b8 \
+#     --out_format b8
 
 # Run prediction
 if [ $nthreads -gt 0 ]
@@ -115,11 +134,13 @@ start_parallel=$(date +%s)
 #    --map-by ppr:${ppn}:node:pe=${OMP_NUM_THREADS} \
 export OMP_NUM_THREADS=$nthreads_shmem
 export SHMEM_SYMMETRIC_SIZE=2G
-oshrun  \
+export LIBFABRIC_DEBUG=1
+$SWHOME/sos_1.5_scalable/bin/oshrun  \
     -n $n \
     --map-by ppr:$ppn:node:PE=$nthreads_shmem \
     --bind-to core \
     --report-bindings \
+    gdb -q -batch -ex run -ex "thread apply all bt full" -ex "set logging file gdb.log" -ex 'info sharedlibrary libfabric' --args \
     ~/PyMatchingSHMEM/build_sos/pymatching predict \
     --dem error_model.dem \
     --in detection_events.b8 \
@@ -128,8 +149,10 @@ oshrun  \
     --out_format 01 \
     --rounds_per_partition $M \
     --cross_rank_fusion_window_size $k \
+    --obs_coors_included \
     --use_threads \
-    > log_shmem.out
+    --draw_frames \
+    > log_shmem.out 2>log_shmem.err
 
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
