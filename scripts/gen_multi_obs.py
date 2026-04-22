@@ -249,7 +249,7 @@ def inject_cross_obs_into_dem(dem, surgery_gates, p_cross=0.001, x_boundary_thre
     new_lines = []
     seam_adjacent_ids = set()
 
-    for obs_a, obs_b, start_round, duration in surgery_gates:
+    for seam_idx, (obs_a, obs_b, start_round, duration) in enumerate(surgery_gates, start=1):
         if obs_a not in x_extremes or obs_b not in x_extremes:
             print(f"WARNING: obs {obs_a} or {obs_b} not found in DEM; "
                   f"skipping gate ({obs_a},{obs_b},{start_round},{duration}).", file=sys.stderr)
@@ -304,7 +304,7 @@ def inject_cross_obs_into_dem(dem, surgery_gates, p_cross=0.001, x_boundary_thre
                 for k in range(1, ndim - 2):
                     seam_coors.append((c_a[k] + c_b[k]) / 2)
                 seam_coors.append(float(rnd_a))
-                seam_coors.append(-(obs_a + obs_b) / 2.0)
+                seam_coors.append(-float(seam_idx))
 
                 coors_str = ", ".join(str(c) for c in seam_coors)
                 new_lines.append(f"detector({coors_str}) D{new_det_id}")

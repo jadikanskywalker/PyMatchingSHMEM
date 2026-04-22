@@ -34,6 +34,9 @@ enum Status { BUSY, FREE };
 
 struct TaskBase {
     int part;
+// #ifdef USE_SHMEM
+    int vb_marker; // not always equal to part
+// #endif
     int vb_left;
     int vb_right;
     bool is_fusion;
@@ -44,7 +47,11 @@ struct TaskBase {
     std::vector<pm::GraphFillRegion*> regions_matched_to_virtual_boundary;
 
     TaskBase(int part, int vb_left, int vb_right, bool is_fusion, bool is_cross_rank_fusion) 
-        : part(part), vb_left(vb_left), vb_right(vb_right), is_fusion(is_fusion), is_cross_rank_fusion(is_cross_rank_fusion) {}
+        : part(part), vb_marker(part), vb_left(vb_left), vb_right(vb_right), is_fusion(is_fusion), is_cross_rank_fusion(is_cross_rank_fusion) {
+// #ifdef USE_SHMEM
+            // vb_marker = part;
+// #endif
+    }
 
     virtual ~TaskBase() = default;
 
@@ -86,11 +93,13 @@ struct Task : public TaskBase {
 #ifdef USE_SHMEM
     bool only_child{ false };
     int vb_solver_offset{ 0 }; // For OBS patch i, this is i (Because no vb between patches, we lose one vb index relative to partition index)
+    // int seam_vb_slot{ -1 };             // virtual_boundaries slot index for this seam's VB nodes
+    int left_obs_patch_id{-1};   // For OBS local seam tasks: left obs patch
+    int right_obs_patch_id{-1};  // For OBS local seam tasks: right obs patch
 #endif
 
     Task(int partition)
         : TaskBase(partition, partition - 1, partition, false, false)
-        // , part(partition)
     {
         status.store(-1, std::memory_order_release);
     }
@@ -102,7 +111,6 @@ struct Task : public TaskBase {
     }
     Task(int vb, Task* left_child, Task* right_child) : 
         TaskBase(vb, left_child->vb_left, right_child->vb_right, true, false),
-        // part(vb),
         left_child(left_child),
         right_child(right_child)
     {
@@ -123,6 +131,11 @@ struct Task : public TaskBase {
         parent = other.parent;
         // parent_right = other.parent_right;
         child_bit = other.child_bit;
+#ifdef USE_SHMEM
+        // seam_vb_slot = other.seam_vb_slot;
+        left_obs_patch_id = other.left_obs_patch_id;
+        right_obs_patch_id = other.right_obs_patch_id;
+#endif
     }
     Task& operator=(Task&& other) noexcept {
         TaskBase::operator=(std::move(other));
@@ -132,6 +145,11 @@ struct Task : public TaskBase {
         parent = other.parent;
         // parent_right = other.parent_right;
         child_bit = other.child_bit;
+#ifdef USE_SHMEM
+        // seam_vb_slot = other.seam_vb_slot;
+        left_obs_patch_id = other.left_obs_patch_id;
+        right_obs_patch_id = other.right_obs_patch_id;
+#endif
         return *this;
     }
 
@@ -139,15 +157,19 @@ struct Task : public TaskBase {
     inline void setup() {
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
+//         int part_cmp = part;
+// #ifdef USE_SHMEM
+//         if (seam_vb_slot >= 0 ) part_cmp = seam_vb_slot;
+// #endif
         if (is_fusion) {
             for (auto& region : left_child->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == part)
+                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker)
                     regions_to_unmatch.push_back(region);
                 else
                     regions_matched_to_virtual_boundary.push_back(region);
             }
             for (auto& region : right_child->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == part)
+                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker)
                     regions_to_unmatch.push_back(region);
                 else
                     regions_matched_to_virtual_boundary.push_back(region);
@@ -235,7 +257,7 @@ public:
     // For OBS patch fusions
     std::pair<size_t, size_t> left_global_offset{  0, 0 };   // obsA (lower obs) {p_offset, vb_offset}
     std::pair<size_t, size_t> right_global_offset{ 0, 0 };   // obsB (higher obs) {p_offset, vb_offset}
-    int seam_vb_slot{ -1 };             // virtual_boundaries slot index for this seam's VB nodes
+    // int seam_vb_slot{ -1 };             // virtual_boundaries slot index for this seam's VB nodes
 
     CrossRankTask(
         int vb,
@@ -284,7 +306,7 @@ public:
         owns_context = other.owns_context;
         left_global_offset  = other.left_global_offset;
         right_global_offset = other.right_global_offset;
-        seam_vb_slot        = other.seam_vb_slot;
+        // seam_vb_slot        = other.seam_vb_slot;
         
         // Nullify other's ownership so destructor skips it
         other.owns_context = false;
@@ -301,7 +323,7 @@ public:
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
         for (auto& region : child->regions_matched_to_virtual_boundary) {
-            if (region->match.edge.loc_to && region->match.edge.loc_to->vb == seam_vb_slot)
+            if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker) // seam vbs are marked with global part
                 regions_to_unmatch.push_back(region);
             // else
             //     regions_matched_to_virtual_boundary.push_back(region);

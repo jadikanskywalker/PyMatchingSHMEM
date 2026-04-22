@@ -126,7 +126,9 @@ inline bool GraphFlooder::is_active(const DetectorNode* node) const {
         return true;
     if (node->vb > vb_left && node->vb < vb_right)
         return true;
+#ifdef USE_SHMEM
     return (node->vb == vb); // OBS seam vb
+#endif
 }
 // ===============
 #endif
@@ -303,7 +305,7 @@ void GraphFlooder::reschedule_events_at_detector_node(DetectorNode& detector_nod
     // ===============
     if (!is_active(&detector_node)) {
         std::cout << "    NOTE: reschedule called on inactive node" << std::endl
-                  << "      Shot: " << current_shot << "    Task.part: " << task->part
+                  << "      Shot: " << current_shot << "    Task.vb_marker: " << task->vb_marker << "    Node.vb: " << detector_node.vb
 #ifdef USE_SHMEM
                   << " (is_cross_rank_fusion: " << task->is_cross_rank_fusion << ")" << std::endl
 #endif

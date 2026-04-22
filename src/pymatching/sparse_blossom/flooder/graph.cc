@@ -247,7 +247,9 @@ pm::SharedMatchingGraph::SharedMatchingGraph(
     size_t num_virtual_boundaries_,
     size_t num_rounds_
 #ifdef USE_SHMEM
-    , size_t num_obs_patches_
+    , size_t num_obs_patches_,
+    size_t p_per_obs_patch_,
+    size_t vb_per_obs_patch_
 #endif
 )
 : graph_ptr(graph_ptr_),
@@ -256,7 +258,9 @@ pm::SharedMatchingGraph::SharedMatchingGraph(
     num_virtual_boundaries(num_virtual_boundaries_),
     num_rounds(num_rounds_)
 #ifdef USE_SHMEM
-    , num_obs_patches(num_obs_patches_)
+    , num_obs_patches(num_obs_patches_),
+    p_per_obs_patch(p_per_obs_patch_),
+    vb_per_obs_patch(vb_per_obs_patch_)
 #endif
 {
 #ifdef USE_SHMEM

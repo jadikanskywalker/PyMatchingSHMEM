@@ -128,6 +128,7 @@ struct SharedMatchingGraph {
 
 #ifdef USE_SHMEM
     size_t num_obs_patches{ 0 };
+    size_t p_per_obs_patch, vb_per_obs_patch;
     std::vector<std::pair<size_t, size_t>> partition_bounds;
     std::vector<std::pair<size_t, size_t>> vb_bounds;
 #endif
@@ -140,7 +141,9 @@ struct SharedMatchingGraph {
         size_t num_virtual_boundaries_,
         size_t num_rounds_
 #ifdef USE_SHMEM
-        , size_t num_obs_patches_ = 0
+        , size_t num_obs_patches_ = 0,
+        size_t p_per_obs_patch_ = 0,
+        size_t vb_per_obs_patch = 0
 #endif
     );
 

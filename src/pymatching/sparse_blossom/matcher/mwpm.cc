@@ -650,17 +650,15 @@ void Mwpm::extract_paths_from_match_edges(
 #ifdef USE_THREADS
 // Prepare the flooder to solve task
 void Mwpm::prepare_for_task(TaskBase* t, int shot_id) {
+    flooder.vb = t->vb_marker;
     flooder.vb_left = t->vb_left;
     flooder.vb_right = t->vb_right;
     task = t;
     flooder.task = t;
     flooder.current_shot = shot_id;
     current_shot = shot_id;
-    flooder.vb = -1;
-#ifdef USE_SHMEM
-    if (t->is_cross_rank_fusion)
-        flooder.vb = static_cast<CrossRankTask*>(t)->seam_vb_slot;
-#endif
+// #ifdef USE_SHMEM
+// #endif
 }
 #endif
 
