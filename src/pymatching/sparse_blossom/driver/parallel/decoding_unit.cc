@@ -98,9 +98,8 @@ pm::DecodingUnit::DecodingUnit(
     }
     // --- Compute num_cross_rank_fusions before allocations ---
     if (config_parallel::division_strategy == config_parallel::OBS) {
-        const int K_p  = (int)graph.num_partitions / (int)graph.num_obs_patches;
-        const int K_vb = K_p - 1;
-        num_cross_rank_fusions = (int)graph.num_virtual_boundaries - K_vb * (int)graph.num_obs_patches;
+        if (DEBUG) std::cout << "K_p: " << graph.p_per_obs_patch << "; K_vb: " << graph.vb_per_obs_patch << std::endl;
+        num_cross_rank_fusions = (int)graph.num_virtual_boundaries - graph.vb_per_obs_patch * (int)graph.num_obs_patches;
     } else {
         num_cross_rank_fusions = 2;  // 2
     }
@@ -152,15 +151,14 @@ pm::DecodingUnit::DecodingUnit(
     num_solvers_per_buffer = graph.num_partitions;
     // --- Populate my_partition_task_ids ---
     if (config_parallel::division_strategy == config_parallel::OBS) {
-        const int K_p          = (int)graph.num_partitions / (int)graph.num_obs_patches;
         const int base         = (int)graph.num_obs_patches / n_pes;
         const int rem          = (int)graph.num_obs_patches % n_pes;
         const int my_obs_start = base * pid + std::min(pid, rem);
         const int my_obs_count = base + (pid < rem ? 1 : 0);
-        my_partition_task_ids.reserve(K_p * my_obs_count);
+        my_partition_task_ids.reserve(graph.p_per_obs_patch * my_obs_count);
         for (int lo = 0; lo < my_obs_count; ++lo) {
-            size_t p_base = lo * (2*K_p-1);
-            for (size_t p = p_base; p < p_base + K_p; ++p)
+            size_t p_base = lo * (2 * graph.p_per_obs_patch - 1);
+            for (size_t p = p_base; p < p_base + graph.p_per_obs_patch; ++p)
                 my_partition_task_ids.push_back(p);
         }
     } else {
@@ -391,8 +389,8 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
 void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
     if (DEBUG) std::cout << "DEBUG: initializing obs-patch tasks" << std::endl;
 
-    const int K_p       = (int)(graph.num_partitions / graph.num_obs_patches);
-    const int K_vb      = K_p - 1;
+    const int K_p       = graph.p_per_obs_patch;
+    const int K_vb      = graph.vb_per_obs_patch;
     const int num_seams = (int)graph.num_virtual_boundaries - K_vb * (int)graph.num_obs_patches;
 
     // Determine my obs patch range (same formula as constructor)
@@ -407,24 +405,31 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
     std::vector<SeamInfo> seam_infos(num_seams);
     for (int s = 0; s < num_seams; ++s) {
         auto [first, last] = graph.vb_bounds[K_vb * graph.num_obs_patches + s];
+        if (DEBUG) std::cout << "  seam vb bounds (" << first << ", " << last << ")\n" << std::flush;
         std::map<int, std::pair<int,int>> obs_part_range;  // obs_id → (min_local_p, max_local_p)
+#ifdef DEBUG
+        std::string p_string;
+#endif
         for (size_t ni = first; ni <= last; ++ni) {
             for (auto* nbr : graph.graph_ptr->nodes[ni].neighbors) {
-                if (nbr == nullptr) continue;
+                if (nbr == nullptr) continue; // boundary
                 int nbr_idx = (int)(nbr - graph.graph_ptr->nodes.data());
                 int part_id = graph.node_part_id[nbr_idx];
                 int obs_id, low_p, high_p;
-                if (part_id >= 0) {
+                if (part_id >= 0) { // partition node
                     obs_id = part_id / K_p;
-                    low_p = high_p = part_id % K_p;
+                    low_p = part_id % K_p;
+                    high_p = low_p;
+                    if (DEBUG) p_string += "  obs" + std::to_string(obs_id);
                 } else {
                     if (K_vb == 0) continue;  // no intra-obs VBs possible
                     int global_vb = -part_id - 1;
-                    obs_id = global_vb / K_vb;
+                    int obs_id = global_vb / K_vb;
                     if (obs_id >= (int)graph.num_obs_patches) continue;  // cross-obs seam node
                     int local_vb = global_vb % K_vb;
                     low_p  = local_vb - 1;
                     high_p = local_vb;
+                    if (DEBUG) p_string += "  obs" + std::to_string(obs_id);
                 }
                 auto [it, inserted] = obs_part_range.try_emplace(obs_id, low_p, high_p);
                 if (!inserted) {
@@ -433,6 +438,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                 }
             }
         }
+        if (DEBUG) std::cout << p_string << "\n" << std::flush;
         auto it = obs_part_range.begin();
         int oi    = it->first;
         int vb_left = std::max(it->second.first - config_parallel::k - 1, -1);
@@ -488,6 +494,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                     }
                     Task* right_child = &tasks[tree_start + right_child_idx];
                     tasks.emplace_back(obs_vb_offset + i, left_child, right_child);
+                    tasks.back().vb_marker = i;
                     tasks.back().vb_solver_offset = lo + my_obs_start;
                     ++task_id;
                     ++counter;
@@ -505,8 +512,11 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
 
         // --- Local seam tasks (skip cross-PE seams) ---
         std::vector<Task*> group_root(my_obs_count);
-        for (int lo = 0; lo < my_obs_count; ++lo)
+        for (int lo = 0; lo < my_obs_count; ++lo) {
             group_root[lo] = obs_roots[lo];
+            if (DEBUG) std::cout << "  " << group_root[lo];
+        }
+        if (DEBUG) std::cout << "\n" << std::flush;
 
         std::vector<std::pair<size_t, size_t>> my_remote_seams; // pair (seam_idx, idx_of_my_obs)
         my_remote_seams.reserve(num_seams);
@@ -534,6 +544,11 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                 tasks.emplace_back(global_vb, ri, rj);
             }
             tasks.back().vb_solver_offset = -global_vb + si.oi * K_p + si.vb_left + 1;
+            // tasks.back().seam_vb_slot          = K_vb + s;
+#ifdef ENABLE_DRAW_FLAGS
+            tasks.back().left_obs_patch_id = si.oi;
+            tasks.back().right_obs_patch_id = si.oj;
+#endif
 
             Task* new_root = &tasks.back();
             for (int lo2 = 0; lo2 < my_obs_count; ++lo2)
@@ -603,7 +618,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                              other_pid, sp, sp+1, sp+2, fp);
             crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
             crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
-            crt.back().seam_vb_slot          = K_vb + s;
+            // crt.back().seam_vb_slot          = K_vb + s;
 
             if (DEBUG) {
                 auto& t = crt.back();
@@ -1341,12 +1356,19 @@ void pm::DecodingUnit::decode_shots() {
 #ifdef USE_SHMEM
                     if (DEBUG) t_out << "  solver bounds: " << solver.flooder.vb_left << "(vb_left) " << solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
 #ifdef ENABLE_DRAW_FLAGS
-                    if (config_parallel::division_strategy == config_parallel::OBS) {
+                    if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
                         size_t K_p = graph.num_partitions / graph.num_obs_patches;
                         size_t K_vb = K_p - 1;
-                        size_t patch = (t->is_fusion) ? t->part / K_vb : t->part / K_p;
-                        solver.flooder.p_offsets  = { K_p  * patch };
-                        solver.flooder.vb_offsets = { K_vb * patch };
+                        if (t->is_fusion && t->left_obs_patch_id >= 0 && t->right_obs_patch_id >= 0) {
+                            // Local seam task
+                            solver.flooder.p_offsets  = { (size_t)t->left_obs_patch_id * K_p,  (size_t)t->right_obs_patch_id * K_p  };
+                            solver.flooder.vb_offsets = { (size_t)t->left_obs_patch_id * K_vb, (size_t)t->right_obs_patch_id * K_vb };
+                        } else {
+                            // Leaf partition
+                            size_t patch = (t->is_fusion) ? t->part / K_vb : t->part / K_p;
+                            solver.flooder.p_offsets  = { K_p  * patch };
+                            solver.flooder.vb_offsets = { K_vb * patch };
+                        }
                     }
 #endif
 #endif
@@ -1378,21 +1400,19 @@ void pm::DecodingUnit::decode_shots() {
                             stolen = sibling->try_to_steal_leaf(shot_buffer_round);
                             t = sibling;
                         }
-                        if (!stolen && next_p_id < my_partition_task_ids.size()) {
-                            t = &shot.tasks[my_partition_task_ids[next_p_id]];
-                            solver_id = get_solver_id(shot_container_id, t->part, tid);
-                            stolen = t->try_to_steal_leaf(shot_buffer_round);
-                            next_p_id += next_p_inc;
-                        }
-                        if (DEBUG) {
-                            if (t != nullptr) {
-                                t_out << (t->is_fusion ? "  f" : "  p") << t->part << " stolen = " << stolen
-                                      << std::endl << std::flush;
-                            }
-                        }
                     } else {
                         stolen = false;
                         i_solved_root = true;
+                    }
+                    if (!stolen && next_p_id < my_partition_task_ids.size()) {
+                        t = &shot.tasks[my_partition_task_ids[next_p_id]];
+                        solver_id = get_solver_id(shot_container_id, t->part, tid);
+                        stolen = t->try_to_steal_leaf(shot_buffer_round);
+                        next_p_id += next_p_inc;
+                    }
+                    if (DEBUG && t != nullptr) {
+                        t_out << (t->is_fusion ? "  f" : "  p") << t->part << " stolen = " << stolen
+                                << std::endl << std::flush;
                     }
                 }
 #ifdef SCOREP_USER_ENABLE
@@ -1426,7 +1446,7 @@ void pm::DecodingUnit::decode_shots() {
                             //   Hard bounds based on vb_left/vb_right of CrossRankTask
                             solver.prepare_for_task(&t, shot_id);
 #ifdef ENABLE_DRAW_FLAGS
-                            if (config_parallel::division_strategy == config_parallel::OBS) {
+                            if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
                                 solver.flooder.p_offsets  = { t.left_global_offset.first,  t.right_global_offset.first  };
                                 solver.flooder.vb_offsets = { t.left_global_offset.second, t.right_global_offset.second };
                             }

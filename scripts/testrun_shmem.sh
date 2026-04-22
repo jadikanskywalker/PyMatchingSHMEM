@@ -63,13 +63,13 @@ fi
 # need to find d=21 lattice surgery circuit
 rm *.01 circuit.stim *.b8 *.dem
 python3 ../scripts/gen_multi_obs.py \
-    --num_observables 2 \
+    --num_observables 4 \
     --rounds $rounds \
     --distance 5 \
     --after_clifford_depolarization 0.1 \
     --code repetition_code \
     --task memory \
-    --num_surgery_gates 1 \
+    --num_surgery_gates 3 \
     --surgery_duration 5 \
     --circuit_out circuit.stim \
     > error_model.dem

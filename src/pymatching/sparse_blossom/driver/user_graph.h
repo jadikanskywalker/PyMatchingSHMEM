@@ -83,6 +83,7 @@ class UserGraph {
     std::vector<std::vector<int>> virtual_boundaries;
 #ifdef USE_SHMEM
     size_t num_obs_patches{ 0 };
+    size_t p_per_obs_patch, vb_per_obs_patch;
 #endif
 #endif
 

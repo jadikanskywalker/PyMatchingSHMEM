@@ -311,7 +311,20 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
     }
     matching_graph.convert_implied_weights(normalising_constant);
 
-    for (int vb=0; vb < virtual_boundaries.size(); ++vb) {
+    size_t num_regular_vb_masks = virtual_boundaries.size();
+    if (DEBUG) std::cout << "virtual_boundaries.size(): " << virtual_boundaries.size() << "\n" << std::flush;
+    if (config_parallel::division_strategy == config_parallel::OBS) {
+        num_regular_vb_masks = vb_per_obs_patch;
+        if (DEBUG) std::cout << "num_regular_vb_masks: " << num_regular_vb_masks << std::endl << std::flush;
+        for (int vb = vb_per_obs_patch; vb < virtual_boundaries.size(); ++vb) {
+            size_t vb_marker = vb + vb_per_obs_patch * (num_obs_patches - 1);
+            if (DEBUG) std::cout << "  using " << vb_marker << std::endl << std::flush;
+            for (int index : virtual_boundaries[vb]) {
+                matching_graph.nodes[index].vb = vb_marker;
+            }
+        }
+    }
+    for (int vb=0; vb < num_regular_vb_masks; ++vb) {
         for (int index : virtual_boundaries[vb]) {
             matching_graph.nodes[index].vb = vb;
         }
@@ -319,7 +332,7 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
 
     return SharedMatchingGraph(matching_graph_ptr, node_part_id, num_partitions, num_virtual_boundaries, num_rounds
 #ifdef USE_SHMEM
-        , num_obs_patches
+        , num_obs_patches, p_per_obs_patch, vb_per_obs_patch
 #endif
     );
 }
@@ -759,79 +772,69 @@ void pm::UserGraph::partition_nodes_by_obs_patch(const stim::DetectorErrorModel&
         nodes[n].x             = coors[0];
         if (coors.size() > 3) nodes[n].y = coors[1];
 
-        if (round > last_round) {
-            if (!in_cross_obs) {
-                if (!p_or_vb) {
-                    // Commit pending vb: this is the first partition round after a vb round.
-                    if (obs_count == 0)
-                        virtual_boundaries.push_back({});  // obs0: create new slot
-                    for (int ni : pending_vb)
-                        virtual_boundaries[pending_vb_slot].push_back(ni);
-                    pending_vb.clear();
-                    ++local_vb_idx;
-                    round_counter = 1;
-                    p_or_vb = true;
-                    if (DEBUG) std::cout << "Starting p" << (global_p_offset + local_p) << "\n" << std::flush;
-                } else {
-                    ++round_counter;
-                    if (round_counter == M) {
-                        // Start pending vb
-                        ++local_p;
-                        pending_vb_slot = local_vb_idx;
-                        p_or_vb = false;
-                        if (DEBUG) std::cout << "Starting vb" << (global_vb_offset + pending_vb_slot) << "\n" << std::flush;
-                    }
-                }
-                if (obs_count == 0) ++num_rounds;
-            } else {
-                // Cross-obs: start a new vb slot whenever the obs_id changes.
-                if (obs_id_val != last_cross_obs_id) {
-                    ++cross_obs_vb_count;
-                    virtual_boundaries.push_back({});
-                    last_cross_obs_id = obs_id_val;
-                    if (DEBUG) std::cout << "Starting cross-seam vb" << -(K_vb * obs_count + cross_obs_vb_count) << "\n" << std::flush;
+        if (round > last_round && !in_cross_obs) {
+            if (!p_or_vb) { // end of vb
+                // Commit pending vb: this is the first partition round after a vb round.
+                if (obs_count == 0)
+                    virtual_boundaries.push_back({});  // obs0: create new slot
+                for (int ni : pending_vb)
+                    virtual_boundaries[pending_vb_slot].push_back(ni);
+                pending_vb.clear();
+                ++local_vb_idx;
+                // start next p
+                round_counter = 1;
+                p_or_vb = true;
+                if (DEBUG) std::cout << "Starting p" << (global_p_offset + local_p) << "\n" << std::flush;
+            } else { // end of p
+                ++round_counter;
+                if (round_counter == M) {
+                    // Start pending vb
+                    ++local_p;
+                    pending_vb_slot = local_vb_idx;
+                    p_or_vb = false;
+                    if (DEBUG) std::cout << "Starting vb" << -(global_vb_offset + pending_vb_slot + 1) << "\n" << std::flush;
                 }
             }
-            last_round = round;
-
-        } else if (round < last_round) {
+            if (obs_count == 0) ++num_rounds;
+        } else if (round < last_round && !in_cross_obs) {
             // Round reset = obs transition (next observable or cross-obs seam section).
-            if (!in_cross_obs) {
-                // Record K_p and K_vb at the first obs transition.
-                if (K_p == -1) {
-                    K_p  = p_or_vb ? local_p + 1 : local_p;
-                    K_vb = (int)virtual_boundaries.size();
-                }
-                // Cleanup: if obs ended on a pending vb, discard it and keep last partition.
-                if (!p_or_vb) {
-                    int last_part = global_p_offset + local_p - 1;
-                    for (int ni : pending_vb)
-                        node_part_id[ni] = last_part;
-                    pending_vb.clear();
-                    p_or_vb = true;
-                }
-                ++obs_count;
-
-                if (obs_id_val < 0.0) {
-                    // Entering cross-observable (seam) nodes.
-                    in_cross_obs = true;
-                    ++cross_obs_vb_count;
-                    virtual_boundaries.push_back({});
-                    last_cross_obs_id = obs_id_val;
-                    if (DEBUG) std::cout << "Starting cross-seam vb" << -(K_vb * obs_count + cross_obs_vb_count) << "\n" << std::flush;
-                } else {
-                    // Entering next observable's patch.
-                    // round_counter starts at 1 (not 0) because the first round of the new
-                    // observable is consumed by the transition detection. This keeps vbs aligned.
-                    global_p_offset  += K_p;
-                    global_vb_offset += K_vb;
-                    local_p        = 0;
-                    local_vb_idx   = 0;
-                    round_counter  = 1;
-                    if (DEBUG) std::cout << "Entering OBS " << obs_count << "\nStarting p" << global_p_offset << "\n" << std::flush;
-                }
+            // Record K_p and K_vb at the first obs transition.
+            if (K_p == -1) {
+                K_p  = p_or_vb ? local_p + 1 : local_p;
+                K_vb = (int)virtual_boundaries.size();
             }
-            last_round = round;
+            // Cleanup: if obs ended on a pending vb, discard it and keep last partition.
+            if (!p_or_vb) {
+                int last_part = global_p_offset + local_p - 1;
+                for (int ni : pending_vb)
+                    node_part_id[ni] = last_part;
+                pending_vb.clear();
+                p_or_vb = true;
+            }
+            ++obs_count;
+
+            if (obs_id_val < 0.0) {
+                // Entering cross-observable (seam) nodes.
+                in_cross_obs = true;
+            } else {
+                // Entering next observable's patch.
+                // round_counter starts at 1 (not 0) because the first round of the new
+                // observable is consumed by the transition detection. This keeps vbs aligned.
+                global_p_offset  += K_p;
+                global_vb_offset += K_vb;
+                local_p        = 0;
+                local_vb_idx   = 0;
+                round_counter  = 1;
+                if (DEBUG) std::cout << "Entering OBS " << obs_count << "\nStarting p" << global_p_offset << "\n" << std::flush;
+            }
+        }
+        last_round = round;
+
+        if (in_cross_obs && obs_id_val != last_cross_obs_id) { // new cross-observable node
+            ++cross_obs_vb_count;
+            virtual_boundaries.push_back({});
+            last_cross_obs_id = obs_id_val;
+            if (DEBUG) std::cout << "Starting cross-seam vb" << -(K_vb * obs_count + cross_obs_vb_count) << "\n" << std::flush;
         }
 
         // Assign node_part_id for this node.
@@ -866,6 +869,8 @@ void pm::UserGraph::partition_nodes_by_obs_patch(const stim::DetectorErrorModel&
     num_partitions         = (size_t)K_p * obs_count;
     num_virtual_boundaries = (size_t)K_vb * obs_count + cross_obs_vb_count;
     num_obs_patches            = (size_t)obs_count;
+    p_per_obs_patch = K_p;
+    vb_per_obs_patch = K_vb;
 }
 // This function was generated by Claude Haiku 4.5
 // void pm::UserGraph::reorder_nodes_by_observable() {
