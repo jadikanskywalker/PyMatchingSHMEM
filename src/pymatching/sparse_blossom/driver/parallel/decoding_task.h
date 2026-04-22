@@ -20,6 +20,7 @@
 #include <vector>
 
 #ifdef USE_SHMEM
+#include <iostream>
 #include <shmem.h>
 #endif
 
@@ -82,9 +83,20 @@ struct Task : public TaskBase {
     Task* right_child{nullptr};
     Task* parent{nullptr};
 
+#ifdef USE_SHMEM
+    bool only_child{ false };
+    int vb_solver_offset{ 0 }; // For OBS patch i, this is i (Because no vb between patches, we lose one vb index relative to partition index)
+#endif
+
     Task(int partition)
         : TaskBase(partition, partition - 1, partition, false, false)
         // , part(partition)
+    {
+        status.store(-1, std::memory_order_release);
+    }
+    // Partition leaf with explicit local vb bounds (needed for OBS partitioning)
+    Task(int part, int vb_l, int vb_r)
+        : TaskBase(part, vb_l, vb_r, false, false)
     {
         status.store(-1, std::memory_order_release);
     }
@@ -129,13 +141,13 @@ struct Task : public TaskBase {
         regions_matched_to_virtual_boundary.clear();
         if (is_fusion) {
             for (auto& region : left_child->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to->vb == part)
+                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == part)
                     regions_to_unmatch.push_back(region);
                 else
                     regions_matched_to_virtual_boundary.push_back(region);
             }
             for (auto& region : right_child->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to->vb == part)
+                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == part)
                     regions_to_unmatch.push_back(region);
                 else
                     regions_matched_to_virtual_boundary.push_back(region);
@@ -151,11 +163,17 @@ struct Task : public TaskBase {
     }
 
     inline bool try_to_steal_leaf(int next) {
+        if (is_fusion) return false;
         int expected = next - 1;
         return status.compare_exchange_strong(expected, next, std::memory_order_acq_rel);
     }
 
     inline bool try_to_steal_parent() {
+#ifdef USE_SHMEM
+        if (only_child) {
+            return true;
+        }
+#endif
         int old = parent->status.fetch_or(child_bit, std::memory_order_acq_rel);
         if ((old | child_bit) == 3) {
             return old != 3;
@@ -214,6 +232,11 @@ public:
     shmem_ctx_t context_shm;
     bool owns_context{ true };
 
+    // For OBS patch fusions
+    std::pair<size_t, size_t> left_global_offset{  0, 0 };   // obsA (lower obs) {p_offset, vb_offset}
+    std::pair<size_t, size_t> right_global_offset{ 0, 0 };   // obsB (higher obs) {p_offset, vb_offset}
+    int seam_vb_slot{ -1 };             // virtual_boundaries slot index for this seam's VB nodes
+
     CrossRankTask(
         int vb,
         Task* child,
@@ -239,8 +262,10 @@ public:
         }
         // Create communication context
         if (shmem_ctx_create(SHMEM_CTX_SERIALIZED, &context_shm)) {
-            throw std::invalid_argument("PE" + std::to_string(shmem_my_pe()) + " DecodingTask: Cross PE fusion task failed to create context");
+            std::cout << "PE" << shmem_my_pe() << " DecodingTask: Cross PE fusion task failed to create context\n" << std::flush;
+            context_shm = SHMEM_CTX_DEFAULT;
         }
+        // context_shm = SHMEM_CTX_DEFAULT;
         *status_shm = 0;
         *signal_shm = 0;
         *done_shm = 0;
@@ -257,13 +282,16 @@ public:
         fusion_summary_shm = other.fusion_summary_shm;
         context_shm = other.context_shm;
         owns_context = other.owns_context;
+        left_global_offset  = other.left_global_offset;
+        right_global_offset = other.right_global_offset;
+        seam_vb_slot        = other.seam_vb_slot;
         
         // Nullify other's ownership so destructor skips it
         other.owns_context = false;
     }
 
     ~CrossRankTask() {
-        if (owns_context)
+        if (owns_context && context_shm != SHMEM_CTX_DEFAULT)
             shmem_ctx_destroy(context_shm);
     }
 
@@ -273,7 +301,7 @@ public:
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
         for (auto& region : child->regions_matched_to_virtual_boundary) {
-            if (region->match.edge.loc_to && region->match.edge.loc_to->vb == part)
+            if (region->match.edge.loc_to && region->match.edge.loc_to->vb == seam_vb_slot)
                 regions_to_unmatch.push_back(region);
             // else
             //     regions_matched_to_virtual_boundary.push_back(region);

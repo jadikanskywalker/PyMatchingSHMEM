@@ -22,6 +22,11 @@
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
 #include "pymatching/sparse_blossom/flooder_matcher_interop/mwpm_event.h"
 
+#ifdef USE_THREADS
+#include <iostream>
+#include "../config_parallel.h"
+#endif
+
 namespace pm {
 
 void MatchingGraph::add_edge(
@@ -240,19 +245,32 @@ pm::SharedMatchingGraph::SharedMatchingGraph(
     std::vector<int> node_part_id_,
     size_t num_partitions_,
     size_t num_virtual_boundaries_,
-    size_t num_rounds_)
+    size_t num_rounds_
+#ifdef USE_SHMEM
+    , size_t num_obs_patches_
+#endif
+)
 : graph_ptr(graph_ptr_),
     node_part_id(node_part_id_),
     num_partitions(num_partitions_),
     num_virtual_boundaries(num_virtual_boundaries_),
-    num_rounds(num_rounds_) {
+    num_rounds(num_rounds_)
+#ifdef USE_SHMEM
+    , num_obs_patches(num_obs_patches_)
+#endif
+{
 #ifdef USE_SHMEM
     construct_partition_vb_bounds();
 #endif
 }
 
 #ifdef USE_SHMEM
-// Assumes that the first and last round are parts of a partition, not a virtual boundary
+// Scans node_part_id sequentially and fills partition_bounds / vb_bounds.
+// Handles four transition types:
+//   p → vb : close current partition, open new vb entry
+//   vb → p : close current vb entry, open new partition
+//   p → p  : close current partition, open next partition (obs boundary with no vb between)
+//   vb → vb: close current vb entry, open next vb entry (adjacent seam sections)
 void pm::SharedMatchingGraph::construct_partition_vb_bounds() {
     if (num_partitions <= 0) {
         throw std::invalid_argument("SharedMatchingGraph requires at least one partition.");
@@ -266,20 +284,44 @@ void pm::SharedMatchingGraph::construct_partition_vb_bounds() {
     size_t partition_bounds_idx = 0;
     size_t vb_bounds_idx = 0;
     int last_part_id = node_part_id[0];
-    for (int i = 0; i < node_part_id.size(); ++i) {
+    for (int i = 1; i < (int)node_part_id.size(); ++i) {
         if (node_part_id[i] == last_part_id) {
             continue;
-        } else if (node_part_id[i] < 0) { // entering v_b, end of last p
-            partition_bounds[partition_bounds_idx].second = i-1;
+        } else if (last_part_id < 0 && node_part_id[i] < 0) { // vb → vb
+            vb_bounds[vb_bounds_idx++].second = i - 1;
             vb_bounds[vb_bounds_idx].first = i;
             last_part_id = node_part_id[i];
-        } else { // entering new p
+        } else if (node_part_id[i] < 0) {                     // p → vb
+            partition_bounds[partition_bounds_idx].second = i - 1;
+            vb_bounds[vb_bounds_idx].first = i;
+            last_part_id = node_part_id[i];
+        } else if (last_part_id < 0) {                        // vb → p
+            vb_bounds[vb_bounds_idx++].second = i - 1;
             partition_bounds[++partition_bounds_idx].first = i;
-            vb_bounds[vb_bounds_idx++].second = i-1;
+            last_part_id = node_part_id[i];
+        } else {                                               // p → p (obs boundary)
+            partition_bounds[partition_bounds_idx].second = i - 1;
+            partition_bounds[++partition_bounds_idx].first = i;
             last_part_id = node_part_id[i];
         }
     }
-    partition_bounds[partition_bounds_idx].second = node_part_id.size()-1;
+    // Close the final block (partition or vb if cross-obs nodes are last).
+    if (last_part_id < 0) {
+        vb_bounds[vb_bounds_idx].second = (int)node_part_id.size() - 1;
+    } else {
+        partition_bounds[partition_bounds_idx].second = (int)node_part_id.size() - 1;
+    }
+
+    if (DEBUG) {
+        std::cout << "construct_partition_vb_bounds:"
+                  << " partition_bounds(" << partition_bounds.size() << "):";
+        for (size_t i = 0; i < partition_bounds.size(); ++i)
+            std::cout << " [" << partition_bounds[i].first << "," << partition_bounds[i].second << "]";
+        std::cout << "  vb_bounds(" << vb_bounds.size() << "):";
+        for (size_t i = 0; i < vb_bounds.size(); ++i)
+            std::cout << " [" << vb_bounds[i].first << "," << vb_bounds[i].second << "]";
+        std::cout << "\n" << std::flush;
+    }
 }
 #endif
 #endif

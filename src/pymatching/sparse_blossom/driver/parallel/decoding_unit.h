@@ -69,7 +69,7 @@ struct DecodingUnit {
     size_t num_solvers_per_buffer;
     std::vector<std::shared_ptr<Mwpm>> solvers;
 
-    std::vector<size_t> my_partitions;
+    std::vector<size_t> my_partition_task_ids;
 
 #ifdef USE_SHMEM
     
@@ -89,24 +89,38 @@ struct DecodingUnit {
     size_t child_edges_nelems_per_solver;
     size_t task_fusion_summary_size_per_task;
     size_t regions_matched_to_vb_nelems;
+    int num_cross_rank_fusions = 0;  // ROUND=2, OBS=num_seams; set in constructor before alloc
 
     inline FusionSummary* get_fusion_summary_ptr(size_t shot_container_id, bool iamleft) {
         bool even = !(pid % 2);
         bool take_second_slot = (even && iamleft) || (!even && !iamleft);
         return reinterpret_cast<FusionSummary*>(
             reinterpret_cast<char*>(task_fusion_summary_ptr)
-            + (shot_container_id * SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER + take_second_slot) * task_fusion_summary_size_per_task
+            + (shot_container_id * num_cross_rank_fusions + take_second_slot) * task_fusion_summary_size_per_task
         );
     }
 
     inline uint64_t* get_task_status_ptr(size_t shot_container_id, bool iamleft) {
         // There are two uint64s per slot: status and signal
-        //   Simple left/right case: NUM_CROSS_RANK_FUSIONS_PER_BUFFER=2 slots per buffer
+        //   Simple left/right case: num_cross_rank_fusions=2 slots per buffer
         //   Even PEs map slots (to left, to right), odd PEs (to right, to left)
         //   This ensures tasks correspond on each PE
         bool even = !(pid % 2);
         bool take_second_slot = (even && iamleft) || (!even && !iamleft);
-        return task_status_ptr + SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION*(SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER*shot_container_id + take_second_slot);
+        return task_status_ptr + SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION*(num_cross_rank_fusions*shot_container_id + take_second_slot);
+    }
+
+    // OBS strategy: index by seam index s directly (both PEs compute seam_infos identically)
+    inline uint64_t* get_task_status_ptr_for_seam(size_t shot_id, int seam_idx) {
+        return task_status_ptr
+            + SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION
+              * (num_cross_rank_fusions * shot_id + seam_idx);
+    }
+    inline FusionSummary* get_fusion_summary_ptr_for_seam(size_t shot_id, int seam_idx) {
+        return reinterpret_cast<FusionSummary*>(
+            reinterpret_cast<char*>(task_fusion_summary_ptr)
+            + (num_cross_rank_fusions * shot_id + seam_idx)
+              * task_fusion_summary_size_per_task);
     }
 
     inline DetectorNodeEphemeralFields* get_node_fields_ptr(size_t shot_container_id, int partition_id) {
@@ -123,7 +137,7 @@ struct DecodingUnit {
     }
 
     inline size_t get_cross_rank_fusion_idx(size_t shot_container_id, size_t index) {
-        return SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER * shot_container_id + index;
+        return num_cross_rank_fusions * shot_container_id + index;
     }
 
 #endif
@@ -144,6 +158,9 @@ struct DecodingUnit {
     ~DecodingUnit();
 
     void build_tasks_for_round_partitioning();
+#ifdef USE_SHMEM
+    void build_tasks_for_obs_patch_partitioning();
+#endif
 
     void build_solvers();
 

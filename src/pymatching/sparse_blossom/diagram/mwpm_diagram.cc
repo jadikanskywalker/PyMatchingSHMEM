@@ -47,8 +47,23 @@ pm::pick_coords_for_drawing_from_dem(const stim::DetectorErrorModel &dem, float 
         double s = 1;
         for (size_t d = 2; d < cs.size(); d++) {
             s *= 0.66;
+#ifdef USE_SHMEM
+            // The last coordinate may encode the observable axis.
+            // Cross-observable (seam) nodes are encoded as -(obs_a+obs_b)/2 - 1 < -1
+            // Decode to the visual midpoint (obs_a+obs_b)/2
+            double cd = cs[d];
+            if (config_parallel::division_strategy == config_parallel::OBS && d == cs.size() - 1) {
+                if (cd < 0)
+                    cd = -cd;
+                else
+                    continue;
+            }
+            coords.back().first += cd * s;
+            coords.back().second += cd * s / (d + 1);
+#else
             coords.back().first += cs[d] * s;
             coords.back().second += cs[d] * s / (d + 1);
+#endif
         }
     }
 
@@ -115,14 +130,19 @@ struct StateHelper {
 #ifdef USE_THREADS
 #ifdef ENABLE_DRAW_FLAGS
     bool should_include_node(size_t k) const {
-        if (mwpm.flooder.node_part_id_ptr == nullptr) {
-            std::cout << "should_include_node   its nullptr" << std::endl << std::flush;
-            return true;
+        if (mwpm.flooder.node_part_id_ptr == nullptr) return true;
+        int raw_id = (*mwpm.flooder.node_part_id_ptr)[k];
+        bool is_vb = (raw_id < 0);
+        for (size_t i = 0; i < mwpm.flooder.p_offsets.size(); ++i) {
+            int part_id = is_vb
+                ? -(raw_id + 1) - (int)mwpm.flooder.vb_offsets[i]
+                : raw_id - (int)mwpm.flooder.p_offsets[i];
+            if (part_id > mwpm.flooder.vb_left &&
+                ((!is_vb && part_id <= mwpm.flooder.vb_right) ||
+                 (is_vb  && part_id <  mwpm.flooder.vb_right)))
+                return true;
         }
-        int part_id = (*mwpm.flooder.node_part_id_ptr)[k];
-        int is_vb = (part_id < 0);
-        if (is_vb) part_id = -(part_id + 1);
-        return ((!is_vb && part_id > mwpm.flooder.vb_left) || (is_vb && part_id >= mwpm.flooder.vb_left)) && part_id <= mwpm.flooder.vb_right;
+        return false;
     }
 #endif
     inline const DetectorNodeEphemeralFields &node_state(const DetectorNode &node) const {

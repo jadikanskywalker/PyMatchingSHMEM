@@ -34,9 +34,6 @@ enum ShotStatus : uint64_t { READY, PUT_SUMMARY, PUT_RESULT, WROTE_RESULT };
 // ShotContainer isolates everything needed to solve
 // a single shot in parallel.
 struct ShotContainer {
-// #ifdef USE_SHMEM
-//     uint64_t* current_buffer_round_shm;
-// #endif
     std::atomic<int> current_buffer_round{-1};  // Used for idle thread spin-wait until new shot read
 
     stim::SparseShot sparse_shot;
@@ -58,11 +55,7 @@ struct ShotContainer {
     std::vector<CrossRankTask> cross_rank_tasks;
 #endif
 
-    ShotContainer(
-// #ifdef USE_SHMEM
-//         uint64_t* current_buffer_round_ptr,
-// #endif
-        int num_partitions, int num_virtual_boundaries, int num_observables);
+    ShotContainer(int num_partitions, int num_virtual_boundaries, int num_observables);
 
     ShotContainer(const ShotContainer&) = delete;
     ShotContainer& operator=(const ShotContainer&) = delete;
