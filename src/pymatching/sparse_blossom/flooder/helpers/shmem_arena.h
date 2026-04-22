@@ -39,7 +39,7 @@ struct SHMEMArena {
 
     int num_overflows_tracker{0};
 
-    SHMEMArena() : shmem_buffer(nullptr), shmem_buffer_size(0), allocated(), available() {
+    SHMEMArena() : shmem_buffer(nullptr), shmem_buffer_size(0), allocated(), available(), shmem_bitmap() {
     }
     SHMEMArena(T* shmem_buffer_, size_t shmem_buffer_size_)
         : shmem_buffer(shmem_buffer_), shmem_buffer_size(shmem_buffer_size_), allocated(), available() {
@@ -67,8 +67,8 @@ struct SHMEMArena {
             }
         }
         if (result == nullptr) {  // fall back to heap memory
-            std::cout << "ERROR: Fallback to heap" << std::endl
-                      << "  Thread: " << omp_get_thread_num() << "    PE: " << shmem_my_pe() << std::endl;
+            // std::cout << "ERROR: Fallback to heap" << std::endl
+            //           << "  Thread: " << omp_get_thread_num() << "    PE: " << shmem_my_pe() << std::endl;
             if (available.empty()) {
                 T* p = (T*)malloc(sizeof(T));
                 allocated.push_back(p);

@@ -39,6 +39,8 @@
 #include <shmem.h>
 #endif
 
+#include "profiling/profiling_json.h"
+
 int main_predict(int argc, const char** argv) {
     stim::check_for_unknown_arguments(
         {
@@ -53,12 +55,16 @@ int main_predict(int argc, const char** argv) {
             ,
             "--rounds_per_partition",
             "--use_threads",
+            "--obs_coors_included"
 #endif
 #ifdef ENABLE_DRAW_FLAGS
-            "--draw_frames",
+            ,
+            "--draw_frames"
 #endif
 #ifdef USE_SHMEM
-            "--cross_rank_fusion_window_size"
+            ,
+            "--cross_rank_fusion_window_size",
+            "--task_division_strategy"
 #endif
         },
         {},
@@ -101,6 +107,7 @@ int main_predict(int argc, const char** argv) {
 #ifdef USE_THREADS
     // ===============
     config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
+    config_parallel::obs_coors_included = stim::find_bool_argument("--obs_coors_included", argc, argv);
     bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);
 // ===============
 #endif
@@ -109,6 +116,18 @@ int main_predict(int argc, const char** argv) {
 #endif
 #ifdef USE_SHMEM
     config_parallel::k = stim::find_int64_argument("--cross_rank_fusion_window_size", 1, 1, INT64_MAX, argc, argv);
+    {
+        const char* ds = stim::find_argument("--task_division_strategy", argc, argv);
+        if (ds == nullptr || strcmp(ds, "round") == 0) {
+            config_parallel::division_strategy = config_parallel::ROUND;
+        } else if (strcmp(ds, "observable") == 0) {
+            config_parallel::division_strategy = config_parallel::OBS;
+        } else {
+            throw std::invalid_argument(
+                std::string("Unknown --task_division_strategy: ") + ds +
+                ". Use 'round' or 'observable'.");
+        }
+    }
 #endif
 
     stim::DetectorErrorModel dem = stim::DetectorErrorModel::from_file(dem_file);
@@ -195,102 +214,6 @@ int main_predict(int argc, const char** argv) {
 
     return EXIT_SUCCESS;
 }
-
-// #else
-// // main_predict (SHMEM) sets up shared memory environment
-// int main_predict(int argc, const char** argv) {
-//     if (atomics_ptr == nullptr) {
-//         throw std::invalid_argument("Failed to allocate symmetric memory for SHMEM atomics.");
-//     }
-//     // Parse args
-//     stim::check_for_unknown_arguments(
-//         {
-//             "--in",
-//             "--in_format",
-//             "--in_includes_appended_observables",
-//             "--out",
-//             "--out_format",
-//             "--dem",
-//             "--enable_correlations",
-//             "--rounds_per_partition",
-//             "--draw_frames",
-//             "--use_threads",
-//         },
-//         {},
-//         "predict",
-//         argc,
-//         argv);
-
-//     FILE* shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
-//     FILE* predictions_out = stim::find_open_file_argument("--out", stdout, "wb", argc, argv);
-//     FILE* dem_file = stim::find_open_file_argument("--dem", nullptr, "r", argc, argv);
-//     stim::FileFormatData shots_in_format =
-//         stim::find_enum_argument("--in_format", "b8", stim::format_name_to_enum_map(), argc, argv);
-//     stim::FileFormatData predictions_out_format =
-//         stim::find_enum_argument("--out_format", "01", stim::format_name_to_enum_map(), argc, argv);
-//     bool append_obs = stim::find_bool_argument("--in_includes_appended_observables", argc, argv);
-//     bool enable_correlations = stim::find_bool_argument("--enable_correlations", argc, argv);
-
-//     config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
-//     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
-//     bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);
-
-//     stim::DetectorErrorModel dem = stim::DetectorErrorModel::from_file(dem_file);
-//     fclose(dem_file);
-
-//     size_t num_obs = dem.count_observables();
-//     auto reader = stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>::make(
-//         shots_in, shots_in_format.id, 0, dem.count_detectors(), append_obs * num_obs);
-//     auto writer = stim::MeasureRecordWriter::make(predictions_out, predictions_out_format.id);
-//     writer->begin_result_type('L');
-
-//     pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
-
-//     auto decoding_unit = pm::detector_error_model_to_decoding_unit(
-//         nodes_ephemeral_fields_ptr,
-//         dem,
-//         num_buckets,
-//         /*ensure_search_flooder_included=*/enable_correlations,
-//         /*enable_correlations=*/enable_correlations);
-//     decoding_unit.setup(regions_ptr, (uint64_t*) atomics_ptr, std::move(reader), std::move(writer), enable_correlations, draw_frames, omp_get_max_threads(), dem);
-//     if (DEBUG) {
-//         pm::setup_output_dirs(draw_frames, use_threads);
-//     }
-
-// #ifdef OUTPUT_DECODING_TIME
-//     using std::chrono::duration;
-//     using std::chrono::duration_cast;
-//     using std::chrono::milliseconds;
-//     using std::chrono::steady_clock;
-
-//     auto t1 = steady_clock::now();
-// #endif
-
-//     decoding_unit.decode_shots_with_shmem();
-
-// #ifdef OUTPUT_DECODING_TIME
-//     auto t2 = steady_clock::now();
-//     /* Getting number of milliseconds as an integer. */
-//     auto ms_int = duration_cast<milliseconds>(t2 - t1);
-//     /* Getting number of milliseconds as a double. */
-//     duration<double, std::milli> ms_double = t2 - t1;
-//     std::cout << "Decoding time: " << ms_double.count() << "ms\n";
-// #endif
-
-//     if (predictions_out != stdout) {
-//         fclose(predictions_out);
-//     }
-//     if (shots_in != stdin) {
-//         fclose(shots_in);
-//     }
-
-//     shmem_free(regions_ptr);
-//     shmem_free(nodes_ephemeral_fields_ptr);
-//     shmem_free(atomics_ptr);
-
-//     return EXIT_SUCCESS;
-// }
-// #endif
 
 int main_count_mistakes(int argc, const char** argv) {
     stim::check_for_unknown_arguments(
@@ -398,7 +321,9 @@ int pm::main(int argc, const char** argv) {
                 std::cerr << "Warning: OpenSHMEM failed to init with SHMEM_THREAD_SERIALED." << std::endl;
             }
 #endif
+            profiling_json_init();
             int status = main_predict(argc, argv);
+            profiling_json_finalize();
 #ifdef USE_SHMEM
             shmem_finalize();
 // ===============
@@ -409,6 +334,9 @@ int pm::main(int argc, const char** argv) {
             return main_count_mistakes(argc, argv);
         }
         if (strcmp(command, "animate") == 0) {
+            #ifdef USE_SHMEM
+            if (DEBUG) std::cout << "calling animate\n";
+            #endif
             return pm::main_animation(argc, argv);
         }
     } catch (std::invalid_argument& ex) {
@@ -437,3 +365,5 @@ int pm::main(int argc, const char** argv) {
           "[--quiet]";
     throw std::invalid_argument(ss.str());
 }
+
+#include "profiling/profiling_json.c"

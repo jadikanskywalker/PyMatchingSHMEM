@@ -78,11 +78,13 @@ struct GraphFlooder {
 #ifdef USE_THREADS
     const int rotating_buffer_idx{-1};
     // int current_shot = -1;
-    int vb_left, vb_right;
+    int vb_left, vb_right, vb;
     TaskBase *task;
     int current_shot;
 #ifdef ENABLE_DRAW_FLAGS
     const std::vector<int>* node_part_id_ptr = nullptr;
+    std::vector<size_t> p_offsets  = {0};
+    std::vector<size_t> vb_offsets = {0};
 #endif
 #endif
 

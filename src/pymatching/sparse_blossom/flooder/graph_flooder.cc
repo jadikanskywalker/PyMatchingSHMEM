@@ -124,7 +124,9 @@ GraphFlooder::GraphFlooder(GraphFlooder&& flooder) noexcept
 inline bool GraphFlooder::is_active(const DetectorNode* node) const {
     if (node->vb < 0)
         return true;
-    return (node->vb > vb_left && node->vb < vb_right);  // DEPENDENT ON ROUND PARTITIONING
+    if (node->vb > vb_left && node->vb < vb_right)
+        return true;
+    return (node->vb == vb); // OBS seam vb
 }
 // ===============
 #endif

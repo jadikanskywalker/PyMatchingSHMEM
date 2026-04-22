@@ -69,12 +69,10 @@ python3 ../scripts/gen_multi_obs.py \
     --after_clifford_depolarization 0.1 \
     --code repetition_code \
     --task memory \
-    --num_surgery_gates 2 \
+    --num_surgery_gates 1 \
     --surgery_duration 5 \
     --circuit_out circuit.stim \
-    --output_dem \
     > error_model.dem
-
 # Sample detection events FROM THE DEM (not the circuit) so seam errors fire
 stim sample_dem \
     --in error_model.dem \
@@ -84,6 +82,13 @@ stim sample_dem \
     --obs_out actual_obs_flips.01 \
     --obs_out_format 01
 
+# stim gen \
+#     --rounds $rounds \
+#     --distance 5 \
+#     --after_clifford_depolarization 0.1 \
+#     --code repetition_code \
+#     --task memory \
+#     > circuit.stim
 # stim analyze_errors \
 #     --decompose_errors \
 #     --fold_loops \
@@ -114,6 +119,7 @@ start_serial=$(date +%s)
     --out predicted_obs_flips__threads.01 \
     --out_format 01 \
     --rounds_per_partition $M \
+    --obs_coors_included \
     --use_threads \
     > log_threads.out
 end_serial=$(date +%s)
@@ -148,8 +154,9 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --out predicted_obs_flips__shmem.01 \
     --out_format 01 \
     --rounds_per_partition $M \
-    --cross_rank_fusion_window_size $k \
     --obs_coors_included \
+    --cross_rank_fusion_window_size $k \
+    --task_division_strategy observable \
     --use_threads \
     --draw_frames \
     > log_shmem.out 2>log_shmem.err

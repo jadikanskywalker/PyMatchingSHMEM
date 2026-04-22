@@ -6,95 +6,54 @@ import re
 import stim
 import sys
 
-def get_group_size(name):
-    name = name.upper()
-    two_q = {"CX", "CY", "CZ", "CNOT", "CPHASE", "SWAP", "XCZ", "XCX", "YCX", "YCY", "YCZ",
-             "ZCX", "ZCY", "ZCZ", "ISWAP", "DEPOLARIZE2", "MXX", "MYY", "MZZ", "PAULI_CHANNEL_2"}
-    if name in two_q:
-        return 2
-    return 1
 
-def shift_t(t, shift_val):
-    if getattr(t, "is_qubit_target", False):
-        return t.value + shift_val
-    if getattr(t, "is_x_target", False):
-        return stim.target_x(t.value + shift_val)
-    if getattr(t, "is_y_target", False):
-        return stim.target_y(t.value + shift_val)
-    if getattr(t, "is_z_target", False):
-        return stim.target_z(t.value + shift_val)
-    return t
+def _build_obs_dem_from_base(base_dem, obs_idx, det_offset, x_shift):
+    """
+    Return a list of DEM instruction strings for observable `obs_idx`,
+    derived from `base_dem` (a flat single-observable DEM).
 
-def interleave_circuit(circuit, num_patches, qubit_shift, x_shift):
-    out = stim.Circuit()
-    for inst in circuit:
-        if isinstance(inst, stim.CircuitRepeatBlock):
-            new_body = interleave_circuit(inst.body_copy(), num_patches, qubit_shift, x_shift)
-            out.append(stim.CircuitRepeatBlock(inst.repeat_count, new_body))
-            continue
+    Transforms applied to each instruction:
+      detector(x, ..., round) D{k}
+        -> detector(x+x_shift, ..., round, float(obs_idx)) D{k+det_offset}
+      error(p) D{a} ... L{m} ...
+        -> error(p) D{a+det_offset} ... L{m+obs_idx} ...
+    Separators (^) and other structure are preserved unchanged.
+    """
+    _d_pat = re.compile(r'\bD(\d+)\b')
+    _l_pat = re.compile(r'\bL(\d+)\b')
+    lines = []
+    for inst in base_dem:
+        s = str(inst)
+        if s.startswith('detector('):
+            args = list(inst.args_copy())
+            args[0] = args[0] + x_shift
+            args.append(float(obs_idx))
+            new_det_ids = [t.val + det_offset
+                           for t in inst.targets_copy()
+                           if t.is_relative_detector_id()]
+            args_str = ', '.join(str(a) for a in args)
+            dets_str = ' '.join(f'D{k}' for k in new_det_ids)
+            lines.append(f'detector({args_str}) {dets_str}')
+        elif s.startswith('error('):
+            s = _d_pat.sub(lambda m: f'D{int(m.group(1)) + det_offset}', s)
+            s = _l_pat.sub(lambda m: f'L{int(m.group(1)) + obs_idx}', s)
+            lines.append(s)
+        # else: skip (logical_observable annotations, shift_detectors remnants, etc.)
+    return lines
 
-        name = getattr(inst, "name", "")
 
-        if name == "TICK":
-            out.append(inst)
-        elif name == "SHIFT_COORDS":
-            out.append(inst) # Emitted once, shifts global frame for all patches!
-        elif name in ["QUBIT_COORDS", "DETECTOR", "OBSERVABLE_INCLUDE"]:
-            # Emit N times (once per patch) independently
-            for i in range(num_patches):
-                new_targets = []
-                for t in inst.targets_copy():
-                    if getattr(t, "is_measurement_record_target", False):
-                        X = -t.value
-                        new_targets.append(stim.target_rec(-(X * num_patches - i)))
-                    else:
-                        new_targets.append(shift_t(t, i * qubit_shift))
+def build_multi_obs_dem(base_dem, num_observables, x_shift):
+    """
+    Build a multi-observable DEM in observable-major order:
+      [obs0 dets][obs1 dets]...[obsN-1 dets]
+    K = base_dem.num_detectors detectors per observable.
+    """
+    K = base_dem.num_detectors
+    all_lines = []
+    for i in range(num_observables):
+        all_lines.extend(_build_obs_dem_from_base(base_dem, i, i * K, i * x_shift))
+    return stim.DetectorErrorModel('\n'.join(all_lines))
 
-                new_args = list(inst.gate_args_copy())
-                if name in ["QUBIT_COORDS", "DETECTOR"]:
-                    if len(new_args) > 0:
-                        new_args[0] += i * x_shift
-                    # Add observable ID as final coordinate
-                    # Observable i belongs to observable_id=i
-                    # Use -1 for cross-observable detectors
-                    if name == "DETECTOR":
-                        new_args.append(float(i))
-                elif name == "OBSERVABLE_INCLUDE":
-                    new_args = [a + i for a in new_args]
-
-                out.append(name, new_targets, new_args)
-        else:
-            # Ordinary instruction (gate, M, MR, etc), combine targets across patches
-            s = get_group_size(name)
-            targets = inst.targets_copy()
-            new_targets = []
-            for k in range(0, len(targets), s):
-                group = targets[k : k+s]
-                for i in range(num_patches):
-                    for t in group:
-                        new_targets.append(shift_t(t, i * qubit_shift))
-            out.append(name, new_targets, inst.gate_args_copy())
-
-    return out
-
-def calc_shifts(circuit):
-    max_q = 0
-    max_x = 0
-    for inst in circuit:
-        if isinstance(inst, stim.CircuitRepeatBlock):
-            mq, mx = calc_shifts(inst.body_copy())
-            max_q = max(max_q, mq)
-            max_x = max(max_x, mx)
-        else:
-            for t in inst.targets_copy():
-                if getattr(t, "is_qubit_target", False) or getattr(t, "is_x_target", False) \
-                        or getattr(t, "is_y_target", False) or getattr(t, "is_z_target", False):
-                    max_q = max(max_q, t.value)
-            if getattr(inst, "name", "") in ["QUBIT_COORDS", "DETECTOR"]:
-                args = list(inst.gate_args_copy())
-                if len(args) > 0:
-                    max_x = max(max_x, args[0])
-    return max_q, max_x
 
 def _build_obs_round_index(dem):
     """Return obs_round_dets[(obs_id, round)] = [(det_id, coors)], sorted by x."""
@@ -127,8 +86,8 @@ def _obs_x_extremes(obs_round_dets):
 def _boundary_dets_at_round(obs_round_dets, obs_id, rnd, x_limit, is_right_side, x_threshold):
     """
     Return detectors of obs_id at the given round that lie within x_threshold of x_limit.
-    is_right_side=True  → keep dets with x >= x_limit - x_threshold  (right boundary of obs_a)
-    is_right_side=False → keep dets with x <= x_limit + x_threshold  (left boundary of obs_b)
+    is_right_side=True  -> keep dets with x >= x_limit - x_threshold  (right boundary of obs_a)
+    is_right_side=False -> keep dets with x <= x_limit + x_threshold  (left boundary of obs_b)
 
     Sorting ensures the actual edge sites pair first:
     - Right side: sort by y then DESCENDING x, so the rightmost site (closest to seam)
@@ -225,7 +184,7 @@ def parse_surgery_spec(spec_str, default_duration=1):
     Parse a manual surgery spec string into a list of (obs_a, obs_b, start_round, duration).
     Format: semicolon-separated entries of "obs_a,obs_b,start[,duration]".
     Duration is optional and defaults to default_duration.
-    Example: "0,1,3,2;0,2,7"  → [(0,1,3,2), (0,2,7,1)]
+    Example: "0,1,3,2;0,2,7"  -> [(0,1,3,2), (0,2,7,1)]
     """
     gates = []
     for entry in spec_str.strip().split(";"):
@@ -256,24 +215,20 @@ def inject_cross_obs_into_dem(dem, surgery_gates, p_cross=0.001, x_boundary_thre
       - Finds all boundary detectors of obs_a (rightmost by x) and obs_b (leftmost by x)
         within x_boundary_threshold of their respective patch edges.
       - Pairs them by y-coordinate (or x for codes with no y coord).
-      - For each pair creates one seam detector (observable_id = -1) at the spatial midpoint.
+      - For each pair creates one seam detector (observable_id = -(obs_a+obs_b)/2) at the
+        spatial midpoint.
       - Adds error edges: obs_a_det <-> seam_det  and  seam_det <-> obs_b_det.
       - Adds temporal error edges connecting each seam detector to the corresponding seam
         detector from the previous round (forming a temporal chain along the seam).
-
-    The seam detector count per round equals min(len(boundary_a), len(boundary_b)), which
-    for a distance-d rotated surface code is roughly floor(d/2) detectors per round.
-
-    Constraint assumed by caller: at each round, each observable is in at most one active
-    gate.  Use generate_random_surgery_gates or parse_surgery_spec to build gates.
+      - Removes the boundary error edges from seam-adjacent nodes so the decoder routes
+        through the seam rather than to the code boundary.
 
     Args:
-        dem:                   stim.DetectorErrorModel from the interleaved circuit
+        dem:                   stim.DetectorErrorModel from build_multi_obs_dem
         surgery_gates:         list of (obs_a, obs_b, start_round, duration); obs_a < obs_b
         p_cross:               error probability for all seam error edges
         x_boundary_threshold:  x-distance from patch edge within which detectors are
-                               considered boundary detectors (default 2; covers the outermost
-                               one or two stabilizer columns for rotated surface codes)
+                               considered boundary detectors (default 2)
 
     Returns:
         stim.DetectorErrorModel with injected cross-observable instructions appended.
@@ -361,7 +316,7 @@ def inject_cross_obs_into_dem(dem, surgery_gates, p_cross=0.001, x_boundary_thre
                 new_lines.append(f"error({p_cross}) D{d_a_id} D{new_det_id}")
                 new_lines.append(f"error({p_cross}) D{new_det_id} D{d_b_id}")
 
-                # Temporal edge within the seam (previous round → this round, same site)
+                # Temporal edge within the seam (previous round -> this round, same site)
                 if site_i in prev_seam_by_site:
                     new_lines.append(
                         f"error({p_cross}) D{prev_seam_by_site[site_i]} D{new_det_id}")
@@ -374,22 +329,20 @@ def inject_cross_obs_into_dem(dem, surgery_gates, p_cross=0.001, x_boundary_thre
     if not new_lines:
         return dem
 
-    # Flatten before appending: repeat blocks use shift_detectors whose offsets
-    # accumulate, so anything appended to str(dem) would have the final cumulative
-    # shift applied to both D-indices and coordinates.  flattened() unrolls all
-    # repeat/shift_detectors into absolute-coordinate instructions with no active
-    # shift, so the new seam lines land at their correct absolute positions.
+    # Flatten the input DEM before appending seam lines.  The input from
+    # build_multi_obs_dem is already flat, but this guards against any repeat
+    # blocks surviving from other paths.
     flat_dem = dem.flattened()
 
-    # Remove boundary error edges (exactly one D target) from seam-adjacent nodes.
-    # These nodes now connect to the seam instead; keeping their boundary edges
-    # would make the decoder prefer matching to the boundary over crossing the seam.
+    # Remove boundary error edges (exactly one D target per component) from
+    # seam-adjacent nodes.  These nodes now connect to the seam; keeping their
+    # boundary edges would make the decoder prefer matching to the boundary.
     _d_pat = re.compile(r'\bD(\d+)\b')
     def _is_boundary_edge_for_seam_node(line):
         if not line.startswith('error('):
             return False
-        # Check each '^'-decomposed component separately: if any component is a
-        # single-detector boundary edge for a seam-adjacent node, drop the whole line.
+        # Check each '^'-decomposed component: if any has exactly one D target
+        # pointing to a seam-adjacent node, drop the whole line.
         for comp in line.split('^'):
             d_ids = _d_pat.findall(comp)
             if len(d_ids) == 1 and int(d_ids[0]) in seam_adjacent_ids:
@@ -400,6 +353,7 @@ def inject_cross_obs_into_dem(dem, surgery_gates, p_cross=0.001, x_boundary_thre
     filtered_lines = [l for l in flat_lines if not _is_boundary_edge_for_seam_node(l)]
     dem_str = "\n".join(filtered_lines) + "\n" + "\n".join(new_lines)
     return stim.DetectorErrorModel(dem_str)
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -417,49 +371,31 @@ def main():
                          help="Number of cross-observable surgery gates to inject, placed "
                               "randomly.  Each gate spans --surgery_duration rounds and "
                               "connects all boundary-site detector pairs along the shared "
-                              "edge.  Implies --output_dem.")
+                              "edge.")
     surgery.add_argument("--surgery_spec", type=str, default="",
                          help="Manual gate spec: semicolon-separated entries of the form "
                               "'obs_a,obs_b,start[,duration]' (duration defaults to "
-                              "--surgery_duration).  Example: '0,1,3,2;0,2,7'.  "
-                              "Implies --output_dem.")
+                              "--surgery_duration).  Example: '0,1,3,2;0,2,7'.")
 
     parser.add_argument("--surgery_duration", type=int, default=4,
                         help="Default number of rounds per surgery gate (default 4).")
     parser.add_argument("--surgery_seed", type=int, default=42,
                         help="RNG seed for --num_surgery_gates placement (default 42).")
     parser.add_argument("--p_cross", type=float, default=None,
-                        help="Error probability for each injected seam error edge "
-                             "(lateral to each patch and temporal within seam). "
-                             "Defaults to 0.5 * after_clifford_depolarization so seam "
-                             "edges scale with the code error rate and remain slightly "
-                             "heavier than boundary edges (boundary still preferred for "
-                             "isolated errors, seam path used for correlated seam errors).")
+                        help="Error probability for each injected seam error edge. "
+                             "Defaults to min(0.4, 2 * after_clifford_depolarization) so seam "
+                             "edges are lighter than boundary edges.")
     parser.add_argument("--surgery_boundary_depth", type=int, default=2,
                         help="x-distance from patch edge for selecting boundary detectors "
-                             "(default 2; covers ~floor(d/2) stabilizer sites for a rotated "
-                             "surface code).")
-    parser.add_argument("--output_dem", action="store_true", default=False,
-                        help="Output DEM to stdout instead of the stim circuit. "
-                             "Implied when surgery gates are requested.")
+                             "(default 2).")
     parser.add_argument("--circuit_out", type=str, default="",
-                        help="If given, write the interleaved stim circuit to this file "
-                             "(in addition to whatever goes to stdout). "
-                             "NOTE: when surgery is active the circuit has no seam measurements; "
-                             "use 'stim sample_dem --in <dem>' to sample detection events, "
-                             "NOT 'stim detect --in <circuit>' which cannot trigger seam detectors.")
+                        help="If given, write the single-observable base circuit to this file "
+                             "for reference.  The output to stdout is always a DEM.")
     args = parser.parse_args()
 
     has_surgery = args.num_surgery_gates > 0 or args.surgery_spec
 
-    # Resolve p_cross: if not explicitly set, use 2x the circuit error rate so
-    # seam edges are lighter than boundary edges and the seam path is explored
-    # by the decoder.  Capped at 0.4 to keep weights positive and meaningful.
     p_cross = args.p_cross if args.p_cross is not None else min(0.4, 2.0 * args.after_clifford_depolarization)
-    if has_surgery and not args.output_dem:
-        print("NOTE: surgery injection implies --output_dem; switching to DEM output.",
-              file=sys.stderr)
-        args.output_dem = True
 
     base = stim.Circuit.generated(
         f"{args.code}:{args.task}",
@@ -468,48 +404,40 @@ def main():
         after_clifford_depolarization=args.after_clifford_depolarization
     )
 
-    max_q, max_x = calc_shifts(base)
-    qubit_shift = max_q + 1
-    x_shift = max_x + 2
-
-    combined = interleave_circuit(base, args.num_observables, qubit_shift, x_shift)
-
-    # Optionally save the circuit regardless of output mode.
     if args.circuit_out:
         with open(args.circuit_out, "w") as f:
-            print(combined, file=f)
-        if has_surgery:
-            print(
-                f"NOTE: wrote circuit to '{args.circuit_out}', but it contains NO seam "
-                f"measurements.\n"
-                f"      Use 'stim sample_dem --in <dem>' to generate detection events\n"
-                f"      so that cross-observable seam errors are sampled correctly.\n"
-                f"      Do NOT use 'stim detect --in {args.circuit_out}' for this purpose.",
-                file=sys.stderr)
+            print(base, file=f)
 
-    if args.output_dem:
-        dem = combined.detector_error_model(decompose_errors=True)
-        if has_surgery:
-            if args.surgery_spec:
-                surgery_gates = parse_surgery_spec(args.surgery_spec,
-                                                   default_duration=args.surgery_duration)
-            else:
-                obs_round_dets = _build_obs_round_index(dem)
-                available_rounds = sorted({rnd for (_, rnd) in obs_round_dets})
-                surgery_gates = generate_random_surgery_gates(
-                    args.num_observables, available_rounds,
-                    args.num_surgery_gates,
-                    duration=args.surgery_duration,
-                    seed=args.surgery_seed)
-            print(f"# Surgery gates: {surgery_gates}", file=sys.stderr)
-            print(f"# p_cross: {p_cross:.6g}  (p={args.after_clifford_depolarization})",
-                  file=sys.stderr)
-            dem = inject_cross_obs_into_dem(
-                dem, surgery_gates, p_cross=p_cross,
-                x_boundary_threshold=args.surgery_boundary_depth)
-        print(dem)
-    else:
-        print(combined)
+    base_dem_flat = base.detector_error_model(decompose_errors=True).flattened()
+    max_x = max(
+        (inst.args_copy()[0] for inst in base_dem_flat
+         if str(inst).startswith('detector(')),
+        default=0.0)
+    x_shift = max_x + 2
+
+    dem = build_multi_obs_dem(base_dem_flat, args.num_observables, x_shift)
+
+    if has_surgery:
+        if args.surgery_spec:
+            surgery_gates = parse_surgery_spec(args.surgery_spec,
+                                               default_duration=args.surgery_duration)
+        else:
+            obs_round_dets = _build_obs_round_index(dem)
+            available_rounds = sorted({rnd for (_, rnd) in obs_round_dets})
+            surgery_gates = generate_random_surgery_gates(
+                args.num_observables, available_rounds,
+                args.num_surgery_gates,
+                duration=args.surgery_duration,
+                seed=args.surgery_seed)
+        print(f"# Surgery gates: {surgery_gates}", file=sys.stderr)
+        print(f"# p_cross: {p_cross:.6g}  (p={args.after_clifford_depolarization})",
+              file=sys.stderr)
+        dem = inject_cross_obs_into_dem(
+            dem, surgery_gates, p_cross=p_cross,
+            x_boundary_threshold=args.surgery_boundary_depth)
+
+    print(dem)
+
 
 if __name__ == '__main__':
     main()

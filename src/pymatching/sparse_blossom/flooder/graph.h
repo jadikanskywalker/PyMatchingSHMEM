@@ -127,6 +127,7 @@ struct SharedMatchingGraph {
     size_t num_rounds;
 
 #ifdef USE_SHMEM
+    size_t num_obs_patches{ 0 };
     std::vector<std::pair<size_t, size_t>> partition_bounds;
     std::vector<std::pair<size_t, size_t>> vb_bounds;
 #endif
@@ -137,7 +138,11 @@ struct SharedMatchingGraph {
         std::vector<int> node_part_id_,
         size_t num_partitions_,
         size_t num_virtual_boundaries_,
-        size_t num_rounds_);
+        size_t num_rounds_
+#ifdef USE_SHMEM
+        , size_t num_obs_patches_ = 0
+#endif
+    );
 
 #ifdef USE_SHMEM
     void construct_partition_vb_bounds();
@@ -145,6 +150,6 @@ struct SharedMatchingGraph {
 };
 #endif
 
-}  // namespace pm
+};  // namespace pm
 
 #endif  // PYMATCHING2_GRAPH_H

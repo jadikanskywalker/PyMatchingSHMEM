@@ -24,6 +24,7 @@
 
 #ifdef USE_THREADS
 #include "../config_parallel.h"
+#include <omp.h>
 #include <fstream>
 #include <filesystem>
 #include "pymatching/sparse_blossom/diagram/mwpm_diagram.h"

@@ -60,6 +60,7 @@ class UserNode {
     double x, y, round;
     int p = -1;
     int vb = -1;
+    int observable_id = -1;  /// Observable ID: -1 for cross-observable, >= 0 for observable index
 #endif
 };
 
@@ -78,7 +79,11 @@ class UserGraph {
     std::vector<int> node_part_id;
     size_t num_partitions;
     size_t num_rounds{ 0 };
+    size_t num_virtual_boundaries{ 0 };
     std::vector<std::vector<int>> virtual_boundaries;
+#ifdef USE_SHMEM
+    size_t num_obs_patches{ 0 };
+#endif
 #endif
 
     UserGraph();
@@ -154,6 +159,9 @@ class UserGraph {
 
 #ifdef USE_THREADS
     void partition_nodes_by_round(const stim::DetectorErrorModel& dem);
+#ifdef USE_SHMEM
+    void partition_nodes_by_obs_patch(const stim::DetectorErrorModel& dem);
+#endif
 #endif
 
    private:

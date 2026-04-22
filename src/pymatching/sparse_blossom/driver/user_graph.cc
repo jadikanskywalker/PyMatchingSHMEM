@@ -317,7 +317,11 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
         }
     }
 
-    return SharedMatchingGraph(matching_graph_ptr, node_part_id, num_partitions, virtual_boundaries.size(), num_rounds);
+    return SharedMatchingGraph(matching_graph_ptr, node_part_id, num_partitions, num_virtual_boundaries, num_rounds
+#ifdef USE_SHMEM
+        , num_obs_patches
+#endif
+    );
 }
 #endif
 
@@ -584,9 +588,18 @@ pm::UserGraph pm::detector_error_model_to_user_graph(
         user_graph.loaded_from_dem_without_correlations = true;
     }
 #ifdef USE_THREADS
-    // Default to partition nodes by round
+#ifdef USE_SHMEM
+    if (config_parallel::division_strategy == config_parallel::OBS) {
+        user_graph.partition_nodes_by_obs_patch(detector_error_model);
+    } else {
+        user_graph.partition_nodes_by_round(detector_error_model);
+    }
+#else
     user_graph.partition_nodes_by_round(detector_error_model);
 #endif
+#endif
+// reorder_nodes_by_observable() removed: DEM is now generated in observable-major
+// order by gen_multi_obs.py so no post-hoc reorder is needed.
     return user_graph;
 }
 
@@ -649,7 +662,7 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
             throw std::invalid_argument("Detector node " + std::to_string(it->first) + " has no coords");
         }
         // Store round
-        size_t round_coor = coors.size() - 1;
+        size_t round_coor = config_parallel::obs_coors_included ? coors.size() - 2 : coors.size() - 1;
         nodes[n].round = coors[round_coor];
         // Update current p/vb if necessary
         if (coors[round_coor] > last_round) {
@@ -681,9 +694,247 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
         }
         virtual_boundaries.pop_back();
     }
+    num_virtual_boundaries = virtual_boundaries.size();
     num_partitions = p+1;
 }
+#endif
+#ifdef USE_SHMEM
+// Assumes nodes are sorted in observable-major order: [obs0 by round][obs1 by round][seam nodes].
+// Coords format per detector: [x, [y,] round, obs_id]  where obs_id < 0 encodes seam nodes.
+//
+// Design:
+//   - obs0 creates virtual_boundaries slots; obs1+ ADDS nodes into the same slots (shared).
+//   - node_part_id encoding: partition → global_p_offset+local_p; vb → -(global_vb_offset+slot_index+1).
+//     obs0 vb0 → -1, obs1 vb0 → -(K_vb+1), etc. (globally unique).
+//     node->vb still uses the shared slot index (0..K_vb-1) for GraphFlooder::is_active() gating.
+//   - Cross-obs vbs get node->vb slot above K_vb-1. node_part_id increments globally normally
+//   - num_virtual_boundaries = K_vb * obs_count + cross_obs_vb_count.
+//
+// Pending-vb pattern: when in vb, hold vb-round nodes in pending_vb; commit when next partition
+// starts. If obs patch ends while pending, assign nodes to the last partition instead.
+void pm::UserGraph::partition_nodes_by_obs_patch(const stim::DetectorErrorModel& dem) {
+    std::set<uint64_t> all_dets;
+    size_t num_nodes = nodes.size();
+    for (uint64_t k = 0; k < num_nodes; ++k)
+        all_dets.emplace_hint(all_dets.end(), k);
+    std::map<uint64_t, std::vector<double>> coords_map = dem.get_detector_coordinates(all_dets);
 
+    int M = config_parallel::M;
+    node_part_id.resize(num_nodes);
+    virtual_boundaries.clear();
+
+    int local_p        = 0;   // partition index within current observable
+    int local_vb_idx   = 0;   // vb slot index (0-based) within current observable
+    int global_p_offset = 0;  // cumulative partitions from completed observables
+    int global_vb_offset = 0; // cumulative vbs from completed observables
+
+    std::vector<int> pending_vb;
+    int pending_vb_slot = -1; // virtual_boundaries index for pending vb nodes
+
+    int K_p  = -1;  // partitions per observable (set at first obs transition)
+    int K_vb = -1;  // vb slots per observable
+
+    int obs_count          = 0;
+    int cross_obs_vb_count = 0;
+    bool in_cross_obs      = false;
+    double last_cross_obs_id = std::numeric_limits<double>::max();
+
+    double last_round  = -1.0;
+    bool p_or_vb       = true;  // true=partition, false=pending-vb
+    int  round_counter = 0;
+
+    if (DEBUG) std::cout << "Entering OBS 0\nStarting p0\n" << std::flush;
+
+    for (int n = 0; n < (int)num_nodes; ++n) {
+        auto it = coords_map.find((uint64_t)n);
+        if (it == coords_map.end()) continue;
+        const auto& coors = it->second;
+        if (coors.empty())
+            throw std::invalid_argument("Detector " + std::to_string(n) + " has no coords");
+
+        double obs_id_val = coors.back();
+        double round      = coors[coors.size() - 2];
+        nodes[n].round         = round;
+        nodes[n].observable_id = (int)floor(obs_id_val);
+        nodes[n].x             = coors[0];
+        if (coors.size() > 3) nodes[n].y = coors[1];
+
+        if (round > last_round) {
+            if (!in_cross_obs) {
+                if (!p_or_vb) {
+                    // Commit pending vb: this is the first partition round after a vb round.
+                    if (obs_count == 0)
+                        virtual_boundaries.push_back({});  // obs0: create new slot
+                    for (int ni : pending_vb)
+                        virtual_boundaries[pending_vb_slot].push_back(ni);
+                    pending_vb.clear();
+                    ++local_vb_idx;
+                    round_counter = 1;
+                    p_or_vb = true;
+                    if (DEBUG) std::cout << "Starting p" << (global_p_offset + local_p) << "\n" << std::flush;
+                } else {
+                    ++round_counter;
+                    if (round_counter == M) {
+                        // Start pending vb
+                        ++local_p;
+                        pending_vb_slot = local_vb_idx;
+                        p_or_vb = false;
+                        if (DEBUG) std::cout << "Starting vb" << (global_vb_offset + pending_vb_slot) << "\n" << std::flush;
+                    }
+                }
+                if (obs_count == 0) ++num_rounds;
+            } else {
+                // Cross-obs: start a new vb slot whenever the obs_id changes.
+                if (obs_id_val != last_cross_obs_id) {
+                    ++cross_obs_vb_count;
+                    virtual_boundaries.push_back({});
+                    last_cross_obs_id = obs_id_val;
+                    if (DEBUG) std::cout << "Starting cross-seam vb" << -(K_vb * obs_count + cross_obs_vb_count) << "\n" << std::flush;
+                }
+            }
+            last_round = round;
+
+        } else if (round < last_round) {
+            // Round reset = obs transition (next observable or cross-obs seam section).
+            if (!in_cross_obs) {
+                // Record K_p and K_vb at the first obs transition.
+                if (K_p == -1) {
+                    K_p  = p_or_vb ? local_p + 1 : local_p;
+                    K_vb = (int)virtual_boundaries.size();
+                }
+                // Cleanup: if obs ended on a pending vb, discard it and keep last partition.
+                if (!p_or_vb) {
+                    int last_part = global_p_offset + local_p - 1;
+                    for (int ni : pending_vb)
+                        node_part_id[ni] = last_part;
+                    pending_vb.clear();
+                    p_or_vb = true;
+                }
+                ++obs_count;
+
+                if (obs_id_val < 0.0) {
+                    // Entering cross-observable (seam) nodes.
+                    in_cross_obs = true;
+                    ++cross_obs_vb_count;
+                    virtual_boundaries.push_back({});
+                    last_cross_obs_id = obs_id_val;
+                    if (DEBUG) std::cout << "Starting cross-seam vb" << -(K_vb * obs_count + cross_obs_vb_count) << "\n" << std::flush;
+                } else {
+                    // Entering next observable's patch.
+                    // round_counter starts at 1 (not 0) because the first round of the new
+                    // observable is consumed by the transition detection. This keeps vbs aligned.
+                    global_p_offset  += K_p;
+                    global_vb_offset += K_vb;
+                    local_p        = 0;
+                    local_vb_idx   = 0;
+                    round_counter  = 1;
+                    if (DEBUG) std::cout << "Entering OBS " << obs_count << "\nStarting p" << global_p_offset << "\n" << std::flush;
+                }
+            }
+            last_round = round;
+        }
+
+        // Assign node_part_id for this node.
+        if (in_cross_obs) {
+            int slot = K_vb + cross_obs_vb_count - 1;   // virtual_boundaries array index
+            node_part_id[n] = -(K_vb * obs_count + cross_obs_vb_count);  // global vb id
+            virtual_boundaries[slot].push_back(n);
+        } else if (!p_or_vb) {
+            node_part_id[n] = -(global_vb_offset + pending_vb_slot + 1);
+            pending_vb.push_back(n);
+        } else {
+            node_part_id[n] = global_p_offset + local_p;
+        }
+    }
+
+    // Final cleanup for the last observable.
+    if (!in_cross_obs) {
+        if (K_p == -1) {
+            // Only one observable — no round-reset transition was detected.
+            K_p  = p_or_vb ? local_p + 1 : local_p;
+            K_vb = (int)virtual_boundaries.size();
+        }
+        if (!p_or_vb) {
+            int last_part = global_p_offset + local_p - 1;
+            for (int ni : pending_vb)
+                node_part_id[ni] = last_part;
+            pending_vb.clear();
+        }
+        ++obs_count;
+    }
+
+    num_partitions         = (size_t)K_p * obs_count;
+    num_virtual_boundaries = (size_t)K_vb * obs_count + cross_obs_vb_count;
+    num_obs_patches            = (size_t)obs_count;
+}
+// This function was generated by Claude Haiku 4.5
+// void pm::UserGraph::reorder_nodes_by_observable() {
+//     // Create a permutation that sorts nodes by observable_id (ascending), then by round
+//     size_t num_nodes = nodes.size();
+//     std::vector<size_t> permutation(num_nodes);
+//     for (size_t i = 0; i < num_nodes; ++i) {
+//         permutation[i] = i;
+//     }
+//     // Sort indices by observable_id, then by round
+//     std::sort(permutation.begin(), permutation.end(), [this](size_t a, size_t b) {
+//         int obs_a = nodes[a].observable_id;
+//         int obs_b = nodes[b].observable_id;
+//         if (obs_a != obs_b) {
+//             if (obs_a < 0 && obs_b < 0)
+//                 return obs_a > obs_b;  // less negative (higher) before more negative
+//             if (obs_b < 0)
+//                 return true;   // b is seam, a (regular) comes first
+//             if (obs_a < 0)
+//                 return false;  // a is seam, b (regular) comes first
+//             return obs_a < obs_b;
+//         }
+//         return nodes[a].round < nodes[b].round;
+//     });
+//     // Build inverse permutation (old_id -> new_id)
+//     std::vector<size_t> inverse_perm(num_nodes);
+//     for (size_t new_id = 0; new_id < num_nodes; ++new_id) {
+//         inverse_perm[permutation[new_id]] = new_id;
+//     }
+//     // Reorder nodes vector
+//     std::vector<UserNode> reordered_nodes(num_nodes);
+//     for (size_t new_id = 0; new_id < num_nodes; ++new_id) {
+//         reordered_nodes[new_id] = nodes[permutation[new_id]];
+//     }
+//     nodes = std::move(reordered_nodes);
+//     // Update all edges to use new node numbering.
+//     // SIZE_MAX is the sentinel for a boundary edge endpoint — leave it unchanged.
+//     for (auto& edge : edges) {
+//         if (edge.node1 != SIZE_MAX) {
+//             if (edge.node1 >= num_nodes)
+//                 throw std::invalid_argument(
+//                     "Edge references node ID out of range: (" + std::to_string(edge.node1) +
+//                     ", " + std::to_string(edge.node2) + ") with num_nodes=" + std::to_string(num_nodes));
+//             edge.node1 = inverse_perm[edge.node1];
+//         }
+//         if (edge.node2 != SIZE_MAX) {
+//             if (edge.node2 >= num_nodes)
+//                 throw std::invalid_argument(
+//                     "Edge references node ID out of range: (" + std::to_string(edge.node1) +
+//                     ", " + std::to_string(edge.node2) + ") with num_nodes=" + std::to_string(num_nodes));
+//             edge.node2 = inverse_perm[edge.node2];
+//         }
+//     }
+//     // Update boundary_nodes set to use new node numbering
+//     std::set<size_t> new_boundary_nodes;
+//     for (size_t old_id : boundary_nodes) {
+//         new_boundary_nodes.insert(inverse_perm[old_id]);
+//     }
+//     boundary_nodes = new_boundary_nodes;
+//     // Update node_part_id vector if it exists
+//     if (!node_part_id.empty()) {
+//         std::vector<int> reordered_part_id(num_nodes);
+//         for (size_t new_id = 0; new_id < num_nodes; ++new_id) {
+//             reordered_part_id[new_id] = node_part_id[permutation[new_id]];
+//         }
+//         node_part_id = std::move(reordered_part_id);
+//     }
+// }
+#endif
 // ===============
 // std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g) {
 //     // Query coordinates from stim. Map: det_id -> vector<double> of coords.
@@ -735,4 +986,3 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
 // }
 
 // ===============
-#endif
