@@ -65,12 +65,12 @@ rm *.01 circuit.stim *.b8 *.dem
 python3 ../scripts/gen_multi_obs.py \
     --num_observables 4 \
     --rounds $rounds \
-    --distance 5 \
-    --after_clifford_depolarization 0.1 \
-    --code repetition_code \
-    --task memory \
+    --distance 21 \
+    --after_clifford_depolarization 0.01 \
+    --code surface_code \
+    --task rotated_memory_x \
     --num_surgery_gates 3 \
-    --surgery_duration 10 \
+    --surgery_duration 5 \
     --circuit_out circuit.stim \
     > error_model.dem
 # Sample detection events FROM THE DEM (not the circuit) so seam errors fire
@@ -81,6 +81,19 @@ stim sample_dem \
     --out_format b8 \
     --obs_out actual_obs_flips.01 \
     --obs_out_format 01
+
+
+# python scripts/gen_multi_obs.py \
+#     --num_observables 24 \
+#     --rounds 756 \
+#     --distance 21 \
+#     --after_clifford_depolarization 0.01 \
+#     --code surface_code \
+#     --task rotated_memory_x \
+#     --surgery_preset 24obs \
+#     --circuit_out circuit.stim \
+#     > error_model.dem
+
 
 # stim gen \
 #     --rounds $rounds \
@@ -112,16 +125,16 @@ fi
 
 # echo "Starting threads run..."
 start_serial=$(date +%s)
-~/PyMatchingSHMEM/build_threads/pymatching predict \
+~/PyMatching/build/pymatching predict \
     --dem error_model.dem \
     --in detection_events.b8 \
     --in_format b8 \
     --out predicted_obs_flips__threads.01 \
     --out_format 01 \
-    --rounds_per_partition $M \
-    --use_threads \
-    --draw_frames \
     > log_threads.out
+    # --rounds_per_partition $M \
+    # --use_threads \
+    # --draw_frames \
 end_serial=$(date +%s)
 serial_time=$((end_serial - start_serial))
 echo "Threads run completed in $serial_time seconds."

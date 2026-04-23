@@ -1468,7 +1468,6 @@ void pm::DecodingUnit::decode_shots() {
                     // Collect all CRTs handled across roots this thread solved this shot
                     std::vector<CrossRankTask*> crts_i_handled;
                     pm::MatchingResult& my_result = shot.thread_results[tid];
-                    my_result = {};
 
                     for (auto& [root_task, root_solver_id] : roots_i_solved) {
                         auto& root_solver = *solvers[root_solver_id];
@@ -1686,7 +1685,10 @@ void pm::DecodingUnit::decode_shots() {
                     if (prev + n_my == shot.num_task_roots) {
                         if (shot.num_observables <= sizeof(pm::obs_int) * 8) {
                             pm::MatchingResult combined{};
-                            for (int ti = 0; ti < num_threads; ++ti) combined += shot.thread_results[ti];
+                            for (int ti = 0; ti < num_threads; ++ti) {
+                                combined += shot.thread_results[ti];
+                                shot.thread_results[ti] = {}; // reset
+                            }
                             if (DEBUG) t_out << "   combined obs_mask: " << combined.obs_mask << std::endl << std::flush;
                             pm::fill_bit_vector_from_obs_mask(
                                 combined.obs_mask, shot.res.obs_crossed.data(), shot.num_observables);
