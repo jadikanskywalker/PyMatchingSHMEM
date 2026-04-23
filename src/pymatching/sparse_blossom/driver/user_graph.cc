@@ -677,7 +677,7 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
             throw std::invalid_argument("Detector node " + std::to_string(it->first) + " has no coords");
         }
         // Store round
-        size_t round_coor = config_parallel::obs_coors_included ? coors.size() - 2 : coors.size() - 1;
+        size_t round_coor = coors.size() - 1;
         nodes[n].round = coors[round_coor];
         // Update current p/vb if necessary
         if (coors[round_coor] > last_round) {
@@ -767,8 +767,8 @@ void pm::UserGraph::partition_nodes_by_obs_patch(const stim::DetectorErrorModel&
         if (coors.empty())
             throw std::invalid_argument("Detector " + std::to_string(n) + " has no coords");
 
-        double obs_id_val = coors.back();
-        double round      = coors[coors.size() - 2];
+        double round      = coors.back();
+        double obs_id_val = coors[coors.size() - 2];
         nodes[n].round         = round;
         nodes[n].observable_id = (int)floor(obs_id_val);
         nodes[n].x             = coors[0];

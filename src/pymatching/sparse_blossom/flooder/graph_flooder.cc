@@ -124,10 +124,12 @@ GraphFlooder::GraphFlooder(GraphFlooder&& flooder) noexcept
 inline bool GraphFlooder::is_active(const DetectorNode* node) const {
     if (node->vb < 0)
         return true;
+#ifdef USE_SHMEM
     if (node->vb > vb_left && node->vb < vb_right)
         return true;
-#ifdef USE_SHMEM
     return (node->vb == vb); // OBS seam vb
+#else
+    return (node->vb > vb_left && node->vb < vb_right);
 #endif
 }
 // ===============

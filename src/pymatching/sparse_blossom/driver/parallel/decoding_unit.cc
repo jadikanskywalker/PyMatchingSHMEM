@@ -1426,15 +1426,17 @@ void pm::DecodingUnit::decode_shots() {
                         Task* local_parent = static_cast<Task*>(t->parent);
                         bool iamleft = t->child_bit == 1;
                         Task* sibling = (iamleft) ? local_parent->right_child : local_parent->left_child;
+#ifdef USE_SHMEM
                         solver_id = get_solver_id(shot_container_id, local_parent->part + local_parent->vb_solver_offset, tid);
                         if (DEBUG) t_out << "    t->parent->part=" << local_parent->part << "  t->parent->vb_solver_offset=" << local_parent->vb_solver_offset << "\n" << std::flush;
+#else
+                        solver_id = get_solver_id(shot_container_id, local_parent->part, tid);
+#endif
                         stolen = t->try_to_steal_parent();
                         t = local_parent;
                         // Try to steal sibling or descendent of sibling
                         if (!stolen && !sibling->is_fusion) {
-#ifdef USE_SHMEM
                             solver_id = get_solver_id(shot_container_id, sibling->part, tid);
-#endif
                             stolen = sibling->try_to_steal_leaf(shot_buffer_round);
                             t = sibling;
                         }

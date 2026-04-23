@@ -20,7 +20,6 @@
 // #define SHMEM_NUM_CROSS_RANK_FUSIONS_PER_BUFFER 2
 // #define SHMEM_USE_FLATTEN_FUSIONS true // not flattening is currently unsupported
 // #define SHMEM_MAX_D 30 // used for regions_matched_to_vb buffer in shmem
-
 #endif
 
 #ifdef USE_THREADS

@@ -70,7 +70,7 @@ python3 ../scripts/gen_multi_obs.py \
     --code repetition_code \
     --task memory \
     --num_surgery_gates 3 \
-    --surgery_duration 5 \
+    --surgery_duration 10 \
     --circuit_out circuit.stim \
     > error_model.dem
 # Sample detection events FROM THE DEM (not the circuit) so seam errors fire
@@ -112,15 +112,15 @@ fi
 
 # echo "Starting threads run..."
 start_serial=$(date +%s)
-~/PyMatchingSHMEM/build_threads_release/pymatching predict \
+~/PyMatchingSHMEM/build_threads/pymatching predict \
     --dem error_model.dem \
     --in detection_events.b8 \
     --in_format b8 \
     --out predicted_obs_flips__threads.01 \
     --out_format 01 \
     --rounds_per_partition $M \
-    --obs_coors_included \
     --use_threads \
+    --draw_frames \
     > log_threads.out
 end_serial=$(date +%s)
 serial_time=$((end_serial - start_serial))
@@ -158,7 +158,6 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --cross_rank_fusion_window_size $k \
     --task_division_strategy observable \
     --use_threads \
-    --draw_frames \
     > log_shmem.out 2>log_shmem.err
 
 end_parallel=$(date +%s)
