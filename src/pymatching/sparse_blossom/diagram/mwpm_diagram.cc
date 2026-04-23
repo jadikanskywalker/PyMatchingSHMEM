@@ -37,6 +37,19 @@ pm::pick_coords_for_drawing_from_dem(const stim::DetectorErrorModel &dem, float 
             continue;
         }
         auto &cs = p->second;
+#ifdef USE_SHMEM
+        // The last coordinate may encode the observable axis.
+        // Cross-observable (seam) nodes are encoded as -seam_idx
+        // Decode to the visual midpoint (obs_a+obs_b)/2
+        if (config_parallel::division_strategy == config_parallel::OBS || config_parallel::obs_coors_included) {
+            if (cs.size() > 2) {
+                size_t nc = cs.size();
+                auto tmp = cs[nc-1];
+                cs[nc-1] = -cs[nc-2];
+                cs[nc-2] = tmp;
+            }
+        }
+#endif
         if (cs.size() == 1) {
             coords.push_back({cs[0], 0});
         } else {
@@ -47,23 +60,23 @@ pm::pick_coords_for_drawing_from_dem(const stim::DetectorErrorModel &dem, float 
         double s = 1;
         for (size_t d = 2; d < cs.size(); d++) {
             s *= 0.66;
-#ifdef USE_SHMEM
-            // The last coordinate may encode the observable axis.
-            // Cross-observable (seam) nodes are encoded as -(obs_a+obs_b)/2 - 1 < -1
-            // Decode to the visual midpoint (obs_a+obs_b)/2
-            double cd = cs[d];
-            if (config_parallel::division_strategy == config_parallel::OBS && d == cs.size() - 1) {
-                if (cd < 0)
-                    cd = -cd;
-                else
-                    continue;
-            }
-            coords.back().first += cd * s;
-            coords.back().second += cd * s / (d + 1);
-#else
+// #ifdef USE_SHMEM
+//             // The last coordinate may encode the observable axis.
+//             // Cross-observable (seam) nodes are encoded as -seam_idx
+//             // Decode to the visual midpoint (obs_a+obs_b)/2
+//             double cd = cs[d];
+//             // if (config_parallel::division_strategy == config_parallel::OBS && d == cs.size() - 1) {
+//             //     if (cd < 0)
+//             //         cd = -cd;
+//             //     else
+//             //         continue;
+//             // }
+//             coords.back().first += cd * s;
+//             coords.back().second += cd * s / (d + 1);
+// #else
             coords.back().first += cs[d] * s;
             coords.back().second += cs[d] * s / (d + 1);
-#endif
+// #endif
         }
     }
 
