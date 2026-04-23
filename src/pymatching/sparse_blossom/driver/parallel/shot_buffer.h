@@ -48,6 +48,15 @@ struct ShotContainer {
 #ifdef USE_SHMEM
     std::vector<uint8_t> i_solved_p;
     std::vector<uint8_t> i_solved_vb;
+
+    // Set during build_tasks_*; count of chain tops (parent==nullptr) across tasks + CRTs.
+    int num_task_roots{0};
+    // Incremented by each thread when it finishes all its roots for a shot.
+    // Last thread (cumulative count reaches num_task_roots) resets to 0 and writes result.
+    std::atomic<int> num_roots_done{0};
+    // Per-thread partial MatchingResult accumulator (indexed by omp thread id).
+    // Sized to num_threads during build_tasks_*.
+    std::vector<pm::MatchingResult> thread_results;
 #endif
 
     std::vector<Task> tasks;  // Tasks handle dynamic fusion tree synchonization

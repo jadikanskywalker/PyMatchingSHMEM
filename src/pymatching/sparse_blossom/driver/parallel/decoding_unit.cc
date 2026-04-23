@@ -246,7 +246,11 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
     if (DEBUG) {
         std::cout << "DEBUG: initializing tasks" << std::endl;
     }
+#ifdef USE_SHMEM
     const int p_offset = graph.num_partitions / n_pes * pid;
+#else
+    const int p_offset = 0;
+#endif
     // Build a full fusion tree: less than 2*N tasks. Reserve to keep element addresses stable.
     for (int shot_container_id=0; shot_container_id < NUM_BUFFERS_PER_UNIT; shot_container_id++) {  // Lazy repeat per shot container -- CAN BE IMPROVED!
         auto& shot_container = shot_buffer->buffer[shot_container_id];
@@ -320,6 +324,10 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
     int my_partitions_end   = (int)my_partition_task_ids.back() + 1 + p_offset;
     for (int i=0; i < NUM_BUFFERS_PER_UNIT; ++i) {
         shot_buffer->buffer[i].cross_rank_tasks.reserve(2);
+        // ROUND always has exactly one chain top regardless of CRT count.
+        shot_buffer->buffer[i].num_task_roots = 1;
+        shot_buffer->buffer[i].thread_results.assign(num_threads, pm::MatchingResult{});
+        shot_buffer->buffer[i].num_roots_done.store(0, std::memory_order_relaxed);
         if (pid > 0) { // Add cross-rank fusion on left
             uint64_t* task_status_p = get_task_status_ptr(i, false);
             FusionSummary* fusion_summary_p = get_fusion_summary_ptr(i, false);
@@ -629,6 +637,20 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                           << " vb_right=" << t.vb_right
                           << " other_pid=" << t.other_pid << std::endl << std::flush;
             }
+        }
+        // Count chain tops (parent==nullptr) as independent roots for this PE.
+        // CRT constructor chain-walk already linked CRTs above local roots.
+        {
+            auto& sc = shot_buffer->buffer[shot_id];
+            sc.thread_results.assign(num_threads, pm::MatchingResult{});
+            sc.num_roots_done.store(0, std::memory_order_relaxed);
+            int roots = 0;
+            for (const auto& task : sc.tasks)
+                if (task.parent == nullptr) ++roots;
+            for (const auto& crt_t : sc.cross_rank_tasks)
+                if (crt_t.parent == nullptr) ++roots;
+            sc.num_task_roots = roots;
+            if (DEBUG) std::cout << "PE" << pid << " OBS shot_id=" << shot_id << " num_task_roots=" << roots << "\n" << std::flush;
         }
     }
 
@@ -1303,6 +1325,13 @@ void pm::DecodingUnit::decode_shots() {
         int shot_buffer_round =
             shot_buffer->buffer[0].current_buffer_round.load();  // how many times buffer has looped
         int shot_id = shot_buffer_round * NUM_BUFFERS_PER_UNIT;
+#ifdef USE_SHMEM
+        // Thread-local list of local roots solved during the steal loop.
+        // Cleared at the start of each shot; a thread may solve multiple roots when
+        // it exhausts all its assigned partition leaves (via next_p_id).
+        struct RootInfo { Task* task; int solver_id; };
+        std::vector<RootInfo> roots_i_solved;
+#endif
         try {
             while (true) {
                 if (BARE_DEBUG) {
@@ -1341,7 +1370,11 @@ void pm::DecodingUnit::decode_shots() {
                 int solver_id = get_solver_id(shot_container_id, t->part, tid);
                 if (DEBUG) t_out << "solvers[" << solver_id << "]\n";
                 bool stolen = t->try_to_steal_leaf(shot_buffer_round);
+#ifdef USE_SHMEM
+                roots_i_solved.clear();
+#else
                 bool i_solved_root = false;
+#endif
 #ifdef SCOREP_USER_ENABLE
                 SCOREP_USER_REGION_BEGIN(local_decoding, "Local Decoding", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
@@ -1385,13 +1418,18 @@ void pm::DecodingUnit::decode_shots() {
                     (t->is_fusion) ? shot.i_solved_vb[t->part] = true : shot.i_solved_p[t->part] = true;
 #endif
                     t->mark_solved();
-                    if (t->parent) {
+                    if (t->parent != nullptr
+#ifdef USE_SHMEM
+                        && !t->parent->is_cross_rank_fusion
+#endif
+                    ) {
+                        Task* local_parent = static_cast<Task*>(t->parent);
                         bool iamleft = t->child_bit == 1;
-                        Task* sibling = (iamleft) ? t->parent->right_child : t->parent->left_child;
-                        solver_id = get_solver_id(shot_container_id, t->parent->part + t->parent->vb_solver_offset, tid);
-                        if (DEBUG) t_out << "    t->parent->part=" << t->parent->part << "  t->parent->vb_solver_offset=" << t->parent->vb_solver_offset << "\n" << std::flush;
+                        Task* sibling = (iamleft) ? local_parent->right_child : local_parent->left_child;
+                        solver_id = get_solver_id(shot_container_id, local_parent->part + local_parent->vb_solver_offset, tid);
+                        if (DEBUG) t_out << "    t->parent->part=" << local_parent->part << "  t->parent->vb_solver_offset=" << local_parent->vb_solver_offset << "\n" << std::flush;
                         stolen = t->try_to_steal_parent();
-                        t = t->parent;
+                        t = local_parent;
                         // Try to steal sibling or descendent of sibling
                         if (!stolen && !sibling->is_fusion) {
 #ifdef USE_SHMEM
@@ -1401,8 +1439,13 @@ void pm::DecodingUnit::decode_shots() {
                             t = sibling;
                         }
                     } else {
+                        // t is a local tree root: parent==nullptr or parent is a CrossRankTask
                         stolen = false;
+#ifdef USE_SHMEM
+                        roots_i_solved.push_back({t, solver_id});
+#else
                         i_solved_root = true;
+#endif
                     }
                     if (!stolen && next_p_id < my_partition_task_ids.size()) {
                         t = &shot.tasks[my_partition_task_ids[next_p_id]];
@@ -1418,223 +1461,271 @@ void pm::DecodingUnit::decode_shots() {
 #ifdef SCOREP_USER_ENABLE
                 SCOREP_USER_REGION_END(local_decoding);
 #endif
+#ifdef USE_SHMEM
+                if (!roots_i_solved.empty()) {
+                    // Collect all CRTs handled across roots this thread solved this shot
+                    std::vector<CrossRankTask*> crts_i_handled;
+                    pm::MatchingResult& my_result = shot.thread_results[tid];
+                    my_result = {};
+
+                    for (auto& [root_task, root_solver_id] : roots_i_solved) {
+                        auto& root_solver = *solvers[root_solver_id];
+                        root_solver.flooder.match_edges.clear();
+
+#ifdef SCOREP_USER_ENABLE
+                        SCOREP_USER_REGION_BEGIN(cross_rank_fusion, "Cross Rank Fusion", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+                        // Walk the CRT chain above this local root
+                        std::vector<CrossRankTask*> root_crts;
+                        TaskBase* chain_node = root_task->parent;
+                        while (chain_node != nullptr) {
+                            auto* crt = static_cast<CrossRankTask*>(chain_node);
+                            if (DEBUG) t_out << "Trying cross-rank fusion vb=" << crt->part
+                                             << " iamleft=" << crt->iamleft
+                                             << " other_pid=" << crt->other_pid << "\n" << std::flush;
+                            if (crt->try_to_steal(pid, t_out)) {
+                                if (BARE_DEBUG) t_out << "  Stole CRT with " << crt->other_pid << std::endl << std::flush;
+                                crt->setup();
+                                int crt_sid = get_solver_id(shot_container_id,
+                                    (int)((crt->iamleft) ? crt->left_global_offset.first
+                                                         : crt->right_global_offset.first));
+                                auto& crt_solver = *solvers[crt_sid];
+                                crt_solver.prepare_for_task(crt, shot_id);
+#ifdef ENABLE_DRAW_FLAGS
+                                if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
+                                    crt_solver.flooder.p_offsets  = { crt->left_global_offset.first,  crt->right_global_offset.first  };
+                                    crt_solver.flooder.vb_offsets = { crt->left_global_offset.second, crt->right_global_offset.second };
+                                }
+                                // if (draw_frames) draw_frame(crt_solver, pm::MwpmEvent::no_event(), 1000, true, tid);
+#endif
+                                auto& crt_hitsref = shot.virtual_boundary_hits[crt->part];
+                                get_solution_from_remote_pe(shot_container_id, my_result, *crt, t_out, crt_hitsref);
+                                if (BARE_DEBUG) t_out << "  Solving CRT " << crt->part
+                                    << " bounds " << crt_solver.flooder.vb_left << " " << crt_solver.flooder.vb_right << std::endl << std::flush;
+                                pm::process_timeline_until_completion(
+                                    crt_solver,
+                                    crt_hitsref,
+#ifdef ENABLE_DRAW_FLAGS
+                                    draw_frames,
+#endif
+                                    true,
+                                    tid);
+                                crt->mark_solved(pid);
+                                shot.i_solved_vb[crt->part] = true;
+#ifdef ENABLE_DRAW_FLAGS
+                                if (draw_frames) draw_frame(crt_solver, pm::MwpmEvent::no_event(), 1001, true, tid);
+#endif
+                            } else {
+                                if (BARE_DEBUG) t_out << "  Sending CRT data to " << crt->other_pid << std::endl;
+                                crt->setup();
+#ifdef ENABLE_DRAW_FLAGS
+                                if (draw_frames) {
+                                    auto& dbg_solver = *solvers[get_solver_id(shot_container_id, crt->part)];
+                                    dbg_solver.prepare_for_task(crt, shot_id);
+                                    if (config_parallel::division_strategy == config_parallel::OBS) {
+                                        dbg_solver.flooder.p_offsets  = { crt->left_global_offset.first,  crt->right_global_offset.first  };
+                                        dbg_solver.flooder.vb_offsets = { crt->left_global_offset.second, crt->right_global_offset.second };
+                                    }
+                                    draw_frame(dbg_solver, pm::MwpmEvent::no_event(), 1000, true, tid);
+                                }
+#endif
+                                send_solution_to_remote_pe(shot_container_id, my_result, *crt, t_out);
+                            }
+                            root_crts.push_back(crt);
+                            crts_i_handled.push_back(crt);
+                            chain_node = crt->parent;
+                        }
+#ifdef SCOREP_USER_ENABLE
+                        SCOREP_USER_REGION_END(cross_rank_fusion);
+                        SCOREP_USER_REGION_BEGIN(solution_extraction, "Solution Extraction", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+                        if (BARE_DEBUG) t_out << "T" << tid << " extracting solution for root part=" << root_task->part << std::endl << std::flush;
+
+                        // Shatter this root's subtree via task-tree traversal.
+                        // Each thread only visits nodes IT solved, avoiding cross-thread races on solvers.
+                        if (shot.num_observables > sizeof(pm::obs_int) * 8) {
+                            // Extended observables: accumulate under omp critical since shot.res is shared
+#pragma omp critical
+                            {
+                                std::vector<Task*> to_visit = {root_task};
+                                while (!to_visit.empty()) {
+                                    Task* curr = to_visit.back(); to_visit.pop_back();
+                                    if (!curr->is_fusion) {
+                                        if (shot.i_solved_p[curr->part]) {
+                                            pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
+                                                root_solver, shot.partition_hits[curr->part]);
+                                            shot.i_solved_p[curr->part] = false;
+                                        }
+                                    } else {
+                                        if (shot.i_solved_vb[curr->part]) {
+                                            pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
+                                                root_solver, shot.virtual_boundary_hits[curr->part]);
+                                            shot.i_solved_vb[curr->part] = false;
+                                        }
+                                        if (curr->left_child) to_visit.push_back(curr->left_child);
+                                        if (!curr->only_child && curr->right_child) to_visit.push_back(curr->right_child);
+                                    }
+                                }
+                                for (auto* crt : root_crts) {
+                                    // NOT BACKWARD COMPATBILE WITH ROUND
+                                    auto& remote_offset = (crt->iamleft) ? crt->left_global_offset : crt->right_global_offset;
+                                    size_t p = crt->vb_left + 1 + remote_offset.first; // inclusive
+                                    const size_t p_end = crt->vb_right + 1 + remote_offset.first; // exclusive
+                                    size_t vb = crt->vb_left + 1 + remote_offset.second; // inclusive
+                                    const size_t vb_end = crt->vb_right + remote_offset.second; // exclusive
+                                    if (shot.i_solved_vb[crt->part]) {
+                                        pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
+                                            root_solver, shot.virtual_boundary_hits[crt->part]);
+                                        shot.i_solved_vb[crt->part] = false;
+                                        for (; p < p_end; ++p) {
+                                            pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
+                                                root_solver, shot.partition_hits[p]);
+                                        }
+                                        for (; vb < vb_end; ++vb) {
+                                            pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
+                                                root_solver, shot.virtual_boundary_hits[vb]);
+                                        }
+                                    }
+                                }
+                                if (!root_solver.flooder.negative_weight_detection_events.empty())
+                                    shatter_blossoms_for_all_detection_events_and_extract_match_edges(
+                                        root_solver, root_solver.flooder.negative_weight_detection_events);
+                                root_solver.extract_paths_from_match_edges(
+                                    root_solver.flooder.match_edges, shot.res.obs_crossed.data(), shot.res.weight);
+                                for (auto& obs : root_solver.flooder.negative_weight_observables)
+                                    *(shot.res.obs_crossed.data() + obs) ^= 1;
+                                shot.res.weight += root_solver.flooder.negative_weight_sum;
+                            }
+                        } else {
+                            // Bit-packed case: accumulate thread-locally into thread_results[tid]
+                            std::vector<Task*> to_visit = {root_task};
+                            while (!to_visit.empty()) {
+                                Task* curr = to_visit.back(); to_visit.pop_back();
+                                if (!curr->is_fusion) {
+                                    if (shot.i_solved_p[curr->part]) {
+                                        if (DEBUG) t_out << "  p" << curr->part;
+                                        my_result += pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
+                                            root_solver, shot.partition_hits[curr->part]);
+                                        shot.i_solved_p[curr->part] = false;
+                                    }
+                                } else {
+                                    if (shot.i_solved_vb[curr->part]) {
+                                        if (DEBUG) t_out << "  vb" << curr->part;
+                                        my_result += pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
+                                            root_solver, shot.virtual_boundary_hits[curr->part]);
+                                        shot.i_solved_vb[curr->part] = false;
+                                    }
+                                    if (curr->left_child) to_visit.push_back(curr->left_child);
+                                    if (!curr->only_child && curr->right_child) to_visit.push_back(curr->right_child);
+                                }
+                            }
+                            for (auto* crt : root_crts) {
+                                if (shot.i_solved_vb[crt->part]) {
+                                    if (DEBUG) t_out << "  crt_vb" << crt->part;
+                                    my_result += pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
+                                        root_solver, shot.virtual_boundary_hits[crt->part]);
+                                    shot.i_solved_vb[crt->part] = false;
+                                    // NOT BACKWARD COMPATiBLE WITH ROUND
+                                    // Need to use different index calculations for p and vb
+                                    auto& remote_offset = (crt->iamleft) ? crt->right_global_offset : crt->left_global_offset;
+                                    size_t p = crt->vb_left + 1 + remote_offset.first;
+                                    const size_t p_end = crt->vb_right + 1 + remote_offset.first; // exclusive
+                                    size_t vb = crt->vb_left + 1 + remote_offset.second;
+                                    const size_t vb_end = crt->vb_right + remote_offset.second; // exclusive
+                                    for (; p < p_end; ++p) {
+                                        if (DEBUG) t_out << "  p" << p;
+                                        my_result += pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
+                                            root_solver, shot.partition_hits[p]);
+                                    }
+                                    for (; vb < vb_end; ++vb) {
+                                        if (DEBUG) t_out << "  vb" << vb;
+                                        my_result += pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
+                                            root_solver, shot.virtual_boundary_hits[vb]);
+                                    }
+                                }
+                                
+                            }
+                            if (!root_solver.flooder.negative_weight_detection_events.empty()) {
+                                if (DEBUG) t_out << "  negative detection events\n" << std::flush;
+                                my_result += shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
+                                    root_solver, root_solver.flooder.negative_weight_detection_events);
+                            }
+                            my_result.obs_mask ^= root_solver.flooder.negative_weight_obs_mask;
+                            my_result.weight   += root_solver.flooder.negative_weight_sum;
+                            if (DEBUG) t_out << "\n  obs_mask: " << my_result.obs_mask << std::endl << std::flush;
+                        }
+#ifdef SCOREP_USER_ENABLE
+                        SCOREP_USER_REGION_END(solution_extraction);
+#endif
+                    } // end per-root loop
+
+                    // Debug: verify all solvers clean after shattering
+                    for (int p = 0; p < graph.num_partitions; ++p) {
+                        auto& chk = *solvers[get_solver_id(shot_container_id, p)];
+                        for (auto word : chk.flooder.region_arena.shmem_bitmap) {
+                            if (word != ~0ULL) {
+                                t_out << "  ERROR: solver p" << p << " not empty\n" << std::flush;
+                                break;
+                            }
+                        }
+                    }
+
+                    // Report done before waiting: all-report-then-all-wait avoids deadlock
+                    // for same-PE-pair CRTs (e.g., ROUND left+right CRTs).
+                    if (BARE_DEBUG) t_out << "    reporting done" << std::endl << std::flush;
+                    for (auto* crt : crts_i_handled) crt->report_done(shot_buffer_round);
+                    if (BARE_DEBUG) t_out << "    waiting until other PEs done" << std::endl << std::flush;
+                    for (auto* crt : crts_i_handled) crt->wait_until_done(pid, shot_buffer_round);
+                    if (BARE_DEBUG) t_out << "    all done" << std::endl << std::flush;
+
+                    // Last thread (cumulative count == num_task_roots) combines and writes.
+                    int n_my = (int)roots_i_solved.size();
+                    int prev = shot.num_roots_done.fetch_add(n_my, std::memory_order_acq_rel);
+                    if (prev + n_my == shot.num_task_roots) {
+                        if (shot.num_observables <= sizeof(pm::obs_int) * 8) {
+                            pm::MatchingResult combined{};
+                            for (int ti = 0; ti < num_threads; ++ti) combined += shot.thread_results[ti];
+                            if (DEBUG) t_out << "   combined obs_mask: " << combined.obs_mask << std::endl << std::flush;
+                            pm::fill_bit_vector_from_obs_mask(
+                                combined.obs_mask, shot.res.obs_crossed.data(), shot.num_observables);
+                            shot.res.weight = combined.weight;
+                        }
+                        // Reset before unlocking: prevents next-shot threads racing on this counter.
+                        shot.num_roots_done.store(0, std::memory_order_release);
+                        shot_buffer->write_result_and_get_next_shot(shot_container_id, graph.node_part_id);
+                    }
+                }
+#else
                 if (i_solved_root) {
                     auto& solver = *solvers[solver_id];
                     solver.flooder.match_edges.clear();
                     pm::MatchingResult bit_packed_res;
-#ifdef USE_SHMEM
-                    if (DEBUG) t_out << "Trying cross-rank fusions" << std::endl << std::flush;
-                    for (auto& t : shot.cross_rank_tasks) {
-#ifdef SCOREP_USER_ENABLE
-                        SCOREP_USER_REGION_BEGIN(cross_rank_fusion, "Cross Rank Fusion", SCOREP_USER_REGION_TYPE_COMMON);
-#endif
-                        if (DEBUG) t_out << "  t.part: " << t.part << std::endl
-                                         << "  t.iamleft: " << t.iamleft << std::endl
-                                         << "  t.other_pid: " << t.other_pid << std::endl
-                                         << "  t.status_shm: " << t.status_shm << std::endl
-                                         << "  t.signal_shm: " << t.signal_shm << std::endl
-                                         << "  t.fusion_summary_shm: " << t.fusion_summary_shm << std::endl
-                                         << "  task_status_ptr: " << task_status_ptr << std::endl
-                                         << std::flush;
-                        if (t.try_to_steal(pid, t_out)) {
-                          if (BARE_DEBUG) t_out << "  Stole cross-rank fusion with " << t.other_pid << std::endl << std::flush;
-                            t.setup();
-                            solver_id = get_solver_id(shot_container_id, (int)((t.iamleft) ? t.left_global_offset.first : t.right_global_offset.first));
-                            if (DEBUG) t_out << "solvers[" << solver_id << "]\n";
-                            auto& solver = *solvers[solver_id];
-                            // Configure solver's flooder bounds
-                            //   Hard bounds based on vb_left/vb_right of CrossRankTask
-                            solver.prepare_for_task(&t, shot_id);
-#ifdef ENABLE_DRAW_FLAGS
-                            if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
-                                solver.flooder.p_offsets  = { t.left_global_offset.first,  t.right_global_offset.first  };
-                                solver.flooder.vb_offsets = { t.left_global_offset.second, t.right_global_offset.second };
-                            }
-#endif
-                            auto& hitsref = shot.virtual_boundary_hits[t.part];
-                            // Get remote window
-                            get_solution_from_remote_pe(shot_container_id, bit_packed_res, t, t_out, hitsref);
-#ifdef ENABLE_DRAW_FLAGS
-                            if (draw_frames) {
-                                draw_frame(solver, pm::MwpmEvent::no_event(), 1000, true, tid);
-                            }
-#endif
-                            if (BARE_DEBUG) t_out << "  Solving cross-pe fusion " << t.part 
-                                                << " bounds " << solver.flooder.vb_left << " " << solver.flooder.vb_right << std::endl << std::flush;
-                            pm::process_timeline_until_completion(
-                                solver,
-                                hitsref
-#ifdef ENABLE_DRAW_FLAGS
-                                ,
-                                draw_frames
-#endif
-                                ,
-                                true,
-                                tid);
-                            // Mark completion in SHMEM
-                            t.mark_solved(pid); 
-                            shot.i_solved_vb[t.part] = true;
-#ifdef ENABLE_DRAW_FLAGS
-                            if (draw_frames) {
-                                draw_frame(solver, pm::MwpmEvent::no_event(), 1001, true, tid);
-                            }
-#endif
-                        } else {
-                            // I send
-                            if (BARE_DEBUG) t_out << "  Sending cross-rank fusion data to " << t.other_pid << std::endl;
-                            t.setup();
-#ifdef ENABLE_DRAW_FLAGS
-                            if (draw_frames) {
-                                auto& solver = *solvers[get_solver_id(shot_container_id, t.part)];
-                                solver.prepare_for_task(&t, shot_id);
-                                if (config_parallel::division_strategy == config_parallel::OBS) {
-                                    solver.flooder.p_offsets  = { t.left_global_offset.first,  t.right_global_offset.first  };
-                                    solver.flooder.vb_offsets = { t.left_global_offset.second, t.right_global_offset.second };
-                                }
-                                draw_frame(solver, pm::MwpmEvent::no_event(), 1000, true, tid);
-                            }
-#endif
-                            send_solution_to_remote_pe(shot_container_id, bit_packed_res, t, t_out);
-                        }
-#ifdef SCOREP_USER_ENABLE
-                        SCOREP_USER_REGION_END(cross_rank_fusion);
-#endif
-                    }
-#endif
-#ifdef SCOREP_USER_ENABLE
-                    SCOREP_USER_REGION_BEGIN(solution_extraction, "Solution Extraction", SCOREP_USER_REGION_TYPE_COMMON);
-#endif
-                    if (BARE_DEBUG) t_out << "T" << tid << " extracting solution" << std::endl << std::flush;
-#ifdef ENABLE_DRAW_FLAGS
-                    if (draw_frames) {
-                        auto& solver = *solvers[solver_id];
-                        draw_frame(solver, pm::MwpmEvent::no_event(), 2000, true, tid);
-                    }
-#endif
                     if (shot.num_observables > sizeof(pm::obs_int) * 8) {
-#ifdef USE_SHMEM
-                        size_t i = 0;
-                        for (auto& hitsref : shot.partition_hits) {
-                            if (shot.i_solved_p[i]) {
-                                if (DEBUG) t_out << "  p" << i;
-                                pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
-                                    solver, hitsref);
-                                shot.i_solved_p[i] = false;
-                            }
-                            i++;
-                        }
-                        if (DEBUG) t_out << std::endl;
-                        i = 0;
-                        for (auto& hitsref : shot.virtual_boundary_hits) {
-                            if (shot.i_solved_vb[i]) {
-                                if (DEBUG) t_out << "  vb" << i;
-                                pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
-                                    solver, hitsref);
-                                }
-                            shot.i_solved_vb[i] = false;
-                            i++;
-                        }
-                        if (DEBUG) t_out << std::endl;
-#else
                         pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
                             solver, shot.sparse_shot.hits);
-#endif
                         if (!solver.flooder.negative_weight_detection_events.empty())
                             shatter_blossoms_for_all_detection_events_and_extract_match_edges(
                                 solver, solver.flooder.negative_weight_detection_events);
                         solver.extract_paths_from_match_edges(
                             solver.flooder.match_edges, shot.res.obs_crossed.data(), shot.res.weight);
-                        // XOR negative weight observables
                         for (auto& obs : solver.flooder.negative_weight_observables)
                             *(shot.res.obs_crossed.data() + obs) ^= 1;
-                        // Add negative weight sum to blossom solution weight
                         shot.res.weight += solver.flooder.negative_weight_sum;
                     } else {
-#ifdef USE_SHMEM
-                        // pm::MatchingResult& bit_packed_res = shot.obs_mask;
-                        size_t i = 0;
-                        if (DEBUG) t_out << "   obs_mask: " << bit_packed_res.obs_mask << std::endl << std::flush;
-                        for (auto& hitsref : shot.partition_hits) {
-                            if (shot.i_solved_p[i]) {
-                                if (DEBUG) t_out << "  p" << i << std::flush;
-                                bit_packed_res +=
-                                    pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
-                                        solver, hitsref);
-                                if (DEBUG) t_out << "   obs_mask: " << bit_packed_res.obs_mask << std::endl << std::flush;
-                            }
-                            shot.i_solved_p[i] = false;
-                            i++;
-                        }
-                        i = 0;
-                        for (auto& hitsref : shot.virtual_boundary_hits) {
-                            if (shot.i_solved_vb[i]) {
-                                if (DEBUG) t_out << "  vb" << i << std::flush;
-                                bit_packed_res +=
-                                    pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
-                                        solver, hitsref);
-                                if (DEBUG) t_out << "   obs_mask: " << bit_packed_res.obs_mask << std::endl << std::flush;
-                            }
-                            shot.i_solved_vb[i] = false;
-                            i++;
-                        }
-                        if (DEBUG) t_out << std::endl << std::flush;
-#else
                         bit_packed_res =
                             pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
                                 solver, shot.sparse_shot.hits);
-#endif
-                        if (!solver.flooder.negative_weight_detection_events.empty()) {
-                            if (DEBUG) t_out << "  there are negative detection events" << std::endl << std::flush;
-                            bit_packed_res +=
-                                shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
-                                    solver, solver.flooder.negative_weight_detection_events);
-                        }
-                        // XOR in negative weight observable mask
+                        if (!solver.flooder.negative_weight_detection_events.empty())
+                            bit_packed_res += shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
+                                solver, solver.flooder.negative_weight_detection_events);
                         bit_packed_res.obs_mask ^= solver.flooder.negative_weight_obs_mask;
-                        // Translate observable mask into bit vector
                         pm::fill_bit_vector_from_obs_mask(
                             bit_packed_res.obs_mask, shot.res.obs_crossed.data(), shot.num_observables);
-                        // Add negative weight sum to blossom solution weight
                         shot.res.weight = bit_packed_res.weight + solver.flooder.negative_weight_sum;
                     }
-#ifdef SCOREP_USER_ENABLE
-                    SCOREP_USER_REGION_END(solution_extraction);
-#endif
-                    if (DEBUG) t_out << "   obs_mask: " << bit_packed_res.obs_mask << std::endl << std::flush;
-#ifdef ENABLE_DRAW_FLAGS
-                    if (draw_frames) {
-                        auto& solver = *solvers[solver_id];
-                        draw_frame(solver, pm::MwpmEvent::no_event(), 2001, true, tid);
-                    }
-#endif
-#ifdef USE_SHMEM
-                    // if (DEBUG) {
-                        for (int p=0; p < graph.num_partitions; ++p) {
-                            auto& solver = *solvers[get_solver_id(shot_container_id, p)];
-                            bool good = true;
-                            for (auto word : solver.flooder.region_arena.shmem_bitmap) {
-                                if (word != ~0ULL) {
-                                    good = false;
-                                    break;
-                                }
-                            }
-                            if (!good) t_out << "  ERROR: solver for p" << p << " not empty\n" << std::flush; 
-                        }
-                    // }
-                    // BARRIER needed to prevent race on extraction/putting mem
-                    // Need to make more robust
-                    if (BARE_DEBUG) t_out << "    reporting done" << std::endl << std::flush;
-                    for (auto& t : shot.cross_rank_tasks) {
-                        t.report_done(shot_buffer_round);
-                    }
-                    if (BARE_DEBUG) t_out << "    waiting until other PEs done" << std::endl << std::flush;
-                    for (auto& t : shot.cross_rank_tasks) {
-                        t.wait_until_done(pid, shot_buffer_round);
-                    }
-                    if (BARE_DEBUG) t_out << "    all done" << std::endl << std::flush;
-#endif
                     shot_buffer->write_result_and_get_next_shot(shot_container_id, graph.node_part_id);
                 }
+#endif
                 // Move on to next shot buffer
                 ++shot_id;
 #if NUM_BUFFERS_PER_UNIT > 1

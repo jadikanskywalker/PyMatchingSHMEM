@@ -46,7 +46,19 @@ ShotContainer::ShotContainer(ShotContainer&& other) noexcept
       virtual_boundary_hits(std::move(other.virtual_boundary_hits)),
       num_observables(other.num_observables),
       res(std::move(other.res)),
-      tasks(std::move(other.tasks)) {}
+#ifdef USE_SHMEM
+      i_solved_p(std::move(other.i_solved_p)),
+      i_solved_vb(std::move(other.i_solved_vb)),
+      num_task_roots(other.num_task_roots),
+      thread_results(std::move(other.thread_results)),
+#endif
+      tasks(std::move(other.tasks))
+{
+#ifdef USE_SHMEM
+    num_roots_done.store(other.num_roots_done.load());
+    cross_rank_tasks = std::move(other.cross_rank_tasks);
+#endif
+}
 
 ShotContainer& ShotContainer::operator=(ShotContainer&& other) noexcept {
     if (this != &other) {
@@ -56,6 +68,14 @@ ShotContainer& ShotContainer::operator=(ShotContainer&& other) noexcept {
         num_observables = other.num_observables;
         res = std::move(other.res);
         tasks = std::move(other.tasks);
+#ifdef USE_SHMEM
+        i_solved_p = std::move(other.i_solved_p);
+        i_solved_vb = std::move(other.i_solved_vb);
+        num_task_roots = other.num_task_roots;
+        num_roots_done.store(other.num_roots_done.load());
+        thread_results = std::move(other.thread_results);
+        cross_rank_tasks = std::move(other.cross_rank_tasks);
+#endif
     }
     return *this;
 }

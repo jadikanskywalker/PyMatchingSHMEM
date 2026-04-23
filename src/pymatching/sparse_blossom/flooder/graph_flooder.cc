@@ -305,7 +305,8 @@ void GraphFlooder::reschedule_events_at_detector_node(DetectorNode& detector_nod
     // ===============
     if (!is_active(&detector_node)) {
         std::cout << "    NOTE: reschedule called on inactive node" << std::endl
-                  << "      Shot: " << current_shot << "    Task.vb_marker: " << task->vb_marker << "    Node.vb: " << detector_node.vb
+                  << "      Shot: " << current_shot << " Task.vb_marker: " << task->vb_marker
+                  << "      Flooder: (" << vb_left << ", " << vb_right << ") " << vb << "   Node.vb: " << detector_node.vb
 #ifdef USE_SHMEM
                   << " (is_cross_rank_fusion: " << task->is_cross_rank_fusion << ")" << std::endl
 #endif

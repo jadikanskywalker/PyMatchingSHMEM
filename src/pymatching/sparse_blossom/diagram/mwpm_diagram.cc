@@ -223,6 +223,7 @@ struct StateHelper {
     std::vector<std::vector<std::pair<float, float>>> approximate_region_polygons(GraphFillRegion *region) {
         std::map<DetectorNode *, std::set<std::pair<float, float>>> points_by_source;
         region->do_op_for_each_node_in_total_area([&](const DetectorNode *n) {
+            if (n == nullptr) return;  // virtual boundary node — skip
             auto reached = reached_from_source(*n);
             auto &perimeter = points_by_source[reached];
             if (local_radius_at_time_bounded(*n, t, *region) == 0) {
