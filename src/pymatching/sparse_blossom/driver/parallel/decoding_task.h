@@ -43,32 +43,45 @@ struct TaskBase {
 
     bool is_cross_rank_fusion;
 
+    // Parent in the task chain: local Task fusion or CrossRankTask above this node.
+    // nullptr means this node is the chain top (a task graph root).
+    TaskBase* parent{nullptr};
+
     std::vector<pm::GraphFillRegion*> regions_to_unmatch;
     std::vector<pm::GraphFillRegion*> regions_matched_to_virtual_boundary;
 
-    TaskBase(int part, int vb_left, int vb_right, bool is_fusion, bool is_cross_rank_fusion) 
-        : part(part), vb_marker(part), vb_left(vb_left), vb_right(vb_right), is_fusion(is_fusion), is_cross_rank_fusion(is_cross_rank_fusion) {
-// #ifdef USE_SHMEM
-            // vb_marker = part;
-// #endif
+    TaskBase(int part, int vb_left, int vb_right, bool is_fusion, bool is_cross_rank_fusion)
+        : part(part), vb_left(vb_left), vb_right(vb_right), is_fusion(is_fusion), is_cross_rank_fusion(is_cross_rank_fusion) {
+        if (is_fusion)
+            vb_marker = part;
+        else
+            vb_marker = -1;
     }
 
     virtual ~TaskBase() = default;
 
-    // TaskBase(const TaskBase&) = delete;
-    // TaskBase& operator=(const TaskBase&) = delete;
+    TaskBase(TaskBase&& other) noexcept
+        : part(other.part), vb_marker(other.vb_marker),
+          vb_left(other.vb_left), vb_right(other.vb_right),
+          is_fusion(other.is_fusion), is_cross_rank_fusion(other.is_cross_rank_fusion),
+          parent(other.parent),
+          regions_to_unmatch(std::move(other.regions_to_unmatch)),
+          regions_matched_to_virtual_boundary(std::move(other.regions_matched_to_virtual_boundary))
+    { other.parent = nullptr; }
 
-    // TaskBase(TaskBase&& other) noexcept 
-    //     : part(other.part), vb_left(other.vb_left), vb_right(other.vb_right), is_fusion(other.is_fusion),
-    //       regions_to_unmatch(std::move(other.regions_to_unmatch)),
-    //       regions_matched_to_virtual_boundary(std::move(other.regions_matched_to_virtual_boundary))
-    // {}
-
-    // TaskBase& operator=(TaskBase&& other) noexcept {
-    //     regions_to_unmatch = std::move(other.regions_to_unmatch);
-    //     regions_matched_to_virtual_boundary = std::move(other.regions_matched_to_virtual_boundary);
-    //     return *this;
-    // }
+    TaskBase& operator=(TaskBase&& other) noexcept {
+        part = other.part;
+        vb_marker = other.vb_marker;
+        vb_left = other.vb_left;
+        vb_right = other.vb_right;
+        is_fusion = other.is_fusion;
+        is_cross_rank_fusion = other.is_cross_rank_fusion;
+        parent = other.parent;
+        other.parent = nullptr;
+        regions_to_unmatch = std::move(other.regions_to_unmatch);
+        regions_matched_to_virtual_boundary = std::move(other.regions_matched_to_virtual_boundary);
+        return *this;
+    }
 };
 
 struct Task : public TaskBase {
@@ -88,7 +101,6 @@ struct Task : public TaskBase {
     uint64_t child_bit;
     Task* left_child{nullptr};
     Task* right_child{nullptr};
-    Task* parent{nullptr};
 
 #ifdef USE_SHMEM
     bool only_child{ false };
@@ -114,8 +126,8 @@ struct Task : public TaskBase {
         left_child(left_child),
         right_child(right_child)
     {
-        left_child->parent = this;
-        left_child->child_bit = 1;
+        left_child->parent  = this;
+        left_child->child_bit  = 1;
         right_child->parent = this;
         right_child->child_bit = 2;
     }
@@ -128,8 +140,7 @@ struct Task : public TaskBase {
         status.store(other.status.load());
         left_child = other.left_child;
         right_child = other.right_child;
-        parent = other.parent;
-        // parent_right = other.parent_right;
+        // parent is in TaskBase and moved by TaskBase(std::move(other))
         child_bit = other.child_bit;
 #ifdef USE_SHMEM
         // seam_vb_slot = other.seam_vb_slot;
@@ -142,8 +153,7 @@ struct Task : public TaskBase {
         status.store(other.status.load());
         left_child = other.left_child;
         right_child = other.right_child;
-        parent = other.parent;
-        // parent_right = other.parent_right;
+        // parent is in TaskBase and moved by TaskBase::operator=(std::move(other))
         child_bit = other.child_bit;
 #ifdef USE_SHMEM
         // seam_vb_slot = other.seam_vb_slot;
@@ -196,7 +206,8 @@ struct Task : public TaskBase {
             return true;
         }
 #endif
-        int old = parent->status.fetch_or(child_bit, std::memory_order_acq_rel);
+        // parent is guaranteed to be a local Task (caller checks !parent->is_cross_rank_fusion)
+        int old = static_cast<Task*>(parent)->status.fetch_or(child_bit, std::memory_order_acq_rel);
         if ((old | child_bit) == 3) {
             return old != 3;
         } else {
@@ -257,7 +268,6 @@ public:
     // For OBS patch fusions
     std::pair<size_t, size_t> left_global_offset{  0, 0 };   // obsA (lower obs) {p_offset, vb_offset}
     std::pair<size_t, size_t> right_global_offset{ 0, 0 };   // obsB (higher obs) {p_offset, vb_offset}
-    // int seam_vb_slot{ -1 };             // virtual_boundaries slot index for this seam's VB nodes
 
     CrossRankTask(
         int vb,
@@ -291,6 +301,11 @@ public:
         *status_shm = 0;
         *signal_shm = 0;
         *done_shm = 0;
+        // Insert this CRT above the current chain top of child's parent chain.
+        // This correctly handles multiple CRTs for the same obs group (they chain sequentially).
+        TaskBase* top = child;
+        while (top->parent != nullptr) top = top->parent;
+        top->parent = this;
     }
 
     CrossRankTask(CrossRankTask&& other) noexcept : TaskBase(std::move(other)) {

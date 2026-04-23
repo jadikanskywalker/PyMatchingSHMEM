@@ -312,6 +312,7 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
     matching_graph.convert_implied_weights(normalising_constant);
 
     size_t num_regular_vb_masks = virtual_boundaries.size();
+#ifdef USE_SHMEM
     if (DEBUG) std::cout << "virtual_boundaries.size(): " << virtual_boundaries.size() << "\n" << std::flush;
     if (config_parallel::division_strategy == config_parallel::OBS) {
         num_regular_vb_masks = vb_per_obs_patch;
@@ -324,6 +325,7 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
             }
         }
     }
+#endif
     for (int vb=0; vb < num_regular_vb_masks; ++vb) {
         for (int index : virtual_boundaries[vb]) {
             matching_graph.nodes[index].vb = vb;
