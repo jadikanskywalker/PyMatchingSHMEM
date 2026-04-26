@@ -1,172 +1,136 @@
 #!/bin/bash
 #SBATCH --job-name=pymatching
-#SBATCH --output=log001.out
-#SBATCH --error=log001.err
+#SBATCH --output=bench_obs.out
+#SBATCH --error=bench_obs.err
 #SBATCH --partition=zen4
-#SBATCH --time=02:00:00
+#SBATCH --time=01:00:00
 #SBATCH --nodes=1
-#SBATCH --exclusive
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=64GB
 
-if [ $# -le 2 ]
+if [ $# -le 6 ]
   then
-    echo "Args: [d] [p_dec] [shots] ... [skip_stim]"
+    echo "Args: [surgery_preset] [d] [p_dec] [shots] [rounds] [M] [k]"
     exit 1
 else
-    d=$1
-    p_dec=$2
-    shots=$3
+    surgery_preset=$1
+    d=$2
+    p_dec=$3
+    shots=$4
+    rounds=$5
+    M=($6)
+    k=$7
 fi
 
-if [[ -n ${4+x} ]]; then
-    build_circuit=false
-else
-    build_circuit=true
-fi
-
-source ~/.bash_profile
+source ~/.bashrc
 conda activate pymatching
 
-if [ ! -d "bench$p_dec" ]
+if [ ! -d "bench_obs_${p_dec}" ]
   then
-    mkdir bench$p_dec
+    mkdir bench_obs_${p_dec}
 fi
 
-cd bench$p_dec
+cd bench_obs_${p_dec}
 
-rounds=32768
-threads=(8 16 32 64 128)
-M=(32 64)
-# shmem_n=(2 4)
-shmem_n2_ppn=(2 2 2 2 2 1)
-shmem_n2_threads=(4 8 16 32 64 128)
-shmem_n4_ppn=(4 4 4 4 2 2)
-shmem_n4_threads=(4 8 16 32 32 64)
-code=surface_code
-task=rotated_memory_x
-p=0.$p_dec
+dem_suffix=${surgery_preset}_d${d}_p${p_dec}_${rounds}r
+det_suffix=${dem_suffix}_${shots}s
+dem=../testdems/error_model_$dem_suffix.dem
+det=../testdems/detection_events_$det_suffix.b8
+flips=../testdems/actual_obs_flips_$det_suffix.01
+echo $dem
+echo $det
+echo $flips
+
+shmem_threads=(16 32 64 128)
+shmem_n1_n=(1 1 1 1)   # nodes
+shmem_n1_pps=(1 1 1 1) # processes-per-socket
+shmem_n1_nspn=(1 1 1 1)  # num sockets per node
+shmem_n2_n=(1 1 1 1)
+shmem_n2_pps=(2 2 2 1)
+shmem_n2_nspn=(1 1 1 2)
+shmem_n4_n=(1 1 1 2)
+shmem_n4_pps=(4 4 2 1)
+shmem_n4_nspn=(1 1 2 2)
+shmem_n8_n=(1 1 2 4)
+shmem_n8_pps=(8 4 2 1)
+shmem_n8_nspn=(1 2 2 2)
 
 serial_build=~/PyMatchingSHMEM/build/pymatching
-threads_build=~/PyMatchingSHMEM/build_threads_release/pymatching
+# threads_build=~/PyMatchingSHMEM/build_threads_release/pymatching
 shmem_build=~/PyMatchingSHMEM/build_sos/pymatching
 echo "serial_build:  $serial_build" >> bench.out
-echo "threads_build: $threads_build" >> bench.out
+# echo "threads_build: $threads_build" >> bench.out
 echo "shmem_build: $shmem_build" >> bench.out
-
-# if $build_circuit; then
-#     stim gen \
-#         --rounds=$(($rounds-1)) \
-#         --distance=$d \
-#         --after_clifford_depolarization=$p \
-#         --code $code \
-#         --task $task \
-#         > circuit.stim
-#     stim analyze_errors \
-#         --decompose_errors \
-#         --fold_loops \
-#         --in circuit.stim \
-#         > error_model.dem
-#     stim detect \
-#         --in circuit.stim \
-#         --shots $shots \
-#         --obs_out actual_obs_flips.01 \
-#         --obs_out_format 01 \
-#         --out detection_events.b8 \
-#         --out_format b8
-# fi
-
-start_serial=$(date +%s)
-$serial_build predict \
-    --dem error_model.dem \
-    --in detection_events.b8 \
-    --in_format b8 \
-    --out predicted_obs_flips.01 \
-    --out_format 01 \
-    > log_0.out
-end_serial=$(date +%s)
-serial_time=$((end_serial - start_serial))
 echo "----------" >> bench.out
-echo "0: $serial_time seconds" >> bench.out
-
-export OMP_PLACES=cores
-export OMP_PROC_BIND=true
-
-export SHMEM_SYMMETRIC_SIZE=4G
+echo "shots: $shots    rounds: $rounds" >> bench.out
 
 for ((m=0; m<${#M[@]}; m++ )); do
     thisM=${M[$m]}
     echo "----------" >> bench.out
     echo "M: $thisM" >> bench.out
-    echo "  THREADS:" >> bench.out
-    for ((i=0; i<${#threads[@]}; i++ )); do
-        thisThreads=${threads[$i]}
+    echo "  SHMEM:" >> bench.out
+    for ((i=0; i<${#shmem_threads[@]}; i++ )); do
+        thisThreads=${shmem_threads[$i]}
 
-        export OMP_NUM_THREADS=$thisThreads
+        # thisN=${shmem_n1_n[$i]}
+        # thisPPN=${shmem_n1_ppn[$i]}
+        # sbatch \
+        #     --nodes=$thisN \
+        #     --ntasks-per-node=$thisPPN \
+        #     --cpus-per-task=$thisThreads \
+        #     ../scripts/benchmark_shmem_obs_call.sh \
+        #         $thisN $thisPPN $thisThreads $thisM $k $dem $det $flips
 
-        start_parallel=$(date +%s)
-        $threads_build predict \
-            --dem error_model.dem \
-            --in detection_events.b8 \
-            --in_format b8 \
-            --out predicted_obs_flips.01 \
-            --out_format 01 \
-            --rounds_per_partition $thisM \
-            --use_threads \
-            > log_M${thisM}_${thisThreads}threads.out
-        end_parallel=$(date +%s)
-        parallel_time=$((end_parallel - start_parallel))
-        echo "    Threads=$thisThreads: $parallel_time seconds" >> bench.out
+        thisN=${shmem_n2_n[$i]}
+        thisPPS=${shmem_n2_pps[$i]}
+        thisNSPN=${shmem_n2_nspn[$i]}
+        thisPPN=$((thisPPS*thisNSPN))
+        thisMEM=$((thisPPN * 64))
+        sbatch \
+            --nodes=$thisN \
+            --ntasks-per-node=$thisPPN \
+            --cpus-per-task=$thisThreads \
+            --mem=${thisMEM}GB \
+            ../scripts/benchmark_shmem_obs_call.sh \
+                $thisN $thisPPS $thisNSPN $thisThreads $thisM $k $dem $det $flips
+
+        thisN=${shmem_n4_n[$i]}
+        thisPPS=${shmem_n4_pps[$i]}
+        thisNSPN=${shmem_n4_nspn[$i]}
+        thisPPN=$((thisPPS*thisNSPN))
+        thisMEM=$((thisPPN * 64))
+        sbatch \
+            --nodes=$thisN \
+            --ntasks-per-node=$thisPPN \
+            --cpus-per-task=$thisThreads \
+            --mem=${thisMEM}GB \
+            ../scripts/benchmark_shmem_obs_call.sh \
+                $thisN $thisPPS $thisNSPN $thisThreads $thisM $k $dem $det $flips
+
+        thisN=${shmem_n8_n[$i]}
+        thisPPS=${shmem_n8_pps[$i]}
+        thisNSPN=${shmem_n8_nspn[$i]}
+        thisPPN=$((thisPPS*thisNSPN))
+        thisMEM=$((thisPPN * 64))
+        sbatch \
+            --nodes=$thisN \
+            --ntasks-per-node=$thisPPN \
+            --cpus-per-task=$thisThreads \
+            --mem=${thisMEM}GB \
+            ../scripts/benchmark_shmem_obs_call.sh \
+                $thisN $thisPPS $thisNSPN $thisThreads $thisM $k $dem $det $flips
     done
-    # echo "  SHMEM:" >> bench.out
-    # for ((i=0; i<${#shmem_n2_ppn[@]}; i++ )); do
-    #     thisPPN=${shmem_n2_ppn[$i]}
-    #     thisThreads=${shmem_n2_threads[$i]}
-
-    #     export OMP_NUM_THREADS=$thisThreads
-
-    #     start_parallel=$(date +%s)
-    #     oshrun  \
-    #         -n 2 \
-    #         --map-by ppr:$thisPPN:node:PE=$thisThreads \
-    #         --bind-to core \
-    #         --report-bindings \
-    #         $shmem_build predict \
-    #             --dem error_model.dem \
-    #             --in detection_events.b8 \
-    #             --in_format b8 \
-    #             --out predicted_obs_flips.01 \
-    #             --out_format 01 \
-    #             --rounds_per_partition $thisM \
-    #             --cross_rank_fusion_window_size 1 \
-    #             --use_threads \
-    #             > log_M${thisM}_n2_ppn${thisPPN}_${thisThreads}threads_k1.out
-    #     end_parallel=$(date +%s)
-    #     parallel_time=$((end_parallel - start_parallel))
-    #     echo "  N=2 PPN=$thisPPN Threads=$thisThreads: $parallel_time seconds" >> bench.out
-    # done
-    # for ((i=0; i<${#shmem_n4_ppn[@]}; i++ )); do
-    #     thisPPN=${shmem_n4_ppn[$i]}
-    #     thisThreads=${shmem_n4_threads[$i]}
-
-    #     export OMP_NUM_THREADS=$thisThreads
-
-    #     start_parallel=$(date +%s)
-    #     oshrun  \
-    #         -n 4 \
-    #         --map-by ppr:$thisPPN:node:PE=$thisThreads \
-    #         --bind-to core \
-    #         --report-bindings \
-    #         $shmem_build predict \
-    #             --dem error_model.dem \
-    #             --in detection_events.b8 \
-    #             --in_format b8 \
-    #             --out predicted_obs_flips.01 \
-    #             --out_format 01 \
-    #             --rounds_per_partition $thisM \
-    #             --cross_rank_fusion_window_size 1 \
-    #             --use_threads \
-    #             > log_M${thisM}_n4_ppn${thisPPN}_${thisThreads}threads_k1.out
-    #     end_parallel=$(date +%s)
-    #     parallel_time=$((end_parallel - start_parallel))
-    #     echo "  N=4 PPN=$thisPPN Threads=$thisThreads: $parallel_time seconds" >> bench.out
-    # done
 done
+
+# start_serial=$(date +%s)
+# $serial_build predict \
+#     --dem $dem \
+#     --in $det\
+#     --in_format b8 \
+#     --out preds_0.01 \
+#     --out_format 01 \
+#     > log_0.out
+# end_serial=$(date +%s)
+# serial_time=$((end_serial - start_serial))
+# echo "0: $serial_time seconds" >> bench.out
