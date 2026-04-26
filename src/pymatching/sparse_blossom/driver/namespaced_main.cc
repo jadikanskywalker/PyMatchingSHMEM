@@ -39,7 +39,7 @@
 #include <shmem.h>
 #endif
 
-#include "profiling/profiling_json.h"
+// #include "profiling/profiling_json.h"
 
 int main_predict(int argc, const char** argv) {
     stim::check_for_unknown_arguments(
@@ -321,9 +321,9 @@ int pm::main(int argc, const char** argv) {
                 std::cerr << "Warning: OpenSHMEM failed to init with SHMEM_THREAD_SERIALED." << std::endl;
             }
 #endif
-            profiling_json_init();
+            // profiling_json_init();
             int status = main_predict(argc, argv);
-            profiling_json_finalize();
+            // profiling_json_finalize();
 #ifdef USE_SHMEM
             shmem_finalize();
 // ===============

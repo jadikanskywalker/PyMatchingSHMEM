@@ -2,8 +2,8 @@
 
 #include <limits>
 
-#define DEBUG 1 // 0 = none; 1 = full;
-#define BARE_DEBUG 1
+#define DEBUG 0 // 0 = none; 1 = full;
+#define BARE_DEBUG 0
 
 #define ENABLE_DRAW_FLAGS
 

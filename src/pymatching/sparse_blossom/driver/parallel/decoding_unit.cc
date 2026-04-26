@@ -19,6 +19,7 @@
 #include <omp.h>
 #include <set>
 #include <vector>
+#include <format>
 
 // #include "profiling/profiling_json.h"
 #include "pymatching/sparse_blossom/driver/user_graph.h"
@@ -406,6 +407,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
     const int rem          = (int)graph.num_obs_patches % n_pes;
     const int my_obs_start = base * pid + std::min(pid, rem);
     const int my_obs_count = base + (pid < rem ? 1 : 0);
+    if (DEBUG) std::cout << "PE" << pid << " my_obs_start: " << my_obs_start << ", n=" << my_obs_count << "\n" << std::flush;
 
     // For each seam: determine the two obs patches it connects and the local partition
     // range it touches (used for vb_left/vb_right on cross-PE fusion tasks).
@@ -413,7 +415,6 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
     std::vector<SeamInfo> seam_infos(num_seams);
     for (int s = 0; s < num_seams; ++s) {
         auto [first, last] = graph.vb_bounds[K_vb * graph.num_obs_patches + s];
-        if (DEBUG) std::cout << "  seam vb bounds (" << first << ", " << last << ")\n" << std::flush;
         std::map<int, std::pair<int,int>> obs_part_range;  // obs_id → (min_local_p, max_local_p)
 #ifdef DEBUG
         std::string p_string;
@@ -446,7 +447,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                 }
             }
         }
-        if (DEBUG) std::cout << p_string << "\n" << std::flush;
+
         auto it = obs_part_range.begin();
         int oi    = it->first;
         int vb_left = std::max(it->second.first - config_parallel::k - 1, -1);
@@ -454,8 +455,11 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
         ++it;
         int oj = (it != obs_part_range.end()) ? it->first : oi;
         seam_infos[s] = { oi, oj, vb_left, vb_right };
-        if (DEBUG) std::cout << "seam " << s << ": obs " << oi << " -- obs " << oj
-                             << " vb_left=" << vb_left << " vb_right=" << vb_right << "\n" << std::flush;
+        if (DEBUG) std::cout << "PE" << pid << " seam " << s << ": obs " << oi << " -- obs " << oj
+                             << " node_bounds [" << first << ", " << last << "]\n"
+                             << " vb_left=" << vb_left << " vb_right=" << vb_right << "\n    "
+                             << p_string << "\n" 
+                             << std::flush;
     }
 
     for (int shot_id = 0; shot_id < NUM_BUFFERS_PER_UNIT; ++shot_id) {
@@ -547,7 +551,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
 
             if (ri == rj) {
                 tasks.emplace_back(global_vb, ri, ri);
-                tasks.back().only_child = true;
+                ri->only_child = true;
             } else {
                 tasks.emplace_back(global_vb, ri, rj);
             }
@@ -626,16 +630,15 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                              other_pid, sp, sp+1, sp+2, fp);
             crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
             crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
-            // crt.back().seam_vb_slot          = K_vb + s;
 
             if (DEBUG) {
                 auto& t = crt.back();
-                std::cout << "PE" << pid << " OBS cross-rank task s=" << s << ":"
-                          << " vb=" << t.part
-                          << " iamleft=" << t.iamleft
-                          << " vb_left=" << t.vb_left
-                          << " vb_right=" << t.vb_right
-                          << " other_pid=" << t.other_pid << std::endl << std::flush;
+                std::cout << "PE" << pid << " OBS cross-rank task s=" << s << ":\n"
+                          << "    obs_a: " << si.oi << "  obs_b: " << si.oj << "\n"
+                          << "    vb=" << t.part << " vb_left=" << t.vb_left << " vb_right=" << t.vb_right << "\n"
+                          << "    iamleft=" << t.iamleft << " other_pid=" << t.other_pid << "\n"
+                          << "    child: " << t.child << "  me: " << &t << "  child->parent: " << t.child->parent << "\n"
+                          << std::flush;
             }
         }
         // Count chain tops (parent==nullptr) as independent roots for this PE.
@@ -650,22 +653,27 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             for (const auto& crt_t : sc.cross_rank_tasks)
                 if (crt_t.parent == nullptr) ++roots;
             sc.num_task_roots = roots;
-            if (DEBUG) std::cout << "PE" << pid << " OBS shot_id=" << shot_id << " num_task_roots=" << roots << "\n" << std::flush;
+            if (DEBUG) std::cout << "PE" << pid << " num_task_roots=" << roots << "\n" << std::flush;
         }
     }
 
     if (DEBUG) {
-        std::cout << "DEBUG obs-patch tasks:" << std::endl;
+        std::string tasks = "DEBUG obs-patch tasks:\n";
         for (auto& buffer : shot_buffer->buffer) {
-            std::cout << "Buffer" << std::endl;
+            tasks += "Buffer\n";
             for (Task& t : buffer.tasks) {
-                std::cout << "--part: " << t.part
-                          << "  vb_left: " << t.vb_left
-                          << "  vb_right: " << t.vb_right
-                          << "  is_fusion: " << t.is_fusion
-                          << "  only_child: " << t.only_child << std::endl;
+                tasks += "--part: " + (std::string)((t.is_fusion) ? "f" : "p") + std::to_string(t.part)
+                       + "  vb_left: " + std::to_string(t.vb_left)
+                       + "  vb_right: " + std::to_string(t.vb_right) + "\n"
+                       + "    left_child: " + std::format("{:p}",static_cast<void*>(t.left_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.left_child->part) + ")" : "")
+                       + "  me: " + std::format("{:p}", static_cast<void*>(&t))
+                       + "  right_child: " + std::format("{:p}", static_cast<void*>(t.right_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.right_child->part) + ")" : "") + "\n"
+                       + "    parent: f" + std::format("{:p}", static_cast<void*>(t.parent)) + (t.child_bit == 1 ? "  left" : "  right")
+                       + "  only_child: " + std::to_string(t.only_child)
+                       + "\n";
             }
         }
+        std::cout << tasks << std::flush;
     }
 }
 #endif
@@ -855,7 +863,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                     // Mark root as seen
                     bitmap_base[root_word] &= ~root_mask;
 
-                    if (DEBUG) t_out << "    checking blossom_root: " << blossom_root << std::endl << std::flush;
+                    // if (DEBUG) t_out << "    checking blossom_root: " << blossom_root << std::endl << std::flush;
                     discovered_child_edges.clear();
 
                     valid = check_pointers_for_self_and_all_descendents(
@@ -864,8 +872,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                         p_node_range,
                         vb_node_range,
                         &discovered_child_edges);
-                    if (DEBUG && !valid) t_out << "      blossom_root and desc not valid" << std::endl
-                                               << "        shell_area.size(): " << blossom_root->shell_area.size() << std::endl
+                    if (DEBUG && !valid) t_out << "      blossom_root (" << blossom_root << ") not valid, shell_area.size(): " << blossom_root->shell_area.size() << std::endl
                                                << std::flush;
 
                     // Also check match partner if present.
@@ -883,7 +890,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                                 &discovered_child_edges);
                         } else
                             valid = false;
-                        if (DEBUG && !valid) t_out << "      blossom_root's match not valid" << std::endl << std::flush; 
+                        if (DEBUG && !valid) t_out << "      blossom_root's match (" << blossom_root->match.region << ") not valid" << std::endl << std::flush; 
                     }
                 }
                 if (!valid) {
@@ -1310,16 +1317,16 @@ void pm::DecodingUnit::decode_shots() {
 #endif
         const int tid = omp_get_thread_num();
         std::ofstream t_out;
-        // if (DEBUG) {
-        std::string t_out_dir = "out_parallel/";
+        if (BARE_DEBUG || DEBUG) {
+            std::string t_out_dir = "out_parallel/";
 #ifdef USE_SHMEM
-        t_out_dir += "p" + std::to_string(pid);
+            t_out_dir += "p" + std::to_string(pid);
 #endif
-        std::filesystem::create_directories(t_out_dir);
-        std::string t_out_name = t_out_dir + "/t" + std::to_string(tid) + ".out";
-        t_out.open(t_out_name);
-        std::cout << "T" << tid << " of " << num_threads << std::endl;
-        // }
+            std::filesystem::create_directories(t_out_dir);
+            std::string t_out_name = t_out_dir + "/t" + std::to_string(tid) + ".out";
+            t_out.open(t_out_name);
+            std::cout << "T" << tid << " of " << num_threads << std::endl;
+        }
         // Start decoding
         size_t shot_container_id = 0;
         int shot_buffer_round =
@@ -1365,7 +1372,7 @@ void pm::DecodingUnit::decode_shots() {
                 }
                 // we divide partition tasks into sets based on the number of threads available
                 Task* t = &shot.tasks[my_partition_task_ids[tid]];
-                size_t next_p_inc = (num_threads < 2) ? 2 : num_threads;
+                size_t next_p_inc = num_threads; // cannot inc by two for 1 threads --- does not work for odd
                 size_t next_p_id = tid+next_p_inc;
                 int solver_id = get_solver_id(shot_container_id, t->part, tid);
                 if (DEBUG) t_out << "solvers[" << solver_id << "]\n";
@@ -1449,7 +1456,7 @@ void pm::DecodingUnit::decode_shots() {
                         i_solved_root = true;
 #endif
                     }
-                    if (!stolen && next_p_id < my_partition_task_ids.size()) {
+                    while (!stolen && next_p_id < my_partition_task_ids.size()) {
                         t = &shot.tasks[my_partition_task_ids[next_p_id]];
                         solver_id = get_solver_id(shot_container_id, t->part, tid);
                         stolen = t->try_to_steal_leaf(shot_buffer_round);
@@ -1472,7 +1479,6 @@ void pm::DecodingUnit::decode_shots() {
                     for (auto& [root_task, root_solver_id] : roots_i_solved) {
                         auto& root_solver = *solvers[root_solver_id];
                         root_solver.flooder.match_edges.clear();
-
 #ifdef SCOREP_USER_ENABLE
                         SCOREP_USER_REGION_BEGIN(cross_rank_fusion, "Cross Rank Fusion", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
@@ -1617,7 +1623,7 @@ void pm::DecodingUnit::decode_shots() {
                                         shot.i_solved_vb[curr->part] = false;
                                     }
                                     if (curr->left_child) to_visit.push_back(curr->left_child);
-                                    if (!curr->only_child && curr->right_child) to_visit.push_back(curr->right_child);
+                                    if (curr->right_child && curr->right_child != curr->left_child) to_visit.push_back(curr->right_child);
                                 }
                             }
                             for (auto* crt : root_crts) {
@@ -1665,7 +1671,8 @@ void pm::DecodingUnit::decode_shots() {
                         auto& chk = *solvers[get_solver_id(shot_container_id, p)];
                         for (auto word : chk.flooder.region_arena.shmem_bitmap) {
                             if (word != ~0ULL) {
-                                t_out << "  ERROR: solver p" << p << " not empty\n" << std::flush;
+                                if (DEBUG) t_out << "  ERROR: solver p" << p << " not empty\n" << std::flush;
+                                else std::cout << "  ERROR: solver p" << p << " not empty\n" << std::flush;
                                 break;
                             }
                         }

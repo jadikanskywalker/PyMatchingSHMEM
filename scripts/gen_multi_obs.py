@@ -313,17 +313,17 @@ def perl_filter_boundary_edges_inplace(obs_path: str, seam_adjacent_ids: set[int
     if not seam_adjacent_ids:
         return  # Nothing to filter
     
-    # Build Perl regex: drop line if any component has exactly one D and it's in the set
-    det_ids_str = "|".join(str(d) for d in sorted(seam_adjacent_ids))
+    # Pass seam-adjacent detector IDs as comma-separated values for Perl hash lookup.
+    det_ids_str = ",".join(str(d) for d in sorted(seam_adjacent_ids))
     
-    perl_script = f"""
+    perl_script = fr"""
 my %seam_dets = map {{ $_ => 1 }} split /,/, "{det_ids_str}";
 
 while (<>) {{
-    if (/^error\\(/) {{
+    if (/^\s*error\(/) {{
         my $drop = 0;
-        for my $comp (split /\\^/) {{
-            my @dets = ($comp =~ /D(\\d+)/g);
+        for my $comp (split /\^/) {{
+            my @dets = ($comp =~ /D(\d+)/g);
             if (@dets == 1 && exists $seam_dets{{$dets[0]}}) {{
                 $drop = 1;
                 last;
@@ -499,6 +499,61 @@ def build_surgery_spec_24obs(M=42, duration=21):
 
     return ";".join(f"{a},{b},{s},{d}" for a, b, s, d in gates)
 
+def build_surgery_spec_48obs(M=32, duration=21):
+    """
+    Generate the surgery spec string for the 48-observable, >19 partition circuit.
+
+    48 observables in 8 blocks of 6 (block b = obs 6b..6b+5, b in 0..3).
+    M=30 → 18 local partitions; partition k starts at global round k*M.
+    Surgeries last `duration` rounds.
+
+    Intra-block pattern (every block b, offsets within the block):
+      p0:  O_{6b+0} – O_{6b+3}
+      p2:  O_{6b+0} – O_{6b+1}
+      p4:  O_{6b+0} – O_{6b+1}
+      p6:  O_{6b+0} – O_{6b+2}
+      p8:  O_{6b+0} – O_{6b+4}
+      p10: O_{6b+0} – O_{6b+5}
+
+    Inter-block clock surgeries (chaining the O5 tail of each block):
+      p12: O5  – O11   (block-0 tail vs block-1 tail)
+      p12: O17 – O23   (block-2 tail vs block-3 tail)
+      p12: O29 – O35   (block-4 tail vs block-5 tail)
+      p12: O41 – O47   (block-6 tail vs block-7 tail)
+      p15: O11 – O23   (merge first two pairs)
+      p15: O35 – O47   (merge second two pairs)
+      p18: O23 – O47   (root merge)
+
+    Returns a semicolon-separated spec string for parse_surgery_spec().
+    """
+    intra_pattern = [
+        (0,  0, 3),
+        (2,  0, 1),
+        (4,  0, 1),
+        (6,  0, 2),
+        (8,  0, 4),
+        (10, 0, 5),
+    ]
+
+    gates = []
+    for block in range(8):
+        base = 6 * block
+        for part_idx, off_a, off_b in intra_pattern:
+            gates.append((base + off_a, base + off_b, part_idx * M, duration))
+
+    clock = [
+        (5,  11, 12 * M, duration),
+        (17, 23, 12 * M, duration),
+        (29, 35, 12 * M, duration),
+        (41, 47, 12 * M, duration),
+        (11, 23, 15 * M, duration),
+        (35, 47, 15 * M, duration),
+        (23, 47, 18 * M, duration),
+    ]
+    gates.extend(clock)
+
+    return ";".join(f"{a},{b},{s},{d}" for a, b, s, d in gates)
+
 
 def parse_surgery_spec(spec_str, default_duration=1):
     """
@@ -548,12 +603,12 @@ def main():
                               "'obs_a,obs_b,start[,duration]' (duration defaults to "
                               "--surgery_duration).  Example: '0,1,3,2;0,2,7'.")
     surgery.add_argument("--surgery_preset", type=str, default="",
-                         choices=["24obs"],
+                         choices=["24obs", "48obs"],
                          help="Use a named preset surgery spec.  '24obs': 24-observable "
                               "756-round circuit with M=42, duration=21, 4 blocks of 6.")
 
-    parser.add_argument("--surgery_duration", type=int, default=4,
-                        help="Default number of rounds per surgery gate (default 4).")
+    parser.add_argument("--surgery_duration", type=int, default=8,
+                        help="Default number of rounds per surgery gate (default 8).")
     parser.add_argument("--surgery_seed", type=int, default=42,
                         help="RNG seed for --num_surgery_gates placement (default 42).")
     parser.add_argument("--p_cross", type=float, default=None,
@@ -609,6 +664,9 @@ def main():
                                            default_duration=args.surgery_duration)
     elif args.surgery_preset == "24obs":
         surgery_gates = parse_surgery_spec(build_surgery_spec_24obs(),
+                                           default_duration=args.surgery_duration)
+    elif args.surgery_preset == "48obs":
+        surgery_gates = parse_surgery_spec(build_surgery_spec_48obs(),
                                            default_duration=args.surgery_duration)
     else:
         available_rounds = build_available_rounds(obs_round_dets)

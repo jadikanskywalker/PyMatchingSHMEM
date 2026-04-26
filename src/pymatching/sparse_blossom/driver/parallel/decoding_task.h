@@ -90,8 +90,8 @@ struct Task : public TaskBase {
     //    status = id of last shot for which task was claimed
     // for fusions,
     //    status = 0 (Unclaimed for current shot)
-    //             1 (Right child solved and tried to steal me first)
-    //             2 (Left child solved and tried to steal me first)
+    //             1 (Left child solved and tried to steal me first)
+    //             2 (Right child solved and tried to steal me first)
     //             3 (Both children solved and second one who tried to steal me won)
     // Thus, fusions require resetting status to 0 in mark_solved
     std::atomic<int> status{0};
@@ -167,10 +167,6 @@ struct Task : public TaskBase {
     inline void setup() {
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
-//         int part_cmp = part;
-// #ifdef USE_SHMEM
-//         if (seam_vb_slot >= 0 ) part_cmp = seam_vb_slot;
-// #endif
         if (is_fusion) {
             for (auto& region : left_child->regions_matched_to_virtual_boundary) {
                 if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker)
@@ -178,6 +174,8 @@ struct Task : public TaskBase {
                 else
                     regions_matched_to_virtual_boundary.push_back(region);
             }
+            if (left_child == right_child)
+                return; // prevent double copy
             for (auto& region : right_child->regions_matched_to_virtual_boundary) {
                 if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker)
                     regions_to_unmatch.push_back(region);
