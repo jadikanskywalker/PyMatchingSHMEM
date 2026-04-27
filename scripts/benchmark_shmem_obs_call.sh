@@ -28,7 +28,7 @@ source ~/.bashrc
 conda activate pymatching
 
 export FI_VERBS_DEVICE_NAME="mlx5_2"
-export SHMEM_SYMMETRIC_SIZE=4G
+export SHMEM_SYMMETRIC_SIZE=12G
 
 export OMP_NUM_THREADS=$nthreads
 
@@ -53,6 +53,8 @@ oshrun  \
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
 echo "  N=$n PPN=$pps (Nodes=$nodes) Threads=$nthreads: $parallel_time seconds" >> bench.out
+
+python3 ../scripts/combine_results.py $preds $n
 
 echo SHMEM  >> $log
 echo correct predictions: >> $log

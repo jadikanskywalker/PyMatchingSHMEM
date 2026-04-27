@@ -51,10 +51,10 @@ elif [ "$BUILD_TYPE" = "profile" ]; then
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DCMAKE_C_COMPILER=$CC \
         -DCMAKE_CXX_COMPILER=$CXX \
-        -DCMAKE_C_COMPILER_LAUNCHER="scorep;--user;--mpp=shmem;--thread=none" \
-        -DCMAKE_CXX_COMPILER_LAUNCHER="scorep;--user;--mpp=shmem;--thread=none" \
-        -DCMAKE_C_LINKER_LAUNCHER="scorep;--user;--mpp=shmem;--thread=none" \
-        -DCMAKE_CXX_LINKER_LAUNCHER="scorep;--user;--mpp=shmem;--thread=none" \
+        -DCMAKE_C_COMPILER_LAUNCHER="scorep;--user;--mpp=none;--thread=none" \
+        -DCMAKE_CXX_COMPILER_LAUNCHER="scorep;--user;--mpp=none;--thread=none" \
+        -DCMAKE_C_LINKER_LAUNCHER="scorep;--user;--mpp=none;--thread=none" \
+        -DCMAKE_CXX_LINKER_LAUNCHER="scorep;--user;--mpp=none;--thread=none" \
         -DUSE_THREADS=ON \
         -DUSE_SHMEM=ON
     cd build_sos_profile || exit
