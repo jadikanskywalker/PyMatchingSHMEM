@@ -554,6 +554,63 @@ def build_surgery_spec_48obs(M=32, duration=21):
 
     return ";".join(f"{a},{b},{s},{d}" for a, b, s, d in gates)
 
+def build_surgery_spec_64obs(M=22, duration=21):
+    """
+    Generate the surgery spec string for the 64-observable, 32 partitions per obs patch circuit.
+
+    64 observables in 8 blocks of 8 (block b = obs 6b..6b+5, b in 0..3).
+    M=32 → 18 local partitions; partition k starts at global round k*M.
+    Surgeries last `duration` rounds.
+
+    Inter-block clock surgeries (chaining the O5 tail of each block):
+      p12: O5  – O11   (block-0 tail vs block-1 tail)
+      p12: O17 – O23   (block-2 tail vs block-3 tail)
+      p12: O29 – O35   (block-4 tail vs block-5 tail)
+      p12: O41 – O47   (block-6 tail vs block-7 tail)
+      p15: O11 – O23   (merge first two pairs)
+      p15: O35 – O47   (merge second two pairs)
+      p18: O23 – O47   (root merge)
+
+    Returns a semicolon-separated spec string for parse_surgery_spec().
+    """
+    intra_pattern = [
+        (0,  0, 3),
+        (0,  4, 7),
+        (2,  0, 1),
+        (2,  4, 5),
+        (4,  0, 1),
+        (4,  4, 5),
+        (6,  0, 2),
+        (6,  4, 6),
+        (8,  0, 4),
+    ]
+
+    gates = []
+    for shift in [0, 15, 30, 45]:
+        round_shift = shift * M
+        
+        for block in range(8):
+            base = 8 * block
+            for part_idx, off_a, off_b in intra_pattern:
+                gates.append((base + off_a, base + off_b, part_idx * M + round_shift, duration))
+
+        clock = [
+            (7,  15, 11 * M + round_shift, duration),
+            (23, 31, 11 * M + round_shift, duration),
+            (39,  47, 11 * M + round_shift, duration),
+            (55, 63, 11 * M + round_shift, duration)
+        ]
+        gates.extend(clock)
+
+    clock = [
+        (7,  23, 60*M, duration),
+        (39, 55, 60*M, duration),
+        (7,  39, 63*M, duration)
+    ]
+    gates.extend(clock)
+
+    return ";".join(f"{a},{b},{s},{d}" for a, b, s, d in gates)
+
 
 def parse_surgery_spec(spec_str, default_duration=1):
     """
@@ -603,7 +660,7 @@ def main():
                               "'obs_a,obs_b,start[,duration]' (duration defaults to "
                               "--surgery_duration).  Example: '0,1,3,2;0,2,7'.")
     surgery.add_argument("--surgery_preset", type=str, default="",
-                         choices=["24obs", "48obs"],
+                         choices=["24obs", "48obs", "64obs"],
                          help="Use a named preset surgery spec.  '24obs': 24-observable "
                               "756-round circuit with M=42, duration=21, 4 blocks of 6.")
 
@@ -625,7 +682,7 @@ def main():
 
     has_surgery = args.num_surgery_gates > 0 or args.surgery_spec or args.surgery_preset
 
-    p_cross = args.p_cross if args.p_cross is not None else min(0.4, 2.0 * args.after_clifford_depolarization)
+    p_cross = args.p_cross if args.p_cross is not None else min(0.4, 0.2 * args.after_clifford_depolarization)
 
     base = stim.Circuit.generated(
         f"{args.code}:{args.task}",
@@ -668,6 +725,10 @@ def main():
     elif args.surgery_preset == "48obs":
         surgery_gates = parse_surgery_spec(build_surgery_spec_48obs(),
                                            default_duration=args.surgery_duration)
+    elif args.surgery_preset == "64obs":
+        surgery_gates = parse_surgery_spec(build_surgery_spec_64obs(),
+                                           default_duration=args.surgery_duration)
+
     else:
         available_rounds = build_available_rounds(obs_round_dets)
         surgery_gates = generate_random_surgery_gates(

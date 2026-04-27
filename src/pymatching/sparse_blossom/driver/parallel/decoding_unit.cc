@@ -77,23 +77,20 @@ pm::DecodingUnit::DecodingUnit(
     }
 #ifdef USE_SHMEM
     // Bound k
-    int p_per_pe;
-    if (config_parallel::division_strategy == config_parallel::OBS) {
-        if (graph.num_obs_patches == 0)
-            throw std::invalid_argument("OBS strategy requires num_obs_patches > 0");
-        p_per_pe = graph.num_partitions / graph.num_obs_patches;
-    } else {
-        p_per_pe = graph.num_partitions / n_pes;
-    }
+    int p_per_pe = graph.num_partitions / n_pes;
     if (n_pes == 2 && config_parallel::k > graph.num_partitions/2) {
         config_parallel::k = graph.num_partitions/2;
         std::cout << "NOTE: k set to " << config_parallel::k << " for 2 PEs" << std::endl << std::flush;
     } else {
         if (p_per_pe < 2) {
             throw std::invalid_argument("The number of partitions per PE should be >= 2 for more than 2 ranks.");
-        } else if (config_parallel::k > p_per_pe / 2) {
+        } else if (config_parallel::division_strategy == config_parallel::ROUND && config_parallel::k > p_per_pe / 2) {
             // Bounding k for correctness
             config_parallel::k = p_per_pe / 2;
+            std::cout << "NOTE: k bounded to " << config_parallel::k << std::endl << std::flush;
+        } else if (config_parallel::division_strategy == config_parallel::OBS && config_parallel::k > graph.p_per_obs_patch) {
+            // Bounding k for correctness
+            config_parallel::k = graph.p_per_obs_patch;
             std::cout << "NOTE: k bounded to " << config_parallel::k << std::endl << std::flush;
         }
     }
@@ -121,7 +118,7 @@ pm::DecodingUnit::DecodingUnit(
     }
     task_fusion_summary_size_per_task = sizeof(FusionSummary) + 
                                         regions_matched_to_vb_nelems * sizeof(GraphFillRegion*) + 
-                                        (config_parallel::k * regions_nelems_per_solver / 8); /* bit map in bytes (== nelems/64 * 8) */
+                                        (std::max(2, config_parallel::k) * regions_nelems_per_solver / 8); /* bit map in bytes (== nelems/64 * 8) */
     task_fusion_summary_ptr = static_cast<FusionSummary*>(shmem_malloc(task_fusion_summary_size_per_task * num_cross_rank_fusions * NUM_BUFFERS_PER_UNIT));
     if (task_status_ptr == nullptr || task_fusion_summary_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate symmetric atomics buffer.");
@@ -147,7 +144,7 @@ pm::DecodingUnit::DecodingUnit(
     }
     int max_threads = omp_get_max_threads();
 #ifdef USE_SHMEM
-    std::cout << "NOTE: For now, ensure the number of partitions and the number of ranks is a power of 2. This ensures clean divisions in the task tree.\n" << std::flush;
+    // std::cout << "NOTE: For now, ensure the number of partitions and the number of ranks is a power of 2. This ensures clean divisions in the task tree.\n" << std::flush;
     num_partition_units = 1; // FIX THIS??
     num_solvers_per_buffer = graph.num_partitions;
     // --- Populate my_partition_task_ids ---
@@ -1306,7 +1303,7 @@ void pm::DecodingUnit::decode_shots() {
             ps += std::to_string(p) + " ";
         std::cout << ps << std::endl << std::flush;
     }
-    shmem_barrier_all(); // needed to avoid races on symmetric data (signals)
+    // shmem_barrier_all(); // needed to avoid races on symmetric data (signals)
 #endif
 #pragma omp parallel
     {

@@ -6,7 +6,7 @@
 #SBATCH --time=01:00:00
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
+#SBATCH --cpus-per-task=16
 #SBATCH --mem=64GB
 
 cd ~/PyMatchingSHMEM
@@ -70,27 +70,27 @@ if [ -d "out_frames" ]
     rm out_frames -r
 fi
 
-# # need to find d=21 lattice surgery circuit
-# rm *.01 circuit.stim *.b8 *.dem
-# python3 ../scripts/gen_multi_obs.py \
-#     --num_observables 4 \
-#     --rounds $rounds \
-#     --distance 5 \
-#     --after_clifford_depolarization 0.1 \
-#     --code repetition_code \
-#     --task memory \
-#     --num_surgery_gates 3 \
-#     --surgery_duration 5 \
-#     --circuit_out circuit.stim \
-#     > error_model.dem
-# # Sample detection events FROM THE DEM (not the circuit) so seam errors fire
-# stim sample_dem \
-#     --in error_model.dem \
-#     --shots $shots \
-#     --out detection_events.b8 \
-#     --out_format b8 \
-#     --obs_out actual_obs_flips.01 \
-#     --obs_out_format 01
+# need to find d=21 lattice surgery circuit
+rm *.01 circuit.stim *.b8 *.dem
+python3 ../scripts/gen_multi_obs.py \
+    --num_observables 4 \
+    --rounds $rounds \
+    --distance 5 \
+    --after_clifford_depolarization 0.1 \
+    --code repetition_code \
+    --task memory \
+    --num_surgery_gates 3 \
+    --surgery_duration 5 \
+    --circuit_out circuit.stim \
+    > error_model.dem
+# Sample detection events FROM THE DEM (not the circuit) so seam errors fire
+stim sample_dem \
+    --in error_model.dem \
+    --shots $shots \
+    --out detection_events.b8 \
+    --out_format b8 \
+    --obs_out actual_obs_flips.01 \
+    --obs_out_format 01
 
 
 # python scripts/gen_multi_obs.py \
@@ -155,6 +155,11 @@ fi
 # paste -d " " predicted_obs_flips__threads.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
 # echo
 
+# enable profiling
+export SCOREP_ENABLE_PROFILING=true
+export SCOREP_ENABLE_TRACING=false
+export SCOREP_EXPERIMENT_DIRECTORY=scorep_results
+
 # Parallel run with timing
 echo "Starting SHMEM run..."
 start_parallel=$(date +%s)
@@ -166,7 +171,7 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --map-by ppr:$ppn:node:PE=$nthreads_shmem \
     --bind-to core \
     --report-bindings \
-    ~/PyMatchingSHMEM/build_sos/pymatching predict \
+    ~/PyMatchingSHMEM/build_sos_profile/pymatching predict \
     --dem ../testdems/error_model_48obs_d21_p001_640r.dem \
     --in ../testdems/detection_events_48obs_d21_p001_640r_100s.b8 \
     --in_format b8 \

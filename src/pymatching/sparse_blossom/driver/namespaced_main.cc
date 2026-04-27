@@ -27,6 +27,7 @@
 #include "stim.h"
 
 #define OUTPUT_DECODING_TIME
+#define OUTPUT_DECODING_TIME_N 10
 
 #ifdef USE_THREADS
 #include <omp.h>
@@ -134,8 +135,9 @@ int main_predict(int argc, const char** argv) {
     fclose(dem_file);
 
     size_t num_obs = dem.count_observables();
+    size_t num_detectors = dem.count_detectors();
     auto reader = stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>::make(
-        shots_in, shots_in_format.id, 0, dem.count_detectors(), append_obs * num_obs);
+        shots_in, shots_in_format.id, 0, num_detectors, append_obs * num_obs);
     auto writer = stim::MeasureRecordWriter::make(predictions_out, predictions_out_format.id);
     writer->begin_result_type('L');
 
@@ -153,6 +155,9 @@ int main_predict(int argc, const char** argv) {
         , draw_frames
 #endif
     );
+#ifdef USE_SHMEM
+    shmem_barrier_all();
+#endif
     if (DEBUG) {
 #ifdef ENABLE_DRAW_FLAGS
         pm::setup_output_dirs(draw_frames, use_threads);
