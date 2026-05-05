@@ -1,7 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=gen_multi_obs
 #SBATCH --output=gen_multi_obs-%j.out
-#SBATCH --error=gen_multi_obs-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=05:00:00
 #SBATCH --nodes=1

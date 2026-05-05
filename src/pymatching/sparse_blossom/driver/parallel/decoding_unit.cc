@@ -131,11 +131,11 @@ pm::DecodingUnit::DecodingUnit(
         graph.num_partitions,
         graph.num_virtual_boundaries,
         graph.graph_ptr->num_observables);
-    // --- Read first NUM_BUFFERS_PER_UNIT shots ---
+    // --- Fill buffer with shots ---
     if (DEBUG) {
         std::cout << "DEBUG: Reading shots \n" << std::flush;
     }
-    for (int i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
+    for (int i = 0; i < shot_buffer->buffer.size(); ++i) {
         shot_buffer->read_shot(i, graph.node_part_id);
     }
     // --- Set num_threads ---
@@ -527,7 +527,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
         }
         if (DEBUG) std::cout << "\n" << std::flush;
 
-        std::vector<std::pair<size_t, size_t>> my_remote_seams; // pair (seam_idx, idx_of_my_obs)
+        std::vector<std::pair<size_t, size_t>> my_remote_seams; // pair (seam_idx, oi_local)
         my_remote_seams.reserve(num_seams);
         for (int s = 0; s < num_seams; ++s) {
             const auto& si = seam_infos[s];
@@ -586,25 +586,30 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             // seam_j's task hasn't been built yet, and seam_i's emplace_back comes after this
             // loop, so mutating seam_infos in place here is safe for both sides.
             for (size_t seam_j = seam_i+1; seam_j < my_remote_seams.size(); ++seam_j) {
+                const bool oi_local_j = my_remote_seams[seam_j].second;
                 auto& sj = seam_infos[my_remote_seams[seam_j].first];
-                const int local_loj = my_remote_seams[seam_j].second ? sj.oi - my_obs_start : sj.oj - my_obs_start;
-                if (local_lo != local_loj)
+                const int local_loj   = oi_local_j ? sj.oi - my_obs_start : sj.oj - my_obs_start;
+                const int remote_obs_j = oi_local_j ? sj.oj : sj.oi;
+                // Skip unless the two seams share a local obs OR share the same remote obs.
+                // The remote-obs check ensures the PE owning the two distinct local obs patches
+                // makes the same adjustment as the PE owning the single shared remote obs.
+                if (local_lo != local_loj && remote_obs != remote_obs_j)
                     continue;
                 if (si.vb_left <= sj.vb_left) {
                     if (si.vb_right > sj.vb_left) {
-                        int mid = (si.vb_right + sj.vb_left) / 2;
+                        int mid = (si.vb_right + sj.vb_left + 1) / 2;
                         if (DEBUG) std::cout << "  NOTE: PE" << pid << " adjusting seam bounds\n"
-                                             << "    si.vb_right " << si.vb_right << " -> " << mid << "\n"
-                                             << "    sj.vb_left " << sj.vb_left << " -> " << mid << "\n" << std::flush;
-                         si.vb_right = mid;
+                                             << "    s=" << s << ".vb_right " << si.vb_right << " -> " << mid << "\n"
+                                             << "    s=" << my_remote_seams[seam_j].first << ".vb_left " << sj.vb_left << " -> " << mid << "\n" << std::flush;
+                        si.vb_right = mid;
                         sj.vb_left  = mid;
                     }
                 } else {
                     if (sj.vb_right > si.vb_left) {
-                        int mid = (sj.vb_right + si.vb_left) / 2;
+                        int mid = (sj.vb_right + si.vb_left + 1) / 2;
                         if (DEBUG) std::cout << "  NOTE: PE" << pid << " adjusting seam bounds\n"
-                                             << "    si.vb_right " << si.vb_right << " -> " << mid << "\n"
-                                             << "    sj.vb_left " << sj.vb_left << " -> " << mid << "\n" << std::flush;
+                                             << "    s=" << s << ".vb_left " << si.vb_left << " -> " << mid << "\n"
+                                             << "    s=" << my_remote_seams[seam_j].first << ".vb_right " << sj.vb_right << " -> " << mid << "\n" << std::flush;
                         sj.vb_right = mid;
                         si.vb_left  = mid;
                     }
@@ -779,13 +784,8 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                                     + ") exceeds regions_matched_to_vb_nelems (" + std::to_string(regions_matched_to_vb_nelems) + ")"
                                     );
     }
-    fusion_summary_base->regions_to_unmatch_size = t.regions_to_unmatch.size();
     fusion_summary_base->regions_ptr_base = regions_ptr;
     fusion_summary_base->static_nodes_base = graph.graph_ptr->nodes.data();
-    for (size_t i = 0; i < t.regions_to_unmatch.size() && i < regions_matched_to_vb_nelems; ++i) {
-        fusion_summary_base->regions_to_unmatch[i] = t.regions_to_unmatch[i];
-        if (DEBUG) t_out << "      " << t.regions_to_unmatch[i] << std::endl << std::flush;
-    }
 
     // 1. Isolate Solution
     auto* regions_start_ptr = get_regions_ptr(shot_container_id, p_start);
@@ -820,8 +820,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
     // Validation Pass: scan all live regions in the k-partition send window.
     size_t solver_id = get_solver_id(shot_container_id, p_start);
     auto& solver = *solvers[solver_id];
-    uint64_t* bitmap_base = (uint64_t*)((char*)fusion_summary_base->regions_to_unmatch
-                                        + sizeof(GraphFillRegion*) * fusion_summary_base->regions_to_unmatch_size);
+    uint64_t* bitmap_base = (uint64_t*)((char*)fusion_summary_base->regions_to_unmatch);
     // reset to 1's for safety
     size_t bitmap_words = solvers[solver_id]->flooder.region_arena.shmem_bitmap.size() * p_k;
     for (size_t w = 0; w < bitmap_words; ++w) {
@@ -959,6 +958,33 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                                 1, SHMEM_SIGNAL_ADD, 
                                 other_pid);
     fusion_summary_base->blossom_children_size = child_edges_counter;
+
+    // Validate & copy regions_to_unmatch, skipping any that were shattered during solution isolation.
+    size_t valid_rtu_count = 0;
+    for (GraphFillRegion* region : t.regions_to_unmatch) {
+        // Check that the region is still allocated in its solver's bitmap (bit=0 means taken).
+        ptrdiff_t rtu_offset = region - regions_start_ptr;
+        bool allocated = false;
+        if (rtu_offset >= 0 && rtu_offset < (ptrdiff_t)(p_k * regions_nelems_per_solver)) {
+            size_t i_solver  = (size_t)rtu_offset / regions_nelems_per_solver;
+            size_t local_idx = (size_t)rtu_offset % regions_nelems_per_solver;
+            auto& bm = solvers[solver_id + i_solver]->flooder.region_arena.shmem_bitmap;
+            allocated = !((bm[local_idx / 64] >> (local_idx % 64)) & 1ULL);
+        }
+        if (!allocated) {
+            if (DEBUG) t_out << "      SKIPPING shattered region " << region << std::endl << std::flush;
+            continue;
+        }
+        if (valid_rtu_count < regions_matched_to_vb_nelems) {
+            fusion_summary_base->regions_to_unmatch[valid_rtu_count] = region;
+            ++valid_rtu_count;
+            if (DEBUG) t_out << "      " << region << std::endl << std::flush;
+
+        }
+    }
+    fusion_summary_base->regions_to_unmatch_size = valid_rtu_count;
+    bitmap_base = (uint64_t*)((char*)fusion_summary_base->regions_to_unmatch
+                               + sizeof(GraphFillRegion*) * valid_rtu_count);
 
     // Copy Bitmap
     size_t total_bitmap_bytes = 0;
@@ -1760,4 +1786,14 @@ void pm::DecodingUnit::decode_shots() {
             }
         }
     }
+}
+
+void pm::DecodingUnit::reset() {
+    shot_buffer->reset();
+    for (int i=0; i < shot_buffer->buffer.size(); ++i) {
+        shot_buffer->read_shot(i, graph.node_part_id);
+    }
+#ifdef USE_SHMEM
+    shmem_barrier_all();
+#endif
 }

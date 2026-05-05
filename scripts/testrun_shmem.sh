@@ -4,8 +4,8 @@
 #SBATCH --error=run.err
 #SBATCH --partition=zen4
 #SBATCH --time=01:00:00
-#SBATCH --nodes=2
-#SBATCH --ntasks-per-node=1
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64GB
 
@@ -15,7 +15,7 @@ conda activate pymatching
 # module unload python
 # module load python
 
-export FI_LOG_LEVEL=trace
+# export FI_LOG_LEVEL=trace/
 # export SHMEM_OFI_PROVIDER="verbs"
 export FI_VERBS_DEVICE_NAME="mlx5_2"
 # unset FI_VERBS_DEVICE_NAME
@@ -70,27 +70,27 @@ if [ -d "out_frames" ]
     rm out_frames -r
 fi
 
-# need to find d=21 lattice surgery circuit
-rm *.01 circuit.stim *.b8 *.dem
-python3 ../scripts/gen_multi_obs.py \
-    --num_observables 4 \
-    --rounds $rounds \
-    --distance 5 \
-    --after_clifford_depolarization 0.1 \
-    --code repetition_code \
-    --task memory \
-    --num_surgery_gates 3 \
-    --surgery_duration 5 \
-    --circuit_out circuit.stim \
-    > error_model.dem
-# Sample detection events FROM THE DEM (not the circuit) so seam errors fire
-stim sample_dem \
-    --in error_model.dem \
-    --shots $shots \
-    --out detection_events.b8 \
-    --out_format b8 \
-    --obs_out actual_obs_flips.01 \
-    --obs_out_format 01
+# # need to find d=21 lattice surgery circuit
+# rm *.01 circuit.stim *.b8 *.dem
+# python3 ../scripts/gen_multi_obs.py \
+#     --num_observables 4 \
+#     --rounds $rounds \
+#     --distance 5 \
+#     --after_clifford_depolarization 0.1 \
+#     --code repetition_code \
+#     --task memory \
+#     --num_surgery_gates 3 \
+#     --surgery_duration 5 \
+#     --circuit_out circuit.stim \
+#     > error_model.dem
+# # Sample detection events FROM THE DEM (not the circuit) so seam errors fire
+# stim sample_dem \
+#     --in error_model.dem \
+#     --shots $shots \
+#     --out detection_events.b8 \
+#     --out_format b8 \
+#     --obs_out actual_obs_flips.01 \
+#     --obs_out_format 01
 
 
 # python scripts/gen_multi_obs.py \
@@ -165,15 +165,16 @@ echo "Starting SHMEM run..."
 start_parallel=$(date +%s)
 export OMP_NUM_THREADS=$nthreads_shmem
 export SHMEM_SYMMETRIC_SIZE=4G
-export LIBFABRIC_DEBUG=0
+# export LIBFABRIC_DEBUG=0
 $SWHOME/sos_1.5_scalable/bin/oshrun  \
     -n $n \
     --map-by ppr:$ppn:node:PE=$nthreads_shmem \
     --bind-to core \
     --report-bindings \
-    ~/PyMatchingSHMEM/build_sos_profile/pymatching predict \
-    --dem ../testdems/error_model_48obs_d21_p001_640r.dem \
-    --in ../testdems/detection_events_48obs_d21_p001_640r_100s.b8 \
+    gdb -q -batch -ex run -ex "thread apply all bt full" -ex "set logging file gdb.log" -ex 'info sharedlibrary libfabric' --args \
+    ~/PyMatchingSHMEM/build_sos_debug/pymatching predict \
+    --dem ../testdems/error_model_9obs_d21_p001_672r.dem \
+    --in ../testdems/detection_events_9obs_d21_p001_672r_100s.b8 \
     --in_format b8 \
     --out predicted_obs_flips__shmem.01 \
     --out_format 01 \
@@ -182,6 +183,7 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --cross_rank_fusion_window_size $k \
     --task_division_strategy observable \
     --use_threads \
+    --num_repeats 1 \
     > log_shmem.out 2>log_shmem.err
 # gdb -q -batch -ex run -ex "thread apply all bt full" -ex "set logging file gdb.log" -ex 'info sharedlibrary libfabric' --args \
 

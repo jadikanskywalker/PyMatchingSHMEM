@@ -213,6 +213,10 @@ struct Task : public TaskBase {
         }
     }
 
+    void reset() {
+        status.store((is_fusion) ? 0 : -1, std::memory_order_release);
+    }
+
     // inline Task* try_to_steal_parent_or_descendent(int next) {
     //     int old = parent->status.fetch_or(child_bit, std::memory_order_acq_rel);
     //     if ((old | child_bit) == 3) {
@@ -376,6 +380,12 @@ public:
         } else {
             return false;
         }
+    }
+
+    void reset() {
+        *status_shm = 0;
+        *signal_shm = 0;
+        *done_shm = 0;
     }
 
 };

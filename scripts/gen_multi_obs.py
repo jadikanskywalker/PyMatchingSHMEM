@@ -344,9 +344,8 @@ while (<>) {{
         # Run perl in-place: perl -i.bak script.pl file
         # We use -i without .bak to avoid backup files
         result = subprocess.run(
-            ["perl", "-i", "-e", perl_script, obs_path],
+            ["perl", "-i", perl_script_path, obs_path],
             capture_output=True,
-            timeout=60
         )
         if result.returncode != 0:
             raise RuntimeError(f"perl filtering failed: {result.stderr.decode()}")
@@ -451,6 +450,117 @@ def generate_random_surgery_gates(num_patches, available_rounds, num_gates,
               file=sys.stderr)
     return gates
 
+def reduction_adder(carry, op_a, op_b, t_start):
+    """4-bit ripple-carry adder seams. op_a and op_b are lists of 4 patch indices."""
+    seams = []
+    t = t_start
+    # MAJ forward
+    for i in range(4):
+        seams.append((carry, op_a[i], t, 21)); t += 42
+        seams.append((carry, op_b[i], t, 21)); t += 42
+    # UMA backward
+    for i in range(3, -1, -1):
+        seams.append((carry, op_b[i], t, 21)); t += 42
+        seams.append((carry, op_a[i], t, 21)); t += 42
+    return seams
+
+def build_surgery_spec_36obs():
+    """
+    Generate the surgery spec string for the 36-observable, 2058-round circuit.
+
+    4 4-b ripple carry adders then reductions between them
+
+    Returns a semicolon-separated spec string for parse_surgery_spec().
+    """
+    intra_pattern = [
+        ( 8,  0,    0, 21),
+        ( 8,  4,   42, 21),
+        ( 8,  1,   84, 21),
+        ( 8,  5,  126, 21),
+        ( 8,  2,  168, 21),
+        ( 8,  6,  210, 21),
+        ( 8,  3,  252, 21),
+        ( 8,  7,  294, 21),
+        ( 8,  7,  336, 21),
+        ( 8,  3,  378, 21),
+        ( 8,  6,  420, 21),
+        ( 8,  2,  462, 21),
+        ( 8,  5,  504, 21),
+        ( 8,  1,  546, 21),
+        ( 8,  4,  588, 21),
+        ( 8,  0,  630, 21)
+    ]
+
+    gates = []
+    for block in range(4):
+        base = 9 * block
+        for off_a, off_b, round, duration in intra_pattern:
+            gates.append((base + off_a, base + off_b, round, duration))
+
+    T_L1 = 672  # start of level-1 reduction, after intra-block finishes at round 651
+    adder_E = reduction_adder(carry=8,  op_a=[4,5,6,7],    op_b=[13,14,15,16], t_start=T_L1)
+    adder_F = reduction_adder(carry=26, op_a=[22,23,24,25], op_b=[31,32,33,34], t_start=T_L1)
+
+    # Level-1 finishes at T_L1 + 16*42 = 672 + 672 = 1344
+    # Gap of 2d=42 before level-2
+    T_L2 = 1386
+    adder_G = reduction_adder(carry=17, op_a=[13,14,15,16], op_b=[31,32,33,34], t_start=T_L2)
+
+    # Level-1 reductions (parallel: E and F run simultaneously)
+    gates.extend(adder_E)
+    gates.extend(adder_F)
+
+    # Level-2 reduction (sequential after L1)
+    gates.extend(adder_G)
+
+    return ";".join(f"{a},{b},{s},{d}" for a, b, s, d in gates)
+
+def build_surgery_spec_18obs():
+    """
+    Generate the surgery spec string for the 24-observable, 756-round circuit.
+
+    24 observables in 4 blocks of 6 (block b = obs 6b..6b+5, b in 0..3).
+    M=42 → 18 local partitions; partition k starts at global round k*M.
+    Surgeries last `duration` rounds.
+
+    Returns a semicolon-separated spec string for parse_surgery_spec().
+    """
+    gates = [
+        ( 16,  0,    0, 21),
+        ( 16,  8,   42, 21),
+        ( 16,  1,   84, 21),
+        ( 16,  9,  126, 21),
+        ( 16,  2,  168, 21),
+        ( 16, 10,  210, 21),
+        ( 16,  3,  252, 21),
+        ( 16, 11,  294, 21),
+        ( 16,  4,  336, 21),
+        ( 16, 12,  378, 21),
+        ( 16,  5,  420, 21),
+        ( 16, 13,  462, 21),
+        ( 16,  6,  504, 21),
+        ( 16, 14,  546, 21),
+        ( 16,  7,  588, 21),
+        ( 16, 15,  630, 21),
+        ( 16, 15,  672, 21),
+        ( 16,  7,  714, 21),
+        ( 16, 14,  756, 21),
+        ( 16,  6,  798, 21),
+        ( 16, 13,  840, 21),
+        ( 16,  5,  882, 21),
+        ( 16, 12,  924, 21),
+        ( 16,  4,  966, 21),
+        ( 16, 11, 1008, 21),
+        ( 16,  3, 1050, 21),
+        ( 16, 10, 1092, 21),
+        ( 16,  2, 1134, 21),
+        ( 16,  9, 1176, 21),
+        ( 16,  1, 1218, 21),
+        ( 16,  8, 1260, 21),
+        ( 16,  0, 1302, 21)
+    ]
+
+    return ";".join(f"{a},{b},{s},{d}" for a, b, s, d in gates)
 
 def build_surgery_spec_24obs(M=42, duration=21):
     """
@@ -660,7 +770,7 @@ def main():
                               "'obs_a,obs_b,start[,duration]' (duration defaults to "
                               "--surgery_duration).  Example: '0,1,3,2;0,2,7'.")
     surgery.add_argument("--surgery_preset", type=str, default="",
-                         choices=["24obs", "48obs", "64obs"],
+                         choices=["36obs", "18obs", "24obs", "48obs", "64obs"],
                          help="Use a named preset surgery spec.  '24obs': 24-observable "
                               "756-round circuit with M=42, duration=21, 4 blocks of 6.")
 
@@ -718,6 +828,12 @@ def main():
     
     if args.surgery_spec:
         surgery_gates = parse_surgery_spec(args.surgery_spec,
+                                           default_duration=args.surgery_duration)
+    elif args.surgery_preset == "36obs":
+        surgery_gates = parse_surgery_spec(build_surgery_spec_36obs(),
+                                           default_duration=args.surgery_duration)
+    elif args.surgery_preset == "18obs":
+        surgery_gates = parse_surgery_spec(build_surgery_spec_18obs(),
                                            default_duration=args.surgery_duration)
     elif args.surgery_preset == "24obs":
         surgery_gates = parse_surgery_spec(build_surgery_spec_24obs(),

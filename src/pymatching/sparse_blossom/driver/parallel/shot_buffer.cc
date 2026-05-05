@@ -91,10 +91,20 @@ void ShotContainer::clear() {
     res.reset();
 }
 
+void ShotContainer::reset() {
+    current_buffer_round.store(-1, std::memory_order_release);
+    for (auto& task : tasks) {
+        task.reset();
+    }
+#ifdef USE_SHMEM
+    // status_shm and signal_shm are reset at end of each shot; only done_shm needs resetting
+    for (auto& crt : cross_rank_tasks) {
+        crt.reset();
+    }
+#endif
+}
+
 ShotBuffer::ShotBuffer(
-// #ifdef USE_SHMEM
-//     uint64_t* atomics_ptr,
-// #endif
     std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader_in,
     std::unique_ptr<stim::MeasureRecordWriter> writer_in,
     int num_partitions,
@@ -105,9 +115,6 @@ ShotBuffer::ShotBuffer(
     buffer.reserve(static_cast<size_t>(NUM_BUFFERS_PER_UNIT));
     for (size_t i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
         buffer.emplace_back(
-// #ifdef USE_SHMEM
-//             atomics_ptr + i,
-// #endif
             num_partitions, num_virtual_boundaries, num_observables);
     }
 }
@@ -183,6 +190,16 @@ void ShotBuffer::read_shot(int shot_container_id, std::vector<int>& node_part_id
         }
     }
 #endif
+}
+
+void ShotBuffer::reset() {
+    // Reset ShotBuffer counters
+    next_shot_container_id = 0;
+    last_shot_container_id = -1;
+    // Reset per-ShotContainer state
+    for (int i=0; i < buffer.size(); ++i) {
+        buffer[i].reset();
+    }
 }
 
 }  // namespace pm
