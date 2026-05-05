@@ -73,6 +73,7 @@ struct ShotContainer {
     ShotContainer& operator=(ShotContainer&& other) noexcept;
 
     void clear();
+    void reset();
 };
 
 // Rotating buffer of shot containers with ordered shot
@@ -91,9 +92,6 @@ struct ShotBuffer {
     std::condition_variable cv;
 
     ShotBuffer(
-// #ifdef USE_SHMEM
-//         uint64_t* atomics_ptr,
-// #endif
         std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
         std::unique_ptr<stim::MeasureRecordWriter> writer,
         int num_partitions,
@@ -108,6 +106,8 @@ struct ShotBuffer {
     );
 
     void read_shot(int shot_container_id, std::vector<int> &node_part_id);
+
+    void reset();
 };
 
 }

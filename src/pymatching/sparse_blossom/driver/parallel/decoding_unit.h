@@ -182,6 +182,7 @@ struct DecodingUnit {
 #endif
 
     void decode_shots();
+    void reset();
 };
 
 }  // namespace pm

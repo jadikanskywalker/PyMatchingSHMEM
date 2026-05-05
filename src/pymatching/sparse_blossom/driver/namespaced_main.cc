@@ -27,7 +27,6 @@
 #include "stim.h"
 
 #define OUTPUT_DECODING_TIME
-#define OUTPUT_DECODING_TIME_N 10
 
 #ifdef USE_THREADS
 #include <omp.h>
@@ -52,6 +51,10 @@ int main_predict(int argc, const char** argv) {
             "--out_format",
             "--dem",
             "--enable_correlations"
+#ifdef OUTPUT_DECODING_TIME
+            ,
+            "--num_repeats"
+#endif
 #ifdef USE_THREADS
             ,
             "--rounds_per_partition",
@@ -104,7 +107,9 @@ int main_predict(int argc, const char** argv) {
         stim::find_enum_argument("--out_format", "01", stim::format_name_to_enum_map(), argc, argv);
     bool append_obs = stim::find_bool_argument("--in_includes_appended_observables", argc, argv);
     bool enable_correlations = stim::find_bool_argument("--enable_correlations", argc, argv);
-
+#ifdef OUTPUT_DECODING_TIME
+    int num_repeats = (int)stim::find_int64_argument("--num_repeats", 1, 1, INT64_MAX, argc, argv);
+#endif
 #ifdef USE_THREADS
     // ===============
     config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
@@ -116,7 +121,7 @@ int main_predict(int argc, const char** argv) {
     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
 #endif
 #ifdef USE_SHMEM
-    config_parallel::k = stim::find_int64_argument("--cross_rank_fusion_window_size", 1, 1, INT64_MAX, argc, argv);
+    config_parallel::k = stim::find_int64_argument("--cross_rank_fusion_window_size", 1, 0, INT64_MAX, argc, argv);
     {
         const char* ds = stim::find_argument("--task_division_strategy", argc, argv);
         if (ds == nullptr || strcmp(ds, "round") == 0) {
@@ -177,17 +182,7 @@ int main_predict(int argc, const char** argv) {
     pm::ExtendedMatchingResult res(mwpm.flooder.graph.num_observables);
 #endif
 
-#ifdef OUTPUT_DECODING_TIME
-    using std::chrono::duration;
-    using std::chrono::duration_cast;
-    using std::chrono::milliseconds;
-    using std::chrono::steady_clock;
-
-    auto t1 = steady_clock::now();
-#endif
-
 #ifdef USE_THREADS
-    // ===============
     decoding_unit.decode_shots();
 #else
     while (pm::start_and_read_entire_record_buffered(*reader, sparse_shot)) {
@@ -202,12 +197,46 @@ int main_predict(int argc, const char** argv) {
 #endif
 
 #ifdef OUTPUT_DECODING_TIME
-    auto t2 = steady_clock::now();
-    /* Getting number of milliseconds as an integer. */
-    auto ms_int = duration_cast<milliseconds>(t2 - t1);
-    /* Getting number of milliseconds as a double. */
-    duration<double, std::milli> ms_double = t2 - t1;
-    std::cout << "Decoding time: " << ms_double.count() << "ms\n";
+    using std::chrono::duration;
+    using std::chrono::duration_cast;
+    using std::chrono::milliseconds;
+    using std::chrono::steady_clock;
+
+    double total_ms = 0.0;
+    for (int rep = 0; rep < num_repeats; rep++) {
+        fseek(shots_in, 0, SEEK_SET);
+        // reader = stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>::make(
+        //     shots_in, shots_in_format.id, 0, num_detectors, append_obs * num_obs);
+        fflush(predictions_out);
+        fseek(predictions_out, 0, SEEK_SET);
+        ftruncate(fileno(predictions_out), 0);
+#ifdef USE_THREADS
+        // decoding_unit.shot_buffer->reader = std::move(reader);
+        decoding_unit.reset();
+#endif
+        auto t1 = steady_clock::now();
+#endif
+//---------Decode
+#ifdef USE_THREADS
+        decoding_unit.decode_shots();
+#else
+        while (pm::start_and_read_entire_record_buffered(*reader, sparse_shot)) {
+            pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations);
+            for (size_t k = 0; k < num_obs; k++) {
+                writer->write_bit(res.obs_crossed[k]);
+            }
+            writer->write_end();
+            sparse_shot.clear();
+            res.reset();
+        }
+#endif
+//---------Decode
+#ifdef OUTPUT_DECODING_TIME
+        auto t2 = steady_clock::now();
+        total_ms += duration<double, std::milli>(t2 - t1).count();
+        std::cout << duration<double, std::milli>(t2 - t1).count() << "ms\n" << std::flush;
+    }
+    std::cout << "Decoding time: " << total_ms / (double)num_repeats << "ms\n";
 #endif
 
     if (predictions_out != stdout) {
@@ -371,4 +400,4 @@ int pm::main(int argc, const char** argv) {
     throw std::invalid_argument(ss.str());
 }
 
-#include "profiling/profiling_json.c"
+// #include "profiling/profiling_json.c"

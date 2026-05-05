@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=pymatching
-#SBATCH --output=bench_obs.out
-#SBATCH --error=bench_obs.err
+#SBATCH --job-name=pybatch
+#SBATCH --output=bench_obs-%j.out
+#SBATCH --error=bench_obs-%j.err
 #SBATCH --partition=zen4
-#SBATCH --time=01:00:00
+#SBATCH --time=03:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=128GB
+#SBATCH --mem=256GB
 
 if [ $# -le 6 ]
   then
@@ -37,6 +37,16 @@ fi
 
 cd $dirname
 
+if [ ! -d preds ]
+  then
+    mkdir preds
+fi
+
+if [ ! -d out ]
+  then
+    mkdir out
+fi
+
 dem=../testdems/error_model_$dem_suffix.dem
 det=../testdems/detection_events_$det_suffix.b8
 flips=../testdems/actual_obs_flips_$det_suffix.01
@@ -44,19 +54,39 @@ echo $dem
 echo $det
 echo $flips
 
-shmem_threads=(16 32 64 128)
-shmem_n1_n=(1 1 1 1)   # nodes
-shmem_n1_pps=(1 1 1 1) # processes-per-socket
-shmem_n1_nspn=(1 1 1 2)  # num sockets per node (to ask for)
-shmem_n2_n=(1 1 1 1)
-shmem_n2_pps=(2 2 2 1)
-shmem_n2_nspn=(1 1 1 2) # num socket per node (to actually use)
-shmem_n4_n=(1 1 1 2)
-shmem_n4_pps=(4 4 2 1)
-shmem_n4_nspn=(1 1 2 2)
-shmem_n8_n=(1 1 2 4)
-shmem_n8_pps=(8 4 2 1)
-shmem_n8_nspn=(1 2 2 2)
+
+shmem_threads=(8 16 32 64 128)
+
+# Fill sockets
+shmem_ntasks2_sockets=(1 1 1 1 2)
+shmem_ntasks2_ntps=(   2 2 2 2 1) # ntasks per socket
+
+shmem_ntasks4_nodes=(  1 1 1 1 2)
+shmem_ntasks4_sockets=(1 1 1 2 4)
+shmem_ntasks4_ntps=(   4 4 4 2 1)
+
+shmem_ntasks8_nodes=(  1 1 1 2 4)
+shmem_ntasks8_sockets=(1 1 2 4 8)
+shmem_ntasks8_ntps=(   8 8 4 2 1)
+
+shmem_ntasks8_nodes=(  1 1 1 2 4)
+shmem_ntasks8_sockets=(1 1 2 4 8)
+shmem_ntasks8_ntps=(   8 8 4 2 1)
+
+# Quarter subscribe sockets sockets
+shmem_quarter_threads=(8 16 16 32 32 32)
+shmem_quarter_ntasks=( 8  8  4  8  4  2)
+shmem_quarter_ntps=(   4  2  2  1  1  1)
+shmem_quarter_sockets=(2  4  2  8  4  2)
+shmem_quarter_nodes=(  1  2  1  4  2  1)
+
+# Half subscribe sockets sockets
+shmem_half_threads=(16 32 32 64 64 64)
+shmem_half_ntasks=(  8  8  4  8  4  2)
+shmem_half_ntps=(    4  2  2  1  1  1)
+shmem_half_sockets=( 2  4  2  8  4  2)
+shmem_half_nodes=(   1  2  1  4  2  1)
+
 
 serial_build=~/PyMatchingSHMEM/build/pymatching
 # threads_build=~/PyMatchingSHMEM/build_threads_release/pymatching
@@ -75,55 +105,90 @@ for ((m=0; m<${#M[@]}; m++ )); do
     for ((i=0; i<${#shmem_threads[@]}; i++ )); do
         thisThreads=${shmem_threads[$i]}
 
-        thisNSPN=${shmem_n1_nspn[$i]}
-        thisMEM=128
+        # single socket runs
         sbatch \
             --nodes=1 \
+            --sockets-per-node=1 \
+            --cores-per-socket=128 \
             --ntasks-per-node=1 \
-            --sockets-per-node=$thisNSPN \
-            --cpus-per-task=$thisThreads \
-            --mem=${thisMEM}GB \
+            --cpus-per-task=128 \
+            --mem=256GB \
             ../scripts/benchmark_shmem_obs_call.sh \
                 1 1 1 $thisThreads $thisM $k $dem $det $flips
 
-        thisN=${shmem_n2_n[$i]}
-        thisPPS=${shmem_n2_pps[$i]}
-        thisNSPN=${shmem_n2_nspn[$i]}
-        thisPPN=$((thisPPS*thisNSPN))
-        thisMEM=$((thisPPN * 128))
+        thisSockets=${shmem_ntasks2_sockets[$i]}
+        thisNTPS=${shmem_ntasks2_ntps[$i]}
         sbatch \
-            --nodes=$thisN \
-            --ntasks-per-node=$thisPPN \
-            --cpus-per-task=$thisThreads \
-            --mem=${thisMEM}GB \
+            --nodes=1 \
+            --sockets-per-node=$thisSockets \
+            --cores-per-socket=128 \
+            --ntasks-per-node=2 \
+            --cpus-per-task=$((128 / $thisNTPS)) \
+            --mem=512GB \
             ../scripts/benchmark_shmem_obs_call.sh \
-                $thisN $thisPPS $thisNSPN $thisThreads $thisM $k $dem $det $flips
+                2 $thisSockets $thisNTPS $thisThreads $thisM $k $dem $det $flips
 
-        thisN=${shmem_n4_n[$i]}
-        thisPPS=${shmem_n4_pps[$i]}
-        thisNSPN=${shmem_n4_nspn[$i]}
-        thisPPN=$((thisPPS*thisNSPN))
-        thisMEM=$((thisPPN * 128))
+        thisNodes=${shmem_ntasks4_nodes[$i]}
+        thisSockets=${shmem_ntasks4_sockets[$i]}
+        thisSPN=$((thisSockets / thisNodes))
+        thisNTPS=${shmem_ntasks4_ntps[$i]}
+        thisNTPN=$((thisSPN * thisNTPS)) # ntasks per node
+        thisMEM=$((4 * 160 / $thisNodes))
         sbatch \
-            --nodes=$thisN \
-            --ntasks-per-node=$thisPPN \
-            --cpus-per-task=$thisThreads \
+            --nodes=$thisNodes \
+            --sockets-per-node=$((thisSockets/thisNodes)) \
+            --cores-per-socket=128 \
+            --ntasks-per-node=$thisNTPN \
+            --cpus-per-task=$((128 / $thisNTPS)) \
             --mem=${thisMEM}GB \
             ../scripts/benchmark_shmem_obs_call.sh \
-                $thisN $thisPPS $thisNSPN $thisThreads $thisM $k $dem $det $flips
+                4 $thisSockets $thisNTPS $thisThreads $thisM $k $dem $det $flips
 
-        thisN=${shmem_n8_n[$i]}
-        thisPPS=${shmem_n8_pps[$i]}
-        thisNSPN=${shmem_n8_nspn[$i]}
-        thisPPN=$((thisPPS*thisNSPN))
-        thisMEM=$((thisPPN * 128))
+        thisNodes=${shmem_ntasks8_nodes[$i]}
+        thisSockets=${shmem_ntasks8_sockets[$i]}
+        thisSPN=$((thisSockets / thisNodes))
+        thisNTPS=${shmem_ntasks8_ntps[$i]}
+        thisNTPN=$((thisSPN * thisNTPS)) # ntasks per node
+        thisMEM=$((8 * 160 / $thisNodes))
         sbatch \
-            --nodes=$thisN \
-            --ntasks-per-node=$thisPPN \
-            --cpus-per-task=$thisThreads \
+            --nodes=$thisNodes \
+            --sockets-per-node=$((thisSockets/thisNodes)) \
+            --cores-per-socket=128 \
+            --ntasks-per-node=$thisNTPN \
+            --cpus-per-task=$((128 / $thisNTPS)) \
             --mem=${thisMEM}GB \
             ../scripts/benchmark_shmem_obs_call.sh \
-                $thisN $thisPPS $thisNSPN $thisThreads $thisM $k $dem $det $flips
+                8 $thisSockets $thisNTPS $thisThreads $thisM $k $dem $det $flips
+
+    done
+    for ((i=0; i<${#shmem_quarter_threads[@]}; i++ )); do
+        # Quarter subscribe sockets
+        thisThreads=${shmem_quarter_threads[$i]}
+        thisNTasks=${shmem_quarter_ntasks[$i]}
+        thisNodes=${shmem_quarter_nodes[$i]}
+        thisSockets=${shmem_quarter_sockets[$i]}
+        thisNTPS=${shmem_quarter_ntps[$i]}
+        thisMEM=$(($thisNTasks * 160 / $thisNodes))
+        sbatch \
+            --nodes=$thisNodes \
+            --exclusive \
+            --mem=${thisMEM}GB \
+            ../scripts/benchmark_shmem_obs_call.sh \
+                $thisNTasks $thisSockets $thisNTPS $thisThreads $thisM $k $dem $det $flips
+
+        # Half subsribe sockets
+        thisThreads=${shmem_half_threads[$i]}
+        thisNTasks=${shmem_half_ntasks[$i]}
+        thisNodes=${shmem_half_nodes[$i]}
+        thisSockets=${shmem_half_sockets[$i]}
+        thisNTPS=${shmem_half_ntps[$i]}
+        thisMEM=$(($thisNTasks * 160 / $thisNodes))
+        sbatch \
+            --nodes=$thisNodes \
+            --exclusive \
+            --mem=${thisMEM}GB \
+            ../scripts/benchmark_shmem_obs_call.sh \
+                $thisNTasks $thisSockets $thisNTPS $thisThreads $thisM $k $dem $det $flips
     done
 done
 
@@ -132,8 +197,9 @@ $serial_build predict \
     --dem $dem \
     --in $det\
     --in_format b8 \
-    --out preds_0.01 \
+    --out preds/preds_0.01 \
     --out_format 01 \
+    --num_repeats 10 \
     > log_0.out
 end_serial=$(date +%s)
 serial_time=$((end_serial - start_serial))

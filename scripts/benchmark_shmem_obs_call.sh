@@ -1,16 +1,17 @@
 #!/bin/bash
-#SBATCH --job-name=PyMatchingSHMEM
+#SBATCH --job-name=pycall
+#SBATCH --output=out/s-%j.out
 #SBATCH --partition=zen4
 #SBATCH --time=02:00:00
 
 if [ $# -le 8 ]
   then
-    echo "Args: [nodes] [processes_per_socket] [num_sockets_per_node] [nthreads_shmem] [M] [k] [dem] [det] [flips]"
+    echo "Args: [ntasks] [sockets] [ntasks_per_socket] [nthreads] [M] [k] [dem] [det] [flips]"
     exit 1
 else
-    nodes=$1
-    pps=$2
-    num_sockets_per_node=$3
+    ntasks=$1
+    sockets=$2
+    ntasks_per_socket=$3
     nthreads=$4
     M=$5
     k=$6
@@ -19,23 +20,31 @@ else
     flips=$9
 fi
 
-n=$((nodes * num_sockets_per_node * pps))
-suffix=M${M}_n${n}_pps${pps}_${nthreads}_k${k}
+# nodes=$((sockets / 1))
+# if [ $nodes -lt 1 ]
+#   then
+#     nodes=0
+# fi
+suffix=M${M}_ntasks${ntasks}_sockets${sockets}_ntps${ntasks_per_socket}_nthreads${nthreads}_k${k}
 log=log_$suffix.out
-preds=preds_$suffix.01
+preds=preds/preds_$suffix.01
+
+echo "Job ID: $SLURM_JOB_ID" >> $log
 
 source ~/.bashrc
 conda activate pymatching
 
 export FI_VERBS_DEVICE_NAME="mlx5_2"
-export SHMEM_SYMMETRIC_SIZE=12G
+export SHMEM_SYMMETRIC_SIZE=16G
 
 export OMP_NUM_THREADS=$nthreads
 
+threads_per_task=$((128 / $ntasks_per_socket))
+
 start_parallel=$(date +%s)
 oshrun  \
-    -n $n \
-    --map-by ppr:$pps:package:PE=$nthreads \
+    -n $ntasks \
+    --map-by ppr:$ntasks_per_socket:package:PE=$threads_per_task \
     --bind-to core \
     --report-bindings \
     ../build_sos/pymatching predict \
@@ -49,13 +58,15 @@ oshrun  \
         --cross_rank_fusion_window_size $k \
         --task_division_strategy observable \
         --use_threads \
-        &> $log
+        --num_repeats 10 \
+        &>> $log
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
-echo "  N=$n PPN=$pps (Nodes=$nodes) Threads=$nthreads: $parallel_time seconds" >> bench.out
+echo "  NTasks=$ntasks Sockets=$sockets NTPSocket=$ntasks_per_socket Threads=$nthreads: $parallel_time seconds" >> bench.out
 
-python3 ../scripts/combine_results.py $preds $n
+python3 ../scripts/combine_results.py $preds $ntasks
 
+echo >> $log
 echo SHMEM  >> $log
 echo correct predictions: >> $log
 paste -d " " $preds $flips | grep "1 1\|0 0" | wc -l >> $log
