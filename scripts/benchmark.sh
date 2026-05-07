@@ -1,25 +1,26 @@
 #!/bin/bash
-#SBATCH --job-name=pymatching001
-#SBATCH --output=log001.out
-#SBATCH --error=log001.err
-#SBATCH --partition=h100
+#SBATCH --job-name=bench_threads
+#SBATCH --output=bench_threads-%j.out
+#SBATCH --partition=zen4
 #SBATCH --time=02:00:00
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
-#SBATCH --mem-per-cpu=2G
+#SBATCH --sockets=1
+#SBATCH --cpus-per-task=128
+#SBATCH --mem-per-cpu=8G
 
-if [ $# -le 2 ]
+if [ $# -le 3 ]
   then
-    echo "Args: [d] [p_dec] [shots] ... [skip_stim]"
+    echo "Args: [d] [p_dec] [shots] [dir] ... [skip_stim]"
     exit 1
 else
     d=$1
     p_dec=$2
     shots=$3
+    dir=$4
 fi
 
-if [[ -n ${4+x} ]]; then
+if [[ -n ${5+x} ]]; then
     build_circuit=false
 else
     build_circuit=true
@@ -28,12 +29,13 @@ fi
 source ~/.bash_profile
 conda activate pymatching
 
-if [ ! -d "bench$p_dec" ]
+if [ ! -d $dir ]
   then
-    mkdir bench$p_dec
+    mkdir $dir
 fi
 
-cd bench$p_dec
+cd $dir
+pwd > bench.out
 
 rounds=8192
 threads=(2 4 8 16 32)
@@ -49,7 +51,7 @@ p=0.$p_dec
 
 serial_build=~/PyMatchingSHMEM/build/pymatching
 threads_build=~/PyMatchingSHMEM/build_threads_release/pymatching
-echo "serial_build:  $serial_build"
+echo "serial_build:  $serial_build" >> bench.out
 echo "threads_build: $threads_build"
 
 if $build_circuit; then
@@ -87,21 +89,6 @@ if $build_circuit; then
     # echo "0: $serial_time seconds"
 fi
 
-start_serial=$(date +%s)
-$serial_build predict \
-    --dem error_model.dem \
-    --in detection_events.b8 \
-    --in_format b8 \
-    --out predicted_obs_flips.01 \
-    --out_format 01 \
-    > log_0.out
-end_serial=$(date +%s)
-serial_time=$((end_serial - start_serial))
-echo "0: $serial_time seconds"
-
-export OMP_PLACES=cores
-export OMP_PROC_BIND=close
-
 for ((m=0; m<${#M[@]}; m++ )); do
     thisM=${M[$m]}
     echo "----------"
@@ -109,20 +96,22 @@ for ((m=0; m<${#M[@]}; m++ )); do
     for ((i=0; i<${#threads[@]}; i++ )); do
         thisThreads=${threads[$i]}
 
-        export OMP_NUM_THREADS=$thisThreads
-
-        start_parallel=$(date +%s)
-        $threads_build predict \
-            --dem error_model.dem \
-            --in detection_events.b8 \
-            --in_format b8 \
-            --out predicted_obs_flips.01 \
-            --out_format 01 \
-            --rounds_per_partition $thisM \
-            --use_threads \
-            > log_M${thisM}_${thisThreads}threads.out
-        end_parallel=$(date +%s)
-        parallel_time=$((end_parallel - start_parallel))
-        echo "  $thisThreads: $parallel_time seconds"
+        sbatch \
+            --output=log_M${thisM}_${thisThreads}threads.out \
+            ~/PyMatchingSHMEM/scripts/benchmark_call.sh $thisM $thisThreads
     done
 done
+
+start_serial=$(date +%s)
+$serial_build predict \
+    --dem error_model.dem \
+    --in detection_events.b8 \
+    --in_format b8 \
+    --out predicted_obs_flips.01 \
+    --out_format 01 \
+    --num_repeats 10 \
+    > log_0.out
+end_serial=$(date +%s)
+serial_time=$((end_serial - start_serial))
+echo "0: $serial_time seconds"
+

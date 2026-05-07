@@ -535,7 +535,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             const int loj = si.oj - my_obs_start;
             bool oi_local = (loi >= 0 && loi < my_obs_count);
             size_t mine = oi_local + (loj >= 0 && loj < my_obs_count);
-            if (mine == 1) {
+            if (mine == 1) { //
                 my_remote_seams.emplace_back(s, oi_local);  // cross-PE seam
                 continue;
             }
@@ -548,7 +548,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
 
             if (ri == rj) {
                 tasks.emplace_back(global_vb, ri, ri);
-                ri->only_child = true;
+                // ri->only_child = true;
             } else {
                 tasks.emplace_back(global_vb, ri, rj);
             }
@@ -671,7 +671,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                        + "  me: " + std::format("{:p}", static_cast<void*>(&t))
                        + "  right_child: " + std::format("{:p}", static_cast<void*>(t.right_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.right_child->part) + ")" : "") + "\n"
                        + "    parent: f" + std::format("{:p}", static_cast<void*>(t.parent)) + (t.child_bit == 1 ? "  left" : "  right")
-                       + "  only_child: " + std::to_string(t.only_child)
+                    //    + "  only_child: " + std::to_string(t.only_child)
                        + "\n";
             }
         }
@@ -745,6 +745,9 @@ bool check_pointers_for_self_and_all_descendents(
 }
 
 void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &t, std::ofstream &t_out) {
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_DEFINE(sender_wait);
+#endif
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_FUNC_BEGIN();
 #endif
@@ -1037,7 +1040,13 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
     if (DEBUG) t_out << std::endl << std::flush;
 
     // Ensure completion
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_BEGIN(sender_wait, "Sender Ctx Quiet", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
     shmem_ctx_quiet(t.context_shm);
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_END(sender_wait);
+#endif
 
     // Cleanup sent regions
     if (DEBUG) t_out << "  shattering sent blossoms" << std::endl << std::flush;
@@ -1058,6 +1067,9 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
 }
 
 bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &t, std::ofstream &t_out, std::vector<uint64_t> &hitsref) {
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_DEFINE(receiver_wait);
+#endif
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_FUNC_BEGIN();
 #endif
@@ -1105,8 +1117,14 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(size_t shot_container_id, pm:
 
     if (DEBUG) t_out << "    getting (p_start=" << p_start << ", p_k=" << p_k << ", p_end=" << p_end << ") data from " << other_pid << std::endl << std::flush;
 
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_BEGIN(receiver_wait, "Receiver Wait Until", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
     // Wait for signal (4 puts expected)
     shmem_wait_until(t.signal_shm, SHMEM_CMP_EQ, 4);
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_END(receiver_wait);
+#endif
 
     // Read local FusionSummary buffer (which was populated by remote PE)
     FusionSummary*& fusion_summary_base = t.fusion_summary_shm;
@@ -1399,7 +1417,7 @@ void pm::DecodingUnit::decode_shots() {
                 size_t next_p_id = tid+next_p_inc;
                 int solver_id = get_solver_id(shot_container_id, t->part, tid);
                 if (DEBUG) t_out << "solvers[" << solver_id << "]\n";
-                bool stolen = t->try_to_steal_leaf(shot_buffer_round);
+                bool stolen = t->try_to_steal(shot_buffer_round);
 #ifdef USE_SHMEM
                 roots_i_solved.clear();
 #else
@@ -1462,12 +1480,12 @@ void pm::DecodingUnit::decode_shots() {
 #else
                         solver_id = get_solver_id(shot_container_id, local_parent->part, tid);
 #endif
-                        stolen = t->try_to_steal_parent();
+                        stolen = local_parent->try_to_steal(t->child_bit);
                         t = local_parent;
                         // Try to steal sibling or descendent of sibling
                         if (!stolen && !sibling->is_fusion) {
                             solver_id = get_solver_id(shot_container_id, sibling->part, tid);
-                            stolen = sibling->try_to_steal_leaf(shot_buffer_round);
+                            stolen = sibling->try_to_steal(shot_buffer_round);
                             t = sibling;
                         }
                     } else {
@@ -1482,7 +1500,7 @@ void pm::DecodingUnit::decode_shots() {
                     while (!stolen && next_p_id < my_partition_task_ids.size()) {
                         t = &shot.tasks[my_partition_task_ids[next_p_id]];
                         solver_id = get_solver_id(shot_container_id, t->part, tid);
-                        stolen = t->try_to_steal_leaf(shot_buffer_round);
+                        stolen = t->try_to_steal(shot_buffer_round);
                         next_p_id += next_p_inc;
                     }
                     if (DEBUG && t != nullptr) {
@@ -1502,18 +1520,18 @@ void pm::DecodingUnit::decode_shots() {
                     for (auto& [root_task, root_solver_id] : roots_i_solved) {
                         auto& root_solver = *solvers[root_solver_id];
                         root_solver.flooder.match_edges.clear();
-#ifdef SCOREP_USER_ENABLE
-                        SCOREP_USER_REGION_BEGIN(cross_rank_fusion, "Cross Rank Fusion", SCOREP_USER_REGION_TYPE_COMMON);
-#endif
                         // Walk the CRT chain above this local root
                         std::vector<CrossRankTask*> root_crts;
                         TaskBase* chain_node = root_task->parent;
                         while (chain_node != nullptr) {
+#ifdef SCOREP_USER_ENABLE
+                            SCOREP_USER_REGION_BEGIN(cross_rank_fusion, "Cross Rank Decoding", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
                             auto* crt = static_cast<CrossRankTask*>(chain_node);
                             if (DEBUG) t_out << "Trying cross-rank fusion vb=" << crt->part
                                              << " iamleft=" << crt->iamleft
                                              << " other_pid=" << crt->other_pid << "\n" << std::flush;
-                            if (crt->try_to_steal(pid, t_out)) {
+                            if (crt->try_to_steal(pid)) {
                                 if (BARE_DEBUG) t_out << "  Stole CRT with " << crt->other_pid << std::endl << std::flush;
                                 crt->setup();
                                 int crt_sid = get_solver_id(shot_container_id,
@@ -1564,9 +1582,11 @@ void pm::DecodingUnit::decode_shots() {
                             root_crts.push_back(crt);
                             crts_i_handled.push_back(crt);
                             chain_node = crt->parent;
+#ifdef SCOREP_USER_ENABLE
+                            SCOREP_USER_REGION_END(cross_rank_fusion);
+#endif
                         }
 #ifdef SCOREP_USER_ENABLE
-                        SCOREP_USER_REGION_END(cross_rank_fusion);
                         SCOREP_USER_REGION_BEGIN(solution_extraction, "Solution Extraction", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
                         if (BARE_DEBUG) t_out << "T" << tid << " extracting solution for root part=" << root_task->part << std::endl << std::flush;
@@ -1593,7 +1613,7 @@ void pm::DecodingUnit::decode_shots() {
                                             shot.i_solved_vb[curr->part] = false;
                                         }
                                         if (curr->left_child) to_visit.push_back(curr->left_child);
-                                        if (!curr->only_child && curr->right_child) to_visit.push_back(curr->right_child);
+                                        if (curr->right_child && curr->right_child != curr->left_child) to_visit.push_back(curr->right_child);
                                     }
                                 }
                                 for (auto* crt : root_crts) {
@@ -1786,6 +1806,10 @@ void pm::DecodingUnit::decode_shots() {
             }
         }
     }
+#ifdef USE_SHMEM
+    // ensure all PE's done before exiting
+    shmem_barrier_all();
+#endif
 }
 
 void pm::DecodingUnit::reset() {

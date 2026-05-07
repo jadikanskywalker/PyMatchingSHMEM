@@ -3,11 +3,11 @@
 #SBATCH --output=run.out
 #SBATCH --error=run.err
 #SBATCH --partition=zen4
-#SBATCH --time=01:00:00
-#SBATCH --nodes=1
-#SBATCH --ntasks-per-node=2
-#SBATCH --cpus-per-task=16
-#SBATCH --mem=64GB
+#SBATCH --time=03:00:00
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=128
+#SBATCH --mem=1000GB
 
 cd ~/PyMatchingSHMEM
 source ~/.bashrc
@@ -69,6 +69,10 @@ if [ -d "out_frames" ]
   then
     rm out_frames -r
 fi
+if [ -d "scorep_results" ]
+  then
+    rm -r scorep_results
+fi
 
 # # need to find d=21 lattice surgery circuit
 # rm *.01 circuit.stim *.b8 *.dem
@@ -79,7 +83,7 @@ fi
 #     --after_clifford_depolarization 0.1 \
 #     --code repetition_code \
 #     --task memory \
-#     --num_surgery_gates 3 \
+#     --num_surgery_gates 2 \
 #     --surgery_duration 5 \
 #     --circuit_out circuit.stim \
 #     > error_model.dem
@@ -158,23 +162,23 @@ fi
 # enable profiling
 export SCOREP_ENABLE_PROFILING=true
 export SCOREP_ENABLE_TRACING=false
-export SCOREP_EXPERIMENT_DIRECTORY=scorep_results
+# export SCOREP_EXPERIMENT_DIRECTORY=scorep_results
+# export SCOREP_OVERWRITE_EXPERIMENT_DIRECTORY=true
 
 # Parallel run with timing
 echo "Starting SHMEM run..."
 start_parallel=$(date +%s)
 export OMP_NUM_THREADS=$nthreads_shmem
-export SHMEM_SYMMETRIC_SIZE=4G
+export SHMEM_SYMMETRIC_SIZE=16G
 # export LIBFABRIC_DEBUG=0
 $SWHOME/sos_1.5_scalable/bin/oshrun  \
     -n $n \
-    --map-by ppr:$ppn:node:PE=$nthreads_shmem \
+    --map-by ppr:$ppn:package:PE=$nthreads_shmem \
     --bind-to core \
     --report-bindings \
-    gdb -q -batch -ex run -ex "thread apply all bt full" -ex "set logging file gdb.log" -ex 'info sharedlibrary libfabric' --args \
-    ~/PyMatchingSHMEM/build_sos_debug/pymatching predict \
-    --dem ../testdems/error_model_9obs_d21_p001_672r.dem \
-    --in ../testdems/detection_events_9obs_d21_p001_672r_100s.b8 \
+    ~/PyMatchingSHMEM/build_sos/pymatching predict \
+    --dem ../testdems/error_model_48obs_d21_p001_640r.dem \
+    --in ../testdems/detection_events_48obs_d21_p001_640r_100s.b8 \
     --in_format b8 \
     --out predicted_obs_flips__shmem.01 \
     --out_format 01 \
@@ -183,9 +187,13 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --cross_rank_fusion_window_size $k \
     --task_division_strategy observable \
     --use_threads \
-    --num_repeats 1 \
+    --num_repeats \
     > log_shmem.out 2>log_shmem.err
+
+    # ~/PyMatchingSHMEM/scripts/scorep_wrapper.sh \
 # gdb -q -batch -ex run -ex "thread apply all bt full" -ex "set logging file gdb.log" -ex 'info sharedlibrary libfabric' --args \
+    # --dem ../testdems/error_model_9obs_d21_p001_672r.dem \
+    # --in ../testdems/detection_events_9obs_d21_p001_672r_100s.b8 \
 
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
