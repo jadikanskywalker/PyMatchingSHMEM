@@ -19,6 +19,10 @@
 #include <memory>
 #include <vector>
 
+#ifdef SCOREP_USER_ENABLE
+#include <scorep/SCOREP_User.h>
+#endif
+
 #ifdef USE_SHMEM
 #include <iostream>
 #include <shmem.h>
@@ -60,6 +64,11 @@ struct TaskBase {
 
     virtual ~TaskBase() = default;
 
+    virtual void setup() = 0;
+    virtual void mark_solved(size_t my_pid = 0) = 0;
+    virtual bool try_to_steal(size_t val) = 0;
+    virtual void reset() = 0;
+
     TaskBase(TaskBase&& other) noexcept
         : part(other.part), vb_marker(other.vb_marker),
           vb_left(other.vb_left), vb_right(other.vb_right),
@@ -98,12 +107,12 @@ struct Task : public TaskBase {
 
    public:
 
-    uint64_t child_bit;
+    size_t child_bit;
     Task* left_child{nullptr};
     Task* right_child{nullptr};
 
 #ifdef USE_SHMEM
-    bool only_child{ false };
+    // bool only_child{ false };
     int vb_solver_offset{ 0 }; // For OBS patch i, this is i (Because no vb between patches, we lose one vb index relative to partition index)
     // int seam_vb_slot{ -1 };             // virtual_boundaries slot index for this seam's VB nodes
     int left_obs_patch_id{-1};   // For OBS local seam tasks: left obs patch
@@ -164,7 +173,7 @@ struct Task : public TaskBase {
     }
 
     /* Helper Methods */
-    inline void setup() {
+    void setup() override {
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
         if (is_fusion) {
@@ -186,34 +195,54 @@ struct Task : public TaskBase {
     };
 
     /* Sychnorization Methods */
-    inline void mark_solved() {
+    void mark_solved(size_t my_pid = 0) override {
+        (void)my_pid;
         if (is_fusion) {
             status.store(0, std::memory_order_release);
         }
     }
 
-    inline bool try_to_steal_leaf(int next) {
-        if (is_fusion) return false;
-        int expected = next - 1;
-        return status.compare_exchange_strong(expected, next, std::memory_order_acq_rel);
-    }
-
-    inline bool try_to_steal_parent() {
+    // for partition leaf, val is the shot id
+    // for fusion parent, val is the child's child_bit
+    bool try_to_steal(size_t val) override {
+        if (!is_fusion) { // partition
+            int expected = static_cast<int>(val) - 1;
+            return status.compare_exchange_strong(expected, static_cast<int>(val), std::memory_order_acq_rel);
+        } else { // fusion
 #ifdef USE_SHMEM
-        if (only_child) {
-            return true;
-        }
+            if (left_child == right_child) { // one child
+                return true;
+            }
 #endif
-        // parent is guaranteed to be a local Task (caller checks !parent->is_cross_rank_fusion)
-        int old = static_cast<Task*>(parent)->status.fetch_or(child_bit, std::memory_order_acq_rel);
-        if ((old | child_bit) == 3) {
-            return old != 3;
-        } else {
-            return false;
+            int old = status.fetch_or(static_cast<int>(val), std::memory_order_acq_rel);
+            if ((old | static_cast<int>(val)) == 3) {
+                return old != 3;
+            } else {
+                return false;
+            }
         }
     }
 
-    void reset() {
+    // inline bool try_to_steal_leaf(int next) {
+    //     return try_to_steal(static_cast<size_t>(next));
+    // }
+
+//     inline bool try_to_steal_parent() {
+// #ifdef USE_SHMEM
+//         if (only_child) {
+//             return true;
+//         }
+// #endif
+//         // parent is guaranteed to be a local Task (caller checks !parent->is_cross_rank_fusion)
+//         int old = static_cast<Task*>(parent)->status.fetch_or(child_bit, std::memory_order_acq_rel);
+//         if ((old | child_bit) == 3) {
+//             return old != 3;
+//         } else {
+//             return false;
+//         }
+//     }
+
+    void reset() override {
         status.store((is_fusion) ? 0 : -1, std::memory_order_release);
     }
 
@@ -254,7 +283,7 @@ struct Task : public TaskBase {
 #ifdef USE_SHMEM
 struct CrossRankTask : public TaskBase {
 public:
-    Task* child;
+    Task* child; // Want to change this?
     bool iamleft;
 
     size_t other_pid{ 0 };
@@ -264,6 +293,7 @@ public:
     uint64_t* signal_shm{ nullptr };
     uint64_t* done_shm{ nullptr };
     pm::FusionSummary* fusion_summary_shm { nullptr };
+
     shmem_ctx_t context_shm;
     bool owns_context{ true };
 
@@ -336,7 +366,7 @@ public:
 
 
     /* Helper Methods */
-    inline void setup() {
+    void setup() override {
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
         for (auto& region : child->regions_matched_to_virtual_boundary) {
@@ -350,39 +380,68 @@ public:
 
     /* Sychnorization Methods */
     // Should be called on PE who solved fusion
-    inline void mark_solved(size_t my_pid) {
+    void mark_solved(size_t my_pid) override {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_BEGIN();
+#endif
         shmem_ctx_uint64_atomic_set(context_shm, status_shm, 0, (iamleft) ? my_pid : other_pid);
         shmem_ctx_uint64_atomic_set(context_shm, signal_shm, 0, my_pid); // reset my signal
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_END();
+#endif
     }
 
     inline void report_done(int shot_buffer_round) {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_BEGIN();
+#endif
         shmem_ctx_uint64_atomic_set(context_shm, done_shm, shot_buffer_round+1, other_pid); // notify other PE we are done
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_END();
+#endif
     }
 
     inline void wait_until_done(size_t my_pid, int shot_buffer_round) {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_BEGIN();
+#endif
         shmem_wait_until(done_shm, SHMEM_CMP_GE, shot_buffer_round + 1);
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_END();
+#endif
     }
 
-    inline bool try_to_steal(size_t my_pid, std::ostream& t_out) {
+    bool try_to_steal(size_t my_pid
+        // , std::ostream* t_out = nullptr
+    ) override {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_BEGIN();
+#endif
         int old, news;
         if (iamleft) {
-            if (DEBUG) t_out << "  performing fetch_or on " << status_shm << " my_pid=" << my_pid << " with child_bit=" << 1 << std::endl << std::flush;
+            // if (t_out && DEBUG) *t_out << "  performing fetch_or on " << status_shm << " my_pid=" << my_pid << " with child_bit=" << 1 << std::endl << std::flush;
             old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 1, my_pid);
             news = old | 1;
         } else {
-            if (DEBUG) t_out << "  performing fetch_or on " << status_shm << " other_pid=" << other_pid << " with child_bit=" << 2 << std::endl << std::flush;
+            // if (t_out && DEBUG) *t_out << "  performing fetch_or on " << status_shm << " other_pid=" << other_pid << " with child_bit=" << 2 << std::endl << std::flush;
             old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 2, other_pid);
             news = old | 2;
         }
-        if (DEBUG) t_out << "  done with fetch_or" << std::endl << std::flush;
+        // if (t_out && DEBUG) *t_out << "  done with fetch_or" << std::endl << std::flush;
         if (news == 3) {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_END();
+#endif
             return old != 3;
         } else {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_END();
+#endif
             return false;
         }
     }
 
-    void reset() {
+    void reset() override {
         *status_shm = 0;
         *signal_shm = 0;
         *done_shm = 0;

@@ -25,7 +25,7 @@ fi
 #   then
 #     nodes=0
 # fi
-suffix=M${M}_ntasks${ntasks}_sockets${sockets}_ntps${ntasks_per_socket}_nthreads${nthreads}_k${k}
+suffix=M${M}_ntasks${ntasks}_sockets${sockets}_ntps${ntasks_per_socket}_nthreads${nthreads}_k${k}_${SLURM_JOB_ID}
 log=log_$suffix.out
 preds=preds/preds_$suffix.01
 
@@ -38,6 +38,8 @@ export FI_VERBS_DEVICE_NAME="mlx5_2"
 export SHMEM_SYMMETRIC_SIZE=16G
 
 export OMP_NUM_THREADS=$nthreads
+export OMP_PLACES="cores($nthreads)"
+export OMP_PROC_BIND=close
 
 threads_per_task=$((128 / $ntasks_per_socket))
 
@@ -58,7 +60,7 @@ oshrun  \
         --cross_rank_fusion_window_size $k \
         --task_division_strategy observable \
         --use_threads \
-        --num_repeats 10 \
+        --num_repeats 5 \
         &>> $log
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))

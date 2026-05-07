@@ -51,11 +51,11 @@ fi
 
 if $build_circuit; then
     stim gen \
-        --rounds=$rounds \
-        --distance=7 \
-        --after_clifford_depolarization=0.01 \
-        --code surface_code \
-        --task rotated_memory_x \
+        --rounds $rounds \
+        --distance 7 \
+        --after_clifford_depolarization 0.1 \
+        --code repetition_code \
+        --task memory \
         > circuit.stim
     stim analyze_errors \
         --decompose_errors \
@@ -70,25 +70,45 @@ if $build_circuit; then
         --out detection_events.b8 \
         --out_format b8
 
-    echo "Starting serial run..."
-    start_serial=$(date +%s)
-    $serial_build predict \
-        --dem error_model.dem \
-        --in detection_events.b8 \
-        --in_format b8 \
-        --out predicted_obs_flips.01 \
-        --out_format 01 \
-        > log_serial.out
-    end_serial=$(date +%s)
-    serial_time=$((end_serial - start_serial))
-    echo "Serial run completed in $serial_time seconds."
+    # stim gen \
+    #     --rounds=$rounds \
+    #     --distance=7 \
+    #     --after_clifford_depolarization=0.01 \
+    #     --code surface_code \
+    #     --task rotated_memory_x \
+    #     > circuit.stim
+    # stim analyze_errors \
+    #     --decompose_errors \
+    #     --fold_loops \
+    #     --in circuit.stim \
+    #     > error_model.dem
+    # stim detect \
+    #     --in circuit.stim \
+    #     --shots $shots \
+    #     --obs_out actual_obs_flips.01 \
+    #     --obs_out_format 01 \
+    #     --out detection_events.b8 \
+    #     --out_format b8
 
-    echo Serial
-    echo correct predictions:
-    paste -d " " predicted_obs_flips.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
-    echo wrong predictions:
-    paste -d " " predicted_obs_flips.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
-    echo
+    # echo "Starting serial run..."
+    # start_serial=$(date +%s)
+    # $serial_build predict \
+    #     --dem error_model.dem \
+    #     --in detection_events.b8 \
+    #     --in_format b8 \
+    #     --out predicted_obs_flips.01 \
+    #     --out_format 01 \
+    #     > log_serial.out
+    # end_serial=$(date +%s)
+    # serial_time=$((end_serial - start_serial))
+    # echo "Serial run completed in $serial_time seconds."
+
+    # echo Serial
+    # echo correct predictions:
+    # paste -d " " predicted_obs_flips.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
+    # echo wrong predictions:
+    # paste -d " " predicted_obs_flips.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
+    # echo
 fi
 
 # Run prediction
@@ -110,6 +130,7 @@ $threads_build predict \
     --out_format 01 \
     --rounds_per_partition $M \
     --use_threads \
+    --draw_frames \
     > log_parallel.out
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
