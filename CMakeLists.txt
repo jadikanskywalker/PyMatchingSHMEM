@@ -81,6 +81,7 @@ if(USE_THREADS)
     list(APPEND SOURCE_FILES_NO_MAIN
         src/pymatching/sparse_blossom/driver/parallel/decoding_unit.cc
         src/pymatching/sparse_blossom/driver/parallel/shot_buffer.cc
+        src/pymatching/sparse_blossom/driver/helpers/dem_generator.cc
     )
 endif()
 

@@ -33,6 +33,7 @@
 #include <fstream>
 #include "../config_parallel.h"
 #include "../diagram/mwpm_diagram.h"
+#include "pymatching/sparse_blossom/driver/helpers/dem_generator.h"
 #endif
 
 #ifdef USE_SHMEM
@@ -68,7 +69,23 @@ int main_predict(int argc, const char** argv) {
 #ifdef USE_SHMEM
             ,
             "--cross_rank_fusion_window_size",
-            "--task_division_strategy"
+            "--task_division_strategy",
+            "--gen_code",
+            "--gen_task",
+            "--gen_distance",
+            "--gen_rounds",
+            "--gen_num_obs",
+            "--gen_depolarization",
+            "--gen_surgery_preset",
+            "--gen_surgery_spec",
+            "--gen_surgery_duration",
+            "--gen_p_cross",
+            "--gen_boundary_depth",
+            "--dem_cache_path",
+            "--gen_sample_shots",
+            "--gen_sample_seed",
+            "--gen_det_out",
+            "--gen_obs_out"
 #endif
         },
         {},
@@ -76,7 +93,6 @@ int main_predict(int argc, const char** argv) {
         argc,
         argv);
 
-    FILE* shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
     FILE* predictions_out = nullptr;
 #ifdef USE_SHMEM
     const char* out_fn_base_const = stim::find_argument("--out", argc, argv);
@@ -100,7 +116,6 @@ int main_predict(int argc, const char** argv) {
 #else
     predictions_out = stim::find_open_file_argument("--out", stdout, "wb", argc, argv);
 #endif
-    FILE* dem_file = stim::find_open_file_argument("--dem", nullptr, "r", argc, argv);
     stim::FileFormatData shots_in_format =
         stim::find_enum_argument("--in_format", "b8", stim::format_name_to_enum_map(), argc, argv);
     stim::FileFormatData predictions_out_format =
@@ -136,9 +151,87 @@ int main_predict(int argc, const char** argv) {
     }
 #endif
 
-    stim::DetectorErrorModel dem = stim::DetectorErrorModel::from_file(dem_file);
-    fclose(dem_file);
+    stim::DetectorErrorModel dem;
 
+    // DEM generation path: build in-memory or load from cache
+    const char* gen_code_arg = stim::find_argument("--gen_code", argc, argv);
+    const char* dem_cache_arg = stim::find_argument("--dem_cache_path", argc, argv);
+
+    if (gen_code_arg != nullptr) {
+        std::string dem_cache_path = dem_cache_arg ? dem_cache_arg : "";
+
+        if (!dem_cache_path.empty()) {
+            FILE* cache_check = fopen(dem_cache_path.c_str(), "r");
+            if (cache_check) {
+                fclose(cache_check);
+                dem = pm::MultiObsDemGenerator::read_dem_file(dem_cache_path);
+                std::cerr << "Loaded cached DEM from " << dem_cache_path << std::endl;
+                goto dem_ready;
+            }
+        }
+
+        {
+            std::string gen_code = gen_code_arg;
+            const char* gen_task_arg = stim::find_argument("--gen_task", argc, argv);
+            std::string gen_task = gen_task_arg ? gen_task_arg : "memory";
+            int gen_distance = (int)stim::find_int64_argument("--gen_distance", 5, 1, INT64_MAX, argc, argv);
+            int gen_rounds = (int)stim::find_int64_argument("--gen_rounds", 10, 1, INT64_MAX, argc, argv);
+            int gen_num_obs = (int)stim::find_int64_argument("--gen_num_obs", 2, 1, INT64_MAX, argc, argv);
+            double gen_depol = stim::find_float_argument("--gen_depolarization", 0.01, 0.0, 1.0, argc, argv);
+            int gen_surgery_dur = (int)stim::find_int64_argument("--gen_surgery_duration", 8, 1, INT64_MAX, argc, argv);
+            double gen_p_cross_val = stim::find_float_argument("--gen_p_cross", -1.0, -1.0, 1.0, argc, argv);
+            double gen_p_cross = (gen_p_cross_val < 0) ? std::min(0.4, 0.2 * gen_depol) : gen_p_cross_val;
+            int gen_boundary_depth = (int)stim::find_int64_argument("--gen_boundary_depth", 2, 0, INT64_MAX, argc, argv);
+
+            auto base_dem = pm::MultiObsDemGenerator::generate_base_dem(
+                gen_code, gen_task, gen_distance, gen_rounds, gen_depol);
+
+            std::vector<pm::SurgerySpec> surgeries;
+            const char* preset_arg = stim::find_argument("--gen_surgery_preset", argc, argv);
+            const char* spec_arg = stim::find_argument("--gen_surgery_spec", argc, argv);
+
+            if (preset_arg) {
+                std::string preset = preset_arg;
+                if (preset == "18obs") surgeries = pm::MultiObsDemGenerator::preset_18obs();
+                else if (preset == "24obs") surgeries = pm::MultiObsDemGenerator::preset_24obs();
+                else if (preset == "36obs") surgeries = pm::MultiObsDemGenerator::preset_36obs();
+                else if (preset == "48obs") surgeries = pm::MultiObsDemGenerator::preset_48obs();
+                else if (preset == "64obs") surgeries = pm::MultiObsDemGenerator::preset_64obs();
+                else throw std::invalid_argument("Unknown --gen_surgery_preset: " + preset);
+            } else if (spec_arg) {
+                surgeries = pm::MultiObsDemGenerator::parse_spec(spec_arg, gen_surgery_dur);
+            }
+
+            pm::MultiObsDemGenerator generator(
+                std::move(base_dem), gen_num_obs, std::move(surgeries), gen_p_cross, gen_boundary_depth);
+            dem = generator.generate();
+
+            std::cerr << "Generated DEM: " << dem.count_detectors() << " detectors, "
+                      << dem.count_observables() << " observables" << std::endl;
+
+            if (!dem_cache_path.empty()) {
+                pm::MultiObsDemGenerator::write_dem_file(dem, dem_cache_path);
+                std::cerr << "Cached DEM to " << dem_cache_path << std::endl;
+            }
+
+            // Handle sampling if requested
+            const char* gen_det_out = stim::find_argument("--gen_det_out", argc, argv);
+            const char* gen_obs_out = stim::find_argument("--gen_obs_out", argc, argv);
+            if (gen_det_out && gen_obs_out) {
+                size_t sample_shots = (size_t)stim::find_int64_argument("--gen_sample_shots", 1, 1, INT64_MAX, argc, argv);
+                uint64_t sample_seed = (uint64_t)stim::find_int64_argument("--gen_sample_seed", 42, 0, INT64_MAX, argc, argv);
+                pm::MultiObsDemGenerator::sample_dem(dem, sample_shots, gen_det_out, gen_obs_out, sample_seed);
+                std::cerr << "Sampled " << sample_shots << " shots" << std::endl;
+            }
+        }
+        dem_ready:;
+    } else {
+        FILE* dem_file = stim::find_open_file_argument("--dem", nullptr, "r", argc, argv);
+        dem = stim::DetectorErrorModel::from_file(dem_file);
+        fclose(dem_file);
+    }
+
+    FILE* shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
     size_t num_obs = dem.count_observables();
     size_t num_detectors = dem.count_detectors();
     auto reader = stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>::make(
