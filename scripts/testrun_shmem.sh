@@ -76,25 +76,25 @@ fi
 
 # # need to find d=21 lattice surgery circuit
 # rm *.01 circuit.stim *.b8 *.dem
-# python3 ../scripts/gen_multi_obs.py \
-#     --num_observables 4 \
-#     --rounds $rounds \
-#     --distance 5 \
-#     --after_clifford_depolarization 0.1 \
-#     --code repetition_code \
-#     --task memory \
-#     --num_surgery_gates 2 \
-#     --surgery_duration 5 \
-#     --circuit_out circuit.stim \
-#     > error_model.dem
-# # Sample detection events FROM THE DEM (not the circuit) so seam errors fire
-# stim sample_dem \
-#     --in error_model.dem \
-#     --shots $shots \
-#     --out detection_events.b8 \
-#     --out_format b8 \
-#     --obs_out actual_obs_flips.01 \
-#     --obs_out_format 01
+python3 ../scripts/gen_multi_obs.py \
+    --num_observables 4 \
+    --rounds $rounds \
+    --distance 7 \
+    --after_clifford_depolarization 0.1 \
+    --code repetition_code \
+    --task memory \
+    --num_surgery_gates 3 \
+    --surgery_duration 5 \
+    --circuit_out circuit.stim \
+    > error_model.dem
+# Sample detection events FROM THE DEM (not the circuit) so seam errors fire
+stim sample_dem \
+    --in error_model.dem \
+    --shots $shots \
+    --out detection_events.b8 \
+    --out_format b8 \
+    --obs_out actual_obs_flips.01 \
+    --obs_out_format 01
 
 
 # python scripts/gen_multi_obs.py \
@@ -177,8 +177,8 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --bind-to core \
     --report-bindings \
     ~/PyMatchingSHMEM/build_sos/pymatching predict \
-    --dem ../testdems/error_model_48obs_d21_p001_640r.dem \
-    --in ../testdems/detection_events_48obs_d21_p001_640r_100s.b8 \
+    --dem error_model.dem \
+    --in detection_events.b8 \
     --in_format b8 \
     --out predicted_obs_flips__shmem.01 \
     --out_format 01 \
@@ -187,9 +187,12 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --cross_rank_fusion_window_size $k \
     --task_division_strategy observable \
     --use_threads \
-    --num_repeats \
+    --draw_frames \
     > log_shmem.out 2>log_shmem.err
 
+
+    # --dem ../testdems/error_model_48obs_d21_p001_640r.dem \
+    # --in ../testdems/detection_events_48obs_d21_p001_640r_100s.b8 \
     # ~/PyMatchingSHMEM/scripts/scorep_wrapper.sh \
 # gdb -q -batch -ex run -ex "thread apply all bt full" -ex "set logging file gdb.log" -ex 'info sharedlibrary libfabric' --args \
     # --dem ../testdems/error_model_9obs_d21_p001_672r.dem \

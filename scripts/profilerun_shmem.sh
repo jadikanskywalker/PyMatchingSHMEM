@@ -39,6 +39,7 @@ fi
 cd $dir
 
 rm scorep_results* -r
+rm out_parallel -r
 rm *.out *.err *.01 *.txt
 
 # # need to find d=21 lattice surgery circuit

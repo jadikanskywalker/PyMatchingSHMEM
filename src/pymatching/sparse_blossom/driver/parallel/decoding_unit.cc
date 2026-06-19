@@ -747,6 +747,9 @@ bool check_pointers_for_self_and_all_descendents(
 void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &t, std::ofstream &t_out) {
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_DEFINE(sender_wait);
+    SCOREP_USER_REGION_DEFINE(solution_isolation);
+    SCOREP_USER_REGION_DEFINE(putmems);
+    SCOREP_USER_REGION_DEFINE(shatter);
 #endif
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_FUNC_BEGIN();
@@ -820,6 +823,9 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
     std::vector<pm::BlossomChild> discovered_child_edges;
     discovered_child_edges.reserve(64);
     
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_BEGIN(solution_isolation, "Sender Solution Isolation", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
     // Validation Pass: scan all live regions in the k-partition send window.
     size_t solver_id = get_solver_id(shot_container_id, p_start);
     auto& solver = *solvers[solver_id];
@@ -909,6 +915,11 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
             }
         }
     }
+
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_END(solution_isolation);
+    SCOREP_USER_REGION_BEGIN(putmems, "Sender Putmems", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
 
     if (DEBUG) t_out << "  isolated solution" << std::endl << std::flush;
 #ifdef ENABLE_DRAW_FLAGS
@@ -1023,6 +1034,9 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                                 t.signal_shm, 
                                 1, SHMEM_SIGNAL_ADD, 
                                 other_pid);
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_END(putmems);
+#endif
     
     auto& shot = shot_buffer->buffer[shot_container_id];
     std::vector<std::vector<uint64_t>*> hits;
@@ -1049,6 +1063,9 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
 #endif
 
     // Cleanup sent regions
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_BEGIN(shatter, "Sender Shatter Regions", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
     if (DEBUG) t_out << "  shattering sent blossoms" << std::endl << std::flush;
     for (std::vector<uint64_t>* hitsref : hits) {
         for (uint64_t i : *hitsref) {
@@ -1059,6 +1076,9 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
             }
         }
     }
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_END(shatter);
+#endif
     if (DEBUG) t_out << "  shattered sent blossoms" << std::endl
                      << "  sent all data to " << other_pid << std::endl << std::flush;
 #ifdef SCOREP_USER_ENABLE
@@ -1531,6 +1551,9 @@ void pm::DecodingUnit::decode_shots() {
                             if (DEBUG) t_out << "Trying cross-rank fusion vb=" << crt->part
                                              << " iamleft=" << crt->iamleft
                                              << " other_pid=" << crt->other_pid << "\n" << std::flush;
+                            
+                            if (BARE_DEBUG) t_out << "    waiting until PE done" << std::endl << std::flush;
+                            crt->wait_until_done(pid, shot_buffer_round-1);
                             if (crt->try_to_steal(pid)) {
                                 if (BARE_DEBUG) t_out << "  Stole CRT with " << crt->other_pid << std::endl << std::flush;
                                 crt->setup();
@@ -1617,7 +1640,7 @@ void pm::DecodingUnit::decode_shots() {
                                     }
                                 }
                                 for (auto* crt : root_crts) {
-                                    // NOT BACKWARD COMPATBILE WITH ROUND
+                                    // NOT BACKWARD COMPATIBLE WITH ROUND
                                     auto& remote_offset = (crt->iamleft) ? crt->left_global_offset : crt->right_global_offset;
                                     size_t p = crt->vb_left + 1 + remote_offset.first; // inclusive
                                     const size_t p_end = crt->vb_right + 1 + remote_offset.first; // exclusive
@@ -1710,24 +1733,24 @@ void pm::DecodingUnit::decode_shots() {
                     } // end per-root loop
 
                     // Debug: verify all solvers clean after shattering
-                    for (int p = 0; p < graph.num_partitions; ++p) {
-                        auto& chk = *solvers[get_solver_id(shot_container_id, p)];
-                        for (auto word : chk.flooder.region_arena.shmem_bitmap) {
-                            if (word != ~0ULL) {
-                                if (DEBUG) t_out << "  ERROR: solver p" << p << " not empty\n" << std::flush;
-                                else std::cout << "  ERROR: solver p" << p << " not empty\n" << std::flush;
-                                break;
-                            }
-                        }
-                    }
+                    // for (int p = 0; p < graph.num_partitions; ++p) {
+                    //     auto& chk = *solvers[get_solver_id(shot_container_id, p)];
+                    //     for (auto word : chk.flooder.region_arena.shmem_bitmap) {
+                    //         if (word != ~0ULL) {
+                    //             if (DEBUG) t_out << "  ERROR: solver p" << p << " not empty\n" << std::flush;
+                    //             else std::cout << "  ERROR: solver p" << p << " not empty\n" << std::flush;
+                    //             break;
+                    //         }
+                    //     }
+                    // }
 
                     // Report done before waiting: all-report-then-all-wait avoids deadlock
                     // for same-PE-pair CRTs (e.g., ROUND left+right CRTs).
                     if (BARE_DEBUG) t_out << "    reporting done" << std::endl << std::flush;
                     for (auto* crt : crts_i_handled) crt->report_done(shot_buffer_round);
-                    if (BARE_DEBUG) t_out << "    waiting until other PEs done" << std::endl << std::flush;
-                    for (auto* crt : crts_i_handled) crt->wait_until_done(pid, shot_buffer_round);
-                    if (BARE_DEBUG) t_out << "    all done" << std::endl << std::flush;
+                    // if (BARE_DEBUG) t_out << "    waiting until other PEs done" << std::endl << std::flush;
+                    // for (auto* crt : crts_i_handled) crt->wait_until_done(pid, shot_buffer_round);
+                    // if (BARE_DEBUG) t_out << "    all done" << std::endl << std::flush;
 
                     // Last thread (cumulative count == num_task_roots) combines and writes.
                     int n_my = (int)roots_i_solved.size();
