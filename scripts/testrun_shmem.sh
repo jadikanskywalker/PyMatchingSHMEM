@@ -160,8 +160,8 @@ fi
 # echo
 
 # enable profiling
-export SCOREP_ENABLE_PROFILING=true
-export SCOREP_ENABLE_TRACING=false
+# export SCOREP_ENABLE_PROFILING=true
+# export SCOREP_ENABLE_TRACING=false
 # export SCOREP_EXPERIMENT_DIRECTORY=scorep_results
 # export SCOREP_OVERWRITE_EXPERIMENT_DIRECTORY=true
 
@@ -187,7 +187,6 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --cross_rank_fusion_window_size $k \
     --task_division_strategy observable \
     --use_threads \
-    --draw_frames \
     > log_shmem.out 2>log_shmem.err
 
 

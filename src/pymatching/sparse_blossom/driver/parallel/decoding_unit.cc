@@ -459,6 +459,40 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                              << std::flush;
     }
 
+    // --- Global seam window conflict resolution ---
+    // All PEs compute this identically (same seam_infos, same iteration order)
+    // so every PE ends up with the same adjusted windows.
+    for (int si_idx = 0; si_idx < num_seams; ++si_idx) {
+        auto& si = seam_infos[si_idx];
+        for (int sj_idx = si_idx + 1; sj_idx < num_seams; ++sj_idx) {
+            auto& sj = seam_infos[sj_idx];
+            if (si.oi != sj.oi && si.oi != sj.oj &&
+                si.oj != sj.oi && si.oj != sj.oj)
+                continue;
+            if (si.vb_left <= sj.vb_left) {
+                if (si.vb_right > sj.vb_left) {
+                    int mid = (si.vb_right + sj.vb_left + 1) / 2;
+                    if (DEBUG) std::cout << "  Global adjust: seam " << si_idx
+                        << " vb_right " << si.vb_right << " -> " << mid
+                        << ", seam " << sj_idx
+                        << " vb_left " << sj.vb_left << " -> " << mid << "\n" << std::flush;
+                    si.vb_right = mid;
+                    sj.vb_left  = mid;
+                }
+            } else {
+                if (sj.vb_right > si.vb_left) {
+                    int mid = (sj.vb_right + si.vb_left + 1) / 2;
+                    if (DEBUG) std::cout << "  Global adjust: seam " << sj_idx
+                        << " vb_right " << sj.vb_right << " -> " << mid
+                        << ", seam " << si_idx
+                        << " vb_left " << si.vb_left << " -> " << mid << "\n" << std::flush;
+                    sj.vb_right = mid;
+                    si.vb_left  = mid;
+                }
+            }
+        }
+    }
+
     for (int shot_id = 0; shot_id < NUM_BUFFERS_PER_UNIT; ++shot_id) {
         auto& tasks = shot_buffer->buffer[shot_id].tasks;
         tasks.reserve(static_cast<size_t>(my_obs_count * (2*K_p - 1) + num_seams + 1));
@@ -581,40 +615,6 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             Task* local_child    = group_root[local_lo];  // top of local computation (post-Union-Find)
             const bool iamleft   = oi_local;              // oi < oj always (map sorted), so oi_local ↔ left
             const int remote_obs = oi_local ? si.oj : si.oi;
-            
-            // Check remaining seams partition ranges; constrain overlapping pairs at midpoint.
-            // seam_j's task hasn't been built yet, and seam_i's emplace_back comes after this
-            // loop, so mutating seam_infos in place here is safe for both sides.
-            for (size_t seam_j = seam_i+1; seam_j < my_remote_seams.size(); ++seam_j) {
-                const bool oi_local_j = my_remote_seams[seam_j].second;
-                auto& sj = seam_infos[my_remote_seams[seam_j].first];
-                const int local_loj   = oi_local_j ? sj.oi - my_obs_start : sj.oj - my_obs_start;
-                const int remote_obs_j = oi_local_j ? sj.oj : sj.oi;
-                // Skip unless the two seams share a local obs OR share the same remote obs.
-                // The remote-obs check ensures the PE owning the two distinct local obs patches
-                // makes the same adjustment as the PE owning the single shared remote obs.
-                if (local_lo != local_loj && remote_obs != remote_obs_j)
-                    continue;
-                if (si.vb_left <= sj.vb_left) {
-                    if (si.vb_right > sj.vb_left) {
-                        int mid = (si.vb_right + sj.vb_left + 1) / 2;
-                        if (DEBUG) std::cout << "  NOTE: PE" << pid << " adjusting seam bounds\n"
-                                             << "    s=" << s << ".vb_right " << si.vb_right << " -> " << mid << "\n"
-                                             << "    s=" << my_remote_seams[seam_j].first << ".vb_left " << sj.vb_left << " -> " << mid << "\n" << std::flush;
-                        si.vb_right = mid;
-                        sj.vb_left  = mid;
-                    }
-                } else {
-                    if (sj.vb_right > si.vb_left) {
-                        int mid = (sj.vb_right + si.vb_left + 1) / 2;
-                        if (DEBUG) std::cout << "  NOTE: PE" << pid << " adjusting seam bounds\n"
-                                             << "    s=" << s << ".vb_left " << si.vb_left << " -> " << mid << "\n"
-                                             << "    s=" << my_remote_seams[seam_j].first << ".vb_right " << sj.vb_right << " -> " << mid << "\n" << std::flush;
-                        sj.vb_right = mid;
-                        si.vb_left  = mid;
-                    }
-                }
-            }
 
             // Determine which PE owns remote_obs
             int other_pid;
