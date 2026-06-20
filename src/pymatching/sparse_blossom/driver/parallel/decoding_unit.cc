@@ -1360,6 +1360,9 @@ void pm::DecodingUnit::decode_shots() {
     if (enable_correlations) {
         throw std::invalid_argument("Edge correlations are not yet implemented in parallel.");
     }
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_FUNC_BEGIN();
+#endif
 #ifdef USE_SHMEM
     if (DEBUG) {
         std::string ps = "PE" + std::to_string(pid) + " partition task ids: ";
@@ -1375,6 +1378,9 @@ void pm::DecodingUnit::decode_shots() {
         SCOREP_USER_REGION_DEFINE(local_decoding);
         SCOREP_USER_REGION_DEFINE(cross_rank_fusion);
         SCOREP_USER_REGION_DEFINE(solution_extraction);
+        SCOREP_USER_REGION_DEFINE(shot_decode);
+        SCOREP_USER_REGION_DEFINE(shot_spin_wait);
+        SCOREP_USER_REGION_DEFINE(shot_iteration);
 #endif
         const int tid = omp_get_thread_num();
         std::ofstream t_out;
@@ -1421,6 +1427,10 @@ void pm::DecodingUnit::decode_shots() {
 #endif
                 auto& shot = shot_buffer->buffer[shot_container_id];
                 int shot_current_buffer_round = shot.current_buffer_round.load();
+#ifdef SCOREP_USER_ENABLE
+                SCOREP_USER_REGION_BEGIN(shot_iteration, "Shot Iteration", SCOREP_USER_REGION_TYPE_COMMON);
+                SCOREP_USER_REGION_BEGIN(shot_spin_wait, "Shot Spin Wait", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
                 while (shot_current_buffer_round < shot_buffer_round) {  // wait
                     if (shot_current_buffer_round < 0) {
                         break;
@@ -1428,9 +1438,18 @@ void pm::DecodingUnit::decode_shots() {
                     _mm_pause();
                     shot_current_buffer_round = shot.current_buffer_round.load();
                 }
+#ifdef SCOREP_USER_ENABLE
+                SCOREP_USER_REGION_END(shot_spin_wait);
+#endif
                 if (shot_current_buffer_round < 0) {
+#ifdef SCOREP_USER_ENABLE
+                    SCOREP_USER_REGION_END(shot_iteration);
+#endif
                     break;
                 }
+#ifdef SCOREP_USER_ENABLE
+                SCOREP_USER_REGION_BEGIN(shot_decode, "Shot Decode", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
                 // we divide partition tasks into sets based on the number of threads available
                 Task* t = &shot.tasks[my_partition_task_ids[tid]];
                 size_t next_p_inc = num_threads; // cannot inc by two for 1 threads --- does not work for odd
@@ -1803,6 +1822,10 @@ void pm::DecodingUnit::decode_shots() {
                     shot_buffer->write_result_and_get_next_shot(shot_container_id, graph.node_part_id);
                 }
 #endif
+#ifdef SCOREP_USER_ENABLE
+                SCOREP_USER_REGION_END(shot_decode);
+                SCOREP_USER_REGION_END(shot_iteration);
+#endif
                 // Move on to next shot buffer
                 ++shot_id;
 #if NUM_BUFFERS_PER_UNIT > 1
@@ -1832,6 +1855,9 @@ void pm::DecodingUnit::decode_shots() {
 #ifdef USE_SHMEM
     // ensure all PE's done before exiting
     shmem_barrier_all();
+#endif
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_FUNC_END();
 #endif
 }
 

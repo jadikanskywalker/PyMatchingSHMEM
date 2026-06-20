@@ -8,7 +8,7 @@
 echo $SLURM_JOB_ID
 
 cd ~/PyMatchingSHMEM
-source ~/.bashrc
+source ~/.bash_profile
 conda activate pymatching
 
 # export SHMEM_OFI_PROVIDER="verbs"
@@ -104,8 +104,6 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
 echo "SHMEM run completed in $parallel_time seconds."
-
-npes=$(($n * $ppn))
 
 python3 ../scripts/combine_results.py predicted_obs_flips__shmem.01 $n
 

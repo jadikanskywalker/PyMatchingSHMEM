@@ -214,17 +214,18 @@ int main_predict(int argc, const char** argv) {
                 std::cerr << "Cached DEM to " << dem_cache_path << std::endl;
             }
 
-            // Handle sampling if requested
-            const char* gen_det_out = stim::find_argument("--gen_det_out", argc, argv);
-            const char* gen_obs_out = stim::find_argument("--gen_obs_out", argc, argv);
-            if (gen_det_out && gen_obs_out) {
-                size_t sample_shots = (size_t)stim::find_int64_argument("--gen_sample_shots", 1, 1, INT64_MAX, argc, argv);
-                uint64_t sample_seed = (uint64_t)stim::find_int64_argument("--gen_sample_seed", 42, 0, INT64_MAX, argc, argv);
-                pm::MultiObsDemGenerator::sample_dem(dem, sample_shots, gen_det_out, gen_obs_out, sample_seed);
-                std::cerr << "Sampled " << sample_shots << " shots" << std::endl;
-            }
         }
         dem_ready:;
+
+        // Handle sampling if requested (runs whether DEM was generated or loaded from cache)
+        const char* gen_det_out = stim::find_argument("--gen_det_out", argc, argv);
+        const char* gen_obs_out = stim::find_argument("--gen_obs_out", argc, argv);
+        if (gen_det_out && gen_obs_out) {
+            size_t sample_shots = (size_t)stim::find_int64_argument("--gen_sample_shots", 1, 1, INT64_MAX, argc, argv);
+            uint64_t sample_seed = (uint64_t)stim::find_int64_argument("--gen_sample_seed", 42, 0, INT64_MAX, argc, argv);
+            pm::MultiObsDemGenerator::sample_dem(dem, sample_shots, gen_det_out, gen_obs_out, sample_seed);
+            std::cerr << "Sampled " << sample_shots << " shots" << std::endl;
+        }
     } else {
         FILE* dem_file = stim::find_open_file_argument("--dem", nullptr, "r", argc, argv);
         dem = stim::DetectorErrorModel::from_file(dem_file);

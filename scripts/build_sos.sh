@@ -35,7 +35,7 @@ elif [ "$BUILD_TYPE" = "debug" ]; then
         -DCMAKE_CXX_COMPILER=$CXX \
         -DUSE_THREADS=ON \
         -DUSE_SHMEM=ON
-    cd build_sos || exit
+    cd build_sos_debug || exit
 elif [ "$BUILD_TYPE" = "profile" ]; then
     rm -rf build_sos_profile
     echo "Configuring Debug+Profile build..."
