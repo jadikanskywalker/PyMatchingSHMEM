@@ -22,7 +22,7 @@ from collections import defaultdict
 from pathlib import Path
 
 
-CONFIGS = ["same_socket", "diff_socket", "diff_node"]
+CONFIGS = ["same_socket", "diff_socket", "diff_node", "single_pe"]
 CUBE_STAT_THREADS = 20
 
 

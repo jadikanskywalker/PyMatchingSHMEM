@@ -34,7 +34,7 @@ enum ShotStatus : uint64_t { READY, PUT_SUMMARY, PUT_RESULT, WROTE_RESULT };
 // ShotContainer isolates everything needed to solve
 // a single shot in parallel.
 struct ShotContainer {
-    std::atomic<int> current_buffer_round{-1};  // Used for idle thread spin-wait until new shot read
+    alignas(64) std::atomic<int64_t> current_buffer_round{-1};  // Used for idle thread spin-wait until new shot read
 
     stim::SparseShot sparse_shot;
 
@@ -53,7 +53,7 @@ struct ShotContainer {
     int num_task_roots{0};
     // Incremented by each thread when it finishes all its roots for a shot.
     // Last thread (cumulative count reaches num_task_roots) resets to 0 and writes result.
-    std::atomic<int> num_roots_done{0};
+    alignas(64) std::atomic<int64_t> num_roots_done{0};
     // Per-thread partial MatchingResult accumulator (indexed by omp thread id).
     // Sized to num_threads during build_tasks_*.
     std::vector<pm::MatchingResult> thread_results;
@@ -84,8 +84,8 @@ struct ShotBuffer {
 
     std::vector<ShotContainer> buffer;
 
-    int next_shot_container_id{ 0 };
-    int last_shot_container_id{ -1 };
+    alignas(64) int64_t next_shot_container_id{ 0 };
+    alignas(64) int64_t last_shot_container_id{ -1 };
 
     // Lock for result writing & shot reading
     std::mutex m;

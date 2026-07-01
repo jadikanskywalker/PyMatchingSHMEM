@@ -9,6 +9,8 @@
 
 #define NUM_BUFFERS_PER_UNIT 1
 
+// #define PROFILE_OMP_BARRIERS
+
 #ifdef USE_SHMEM
 // per solver region buffer size in SHMEM = num_nodes_per_partition * SHMEM_ARENA_BUFFER_FACTOR rounded up to a multiple of 64
 //    2 would ensure no heap overflow in absolute worst case, can reduce for smaller p & _should_ not segfault

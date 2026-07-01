@@ -103,7 +103,7 @@ struct Task : public TaskBase {
     //             2 (Right child solved and tried to steal me first)
     //             3 (Both children solved and second one who tried to steal me won)
     // Thus, fusions require resetting status to 0 in mark_solved
-    std::atomic<int> status{0};
+    alignas(64) std::atomic<int64_t> status{0};
 
    public:
 
@@ -206,16 +206,16 @@ struct Task : public TaskBase {
     // for fusion parent, val is the child's child_bit
     bool try_to_steal(size_t val) override {
         if (!is_fusion) { // partition
-            int expected = static_cast<int>(val) - 1;
-            return status.compare_exchange_strong(expected, static_cast<int>(val), std::memory_order_acq_rel);
+            int64_t expected = static_cast<int64_t>(val) - 1;
+            return status.compare_exchange_strong(expected, static_cast<int64_t>(val), std::memory_order_acq_rel);
         } else { // fusion
 #ifdef USE_SHMEM
             if (left_child == right_child) { // one child
                 return true;
             }
 #endif
-            int old = status.fetch_or(static_cast<int>(val), std::memory_order_acq_rel);
-            if ((old | static_cast<int>(val)) == 3) {
+            int64_t old = status.fetch_or(static_cast<int64_t>(val), std::memory_order_acq_rel);
+            if ((old | static_cast<int64_t>(val)) == 3) {
                 return old != 3;
             } else {
                 return false;
@@ -417,7 +417,7 @@ public:
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
 #endif
-        int old, news;
+        uint64_t old, news;
         if (iamleft) {
             // if (t_out && DEBUG) *t_out << "  performing fetch_or on " << status_shm << " my_pid=" << my_pid << " with child_bit=" << 1 << std::endl << std::flush;
             old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 1, my_pid);

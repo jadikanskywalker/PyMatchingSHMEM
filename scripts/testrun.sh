@@ -52,7 +52,7 @@ fi
 if $build_circuit; then
     stim gen \
         --rounds $rounds \
-        --distance 7 \
+        --distance 5 \
         --after_clifford_depolarization 0.1 \
         --code repetition_code \
         --task memory \

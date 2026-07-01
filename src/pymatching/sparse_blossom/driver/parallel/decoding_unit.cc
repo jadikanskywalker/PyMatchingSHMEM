@@ -1431,11 +1431,14 @@ void pm::DecodingUnit::decode_shots() {
                 SCOREP_USER_REGION_BEGIN(shot_iteration, "Shot Iteration", SCOREP_USER_REGION_TYPE_COMMON);
                 SCOREP_USER_REGION_BEGIN(shot_spin_wait, "Shot Spin Wait", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
+// #if NUM_BUFFERS_PER_UNIT < 2
+//                 #pragma omp barrier
+// #endif
                 while (shot_current_buffer_round < shot_buffer_round) {  // wait
                     if (shot_current_buffer_round < 0) {
                         break;
                     }
-                    _mm_pause();
+                    shot.current_buffer_round.wait(shot_current_buffer_round, std::memory_order_relaxed);
                     shot_current_buffer_round = shot.current_buffer_round.load();
                 }
 #ifdef SCOREP_USER_ENABLE
@@ -1550,6 +1553,9 @@ void pm::DecodingUnit::decode_shots() {
 #ifdef SCOREP_USER_ENABLE
                 SCOREP_USER_REGION_END(local_decoding);
 #endif
+// #ifdef PROFILE_OMP_BARRIERS
+//                 #pragma omp barrier
+// #endif
 #ifdef USE_SHMEM
                 if (!roots_i_solved.empty()) {
                     // Collect all CRTs handled across roots this thread solved this shot
@@ -1822,6 +1828,9 @@ void pm::DecodingUnit::decode_shots() {
                     shot_buffer->write_result_and_get_next_shot(shot_container_id, graph.node_part_id);
                 }
 #endif
+// #ifdef PROFILE_OMP_BARRIERS
+//                 #pragma omp barrier
+// #endif
 #ifdef SCOREP_USER_ENABLE
                 SCOREP_USER_REGION_END(shot_decode);
                 SCOREP_USER_REGION_END(shot_iteration);

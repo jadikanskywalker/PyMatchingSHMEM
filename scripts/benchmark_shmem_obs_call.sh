@@ -39,9 +39,9 @@ export SHMEM_SYMMETRIC_SIZE=16G
 
 export OMP_NUM_THREADS=$nthreads
 export OMP_PLACES="cores($nthreads)"
-export OMP_PROC_BIND=close
+export OMP_PROC_BIND=true
 
-threads_per_task=$((128 / $ntasks_per_socket))
+threads_per_task=$nthreads
 
 start_parallel=$(date +%s)
 oshrun  \
@@ -60,7 +60,7 @@ oshrun  \
         --cross_rank_fusion_window_size $k \
         --task_division_strategy observable \
         --use_threads \
-        --num_repeats 5 \
+        --num_repeats 10 \
         &>> $log
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))

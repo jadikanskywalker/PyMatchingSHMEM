@@ -173,6 +173,7 @@ void ShotBuffer::read_shot(int shot_container_id, std::vector<int>& node_part_id
                 }
             }
             shot.current_buffer_round++;
+            shot.current_buffer_round.notify_all();
         } else {
 #if NUM_BUFFERS_PER_UNIT > 1
             last_shot_container_id = shot_container_id - 1;
@@ -181,12 +182,14 @@ void ShotBuffer::read_shot(int shot_container_id, std::vector<int>& node_part_id
             }
 #else
             shot.current_buffer_round.store(-1);
+            shot.current_buffer_round.notify_all();
 #endif
         }
 #if NUM_BUFFERS_PER_UNIT > 1
     } else if (last_shot_container_id == shot_container_id) {
         for (int i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
             buffer[i].current_buffer_round.store(-1);
+            shot.current_buffer_round.notify_all();
         }
     }
 #endif

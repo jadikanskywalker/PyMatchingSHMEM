@@ -1,13 +1,16 @@
 #!/bin/bash
-#SBATCH --job-name=36obs_p005
+#SBATCH --job-name=64obs_acc
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 #SBATCH --partition=zen4
-#SBATCH --time=03:00:00
+#SBATCH --time=36:00:00
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=2
 #SBATCH --cpus-per-task=64
-#SBATCH --mem=500GB
+#SBATCH --mem=750GB
+
+# Usage: sbatch run_64obs.sh <error_probability>
+# Example: sbatch run_64obs.sh 0.005
 
 cd ~/PyMatchingSHMEM
 source ~/.bash_profile
@@ -17,6 +20,9 @@ export FI_VERBS_DEVICE_NAME="mlx5_2"
 
 set -eo pipefail
 
+P="${1:?Usage: sbatch $0 <error_probability>}"
+p_label=$(echo "$P" | sed 's/0\.//')
+
 PROJECT_DIR=~/PyMatchingSHMEM
 SERIAL_DECODER=~/PyMatching/build/pymatching
 SHMEM_DECODER=$PROJECT_DIR/build_sos/pymatching
@@ -24,17 +30,57 @@ OSHRUN=${SWHOME}/sos_1.5_scalable/bin/oshrun
 COMBINE_SCRIPT=$PROJECT_DIR/scripts/combine_results.py
 OUT=$PROJECT_DIR/acc_results/out
 
-TAG="36obs_d21_p005_2058r"
-DEM="$OUT/dems/${TAG}.dem"
-DET="$OUT/events/${TAG}_100s.b8"
-ACTUAL="$OUT/events/${TAG}_100s.01"
+SHOTS=1000
 M=21
 NTHREADS=8
+TAG="64obs_d21_p${p_label}_704r"
+
+DEM_CACHE="$OUT/dems/${TAG}.dem"
+DET="$OUT/events/${TAG}_${SHOTS}s.b8"
+ACTUAL="$OUT/events/${TAG}_${SHOTS}s.01"
+
+echo "=== 64obs p=$P ($TAG) ==="
+echo "OSHRUN=$OSHRUN"
+ls "$SHMEM_DECODER" "$SERIAL_DECODER" "$OSHRUN" || { echo "FATAL: binary not found"; exit 1; }
 
 export OMP_NUM_THREADS=$NTHREADS
 export OMP_PLACES=cores
 export OMP_PROC_BIND=true
 export SHMEM_SYMMETRIC_SIZE=16G
+
+# Generate DEM (if not cached) + sample 1000 shots
+if [ ! -f "$DEM_CACHE" ] || [ ! -f "$DET" ]; then
+    echo "=== Generating + sampling $TAG ==="
+    "$OSHRUN" \
+        -n 1 \
+        --map-by ppr:1:node:PE=$NTHREADS \
+        --bind-to core \
+        "$SHMEM_DECODER" predict \
+        --gen_code surface_code \
+        --gen_task rotated_memory_x \
+        --gen_distance 21 \
+        --gen_rounds 704 \
+        --gen_num_obs 64 \
+        --gen_depolarization $P \
+        --gen_surgery_preset 64obs \
+        --dem_cache_path "$DEM_CACHE" \
+        --gen_det_out "$DET" \
+        --gen_obs_out "$ACTUAL" \
+        --gen_sample_shots $SHOTS \
+        --gen_sample_seed 42 \
+        --in "$DET" \
+        --in_format b8 \
+        --out "$OUT/preds/pred_${TAG}_n1_shmem_k1.01" \
+        --out_format 01 \
+        --rounds_per_partition $M \
+        --obs_coors_included \
+        --cross_rank_fusion_window_size 1 \
+        --task_division_strategy observable \
+        --use_threads
+    echo "  Cached: $DEM_CACHE"
+else
+    echo "=== Reusing cached DEM + events ==="
+fi
 
 compare_accuracy() {
     local pred="$1" actual="$2"
@@ -46,18 +92,18 @@ compare_accuracy() {
     } END { printf "%d %d", c+0, t+0 }'
 }
 
-CSV=$OUT/run_36obs_p005_results.csv
+CSV=$OUT/run_64obs_p${p_label}_results.csv
 echo "obs,d,p,k,n_pes,matches,total,error_rate" > "$CSV"
 
 for k in 0 1 2; do
     for n in 1 2 4; do
         pred="$OUT/preds/pred_${TAG}_n${n}_k${k}.01"
-        echo "=== p=0.005 k=$k n=$n ==="
+        echo "=== p=$P k=$k n=$n ==="
 
         run_ok=true
         if [ "$n" -eq 1 ]; then
             "$SERIAL_DECODER" predict \
-                --dem "$DEM" \
+                --dem "$DEM_CACHE" \
                 --in "$DET" \
                 --in_format b8 \
                 --out "$pred" \
@@ -69,7 +115,7 @@ for k in 0 1 2; do
                 --map-by ppr:2:node:PE=$NTHREADS \
                 --bind-to core \
                 "$SHMEM_DECODER" predict \
-                --dem "$DEM" \
+                --dem "$DEM_CACHE" \
                 --in "$DET" \
                 --in_format b8 \
                 --out "$pred" \
@@ -94,7 +140,7 @@ for k in 0 1 2; do
             matches=0; total=0; error_rate="FAILED"
         fi
         echo "  $matches/$total (error_rate=$error_rate)"
-        echo "36,21,0.005,$k,$n,$matches,$total,$error_rate" >> "$CSV"
+        echo "64,21,$P,$k,$n,$matches,$total,$error_rate" >> "$CSV"
     done
 done
 
