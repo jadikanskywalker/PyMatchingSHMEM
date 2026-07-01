@@ -73,6 +73,8 @@ set(SOURCE_FILES_NO_MAIN
         src/pymatching/sparse_blossom/search/search_detector_node.cc
         src/pymatching/sparse_blossom/search/search_flooder.cc
         src/pymatching/sparse_blossom/driver/user_graph.cc
+        src/pymatching/sparse_blossom/driver/helpers/graph_cache.cc
+        src/pymatching/sparse_blossom/driver/helpers/dem_generator.cc
         src/pymatching/rand/rand_gen.cc
         )
 
@@ -81,7 +83,6 @@ if(USE_THREADS)
     list(APPEND SOURCE_FILES_NO_MAIN
         src/pymatching/sparse_blossom/driver/parallel/decoding_unit.cc
         src/pymatching/sparse_blossom/driver/parallel/shot_buffer.cc
-        src/pymatching/sparse_blossom/driver/helpers/dem_generator.cc
     )
 endif()
 
@@ -107,6 +108,7 @@ set(TEST_FILES
         src/pymatching/sparse_blossom/search/search_graph.test.cc
         src/pymatching/sparse_blossom/search/search_flooder.test.cc
         src/pymatching/sparse_blossom/driver/user_graph.test.cc
+        src/pymatching/sparse_blossom/driver/helpers/graph_cache.test.cc
         )
 
 set(PERF_FILES

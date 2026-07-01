@@ -573,6 +573,33 @@ std::vector<SurgerySpec> MultiObsDemGenerator::preset_36obs() {
     return gates;
 }
 
+std::vector<SurgerySpec> MultiObsDemGenerator::preset_72obs(int M) {
+    // Copy 1: obs 0-35, identical round schedule to preset_36obs().
+    std::vector<SurgerySpec> gates = preset_36obs();
+
+    // Copy 2: obs 36-71, same schedule, offset by +36. Independent of copy 1
+    // throughout (no cross-copy gates in this phase).
+    auto copy2 = preset_36obs();
+    for (auto& g : copy2) {
+        g.obs_a += 36;
+        g.obs_b += 36;
+    }
+    gates.insert(gates.end(), copy2.begin(), copy2.end());
+
+    // 2*M idle gap: rounds [2058, 2058 + 2*M) have no surgeries at all (both
+    // copies just continue plain QEC rounds independently).
+    int T_break_end = 2058 + 2 * M;
+
+    // Final reduction: a new top-level carry (obs 72) combining copy 1's and
+    // copy 2's adder_G operand groups {13,14,15,16}/{49,50,51,52}. Mirrors
+    // adder_G itself (which combined blocks 1 and 3 the same way), just one
+    // level higher, combining the two 36obs copies instead of two blocks.
+    auto adder_top = reduction_adder(72, {13, 14, 15, 16}, {49, 50, 51, 52}, T_break_end);
+    gates.insert(gates.end(), adder_top.begin(), adder_top.end());
+
+    return gates;
+}
+
 std::vector<SurgerySpec> MultiObsDemGenerator::preset_18obs() {
     std::vector<SurgerySpec> gates = {
         {0, 16, 0, 21}, {8, 16, 42, 21}, {1, 16, 84, 21}, {9, 16, 126, 21},

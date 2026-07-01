@@ -33,6 +33,12 @@ class MultiObsDemGenerator {
     static std::vector<SurgerySpec> preset_36obs();
     static std::vector<SurgerySpec> preset_48obs(int M = 32, int duration = 21);
     static std::vector<SurgerySpec> preset_64obs(int M = 22, int duration = 21);
+    // Two independent copies of preset_36obs() (obs 0-35 and obs 36-71, same round
+    // schedule as preset_36obs, ending at round 2058), followed by a 2*M idle gap
+    // with no surgeries, then one final reduction_adder (a new top-level carry at
+    // obs 72) combining each copy's adder_G operand group -- mirrors adder_G itself,
+    // just one level higher. Total observables: 73.
+    static std::vector<SurgerySpec> preset_72obs(int M = 21);
 
     static std::vector<SurgerySpec> parse_spec(const std::string& spec, int default_duration = 1);
 

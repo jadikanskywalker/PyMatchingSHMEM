@@ -21,7 +21,9 @@
 #include <vector>
 
 #include "pymatching/sparse_blossom/diagram/animation_main.h"
+#include "pymatching/sparse_blossom/driver/helpers/dem_generator.h"
 #include "pymatching/sparse_blossom/driver/helpers/fast_b8_reader.h"
+#include "pymatching/sparse_blossom/driver/helpers/graph_cache.h"
 #include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
 #include "pymatching/sparse_blossom/driver/user_graph.h"
 #include "stim.h"
@@ -33,7 +35,6 @@
 #include <fstream>
 #include "../config_parallel.h"
 #include "../diagram/mwpm_diagram.h"
-#include "pymatching/sparse_blossom/driver/helpers/dem_generator.h"
 #endif
 
 #ifdef USE_SHMEM
@@ -51,7 +52,8 @@ int main_predict(int argc, const char** argv) {
             "--out",
             "--out_format",
             "--dem",
-            "--enable_correlations"
+            "--enable_correlations",
+            "--graph_cache_path"
 #ifdef OUTPUT_DECODING_TIME
             ,
             "--num_repeats"
@@ -151,8 +153,39 @@ int main_predict(int argc, const char** argv) {
     }
 #endif
 
+    pm::UserGraph user_graph;
+    bool loaded_from_graph_cache = false;
+
+    const char* graph_cache_arg = stim::find_argument("--graph_cache_path", argc, argv);
+    std::string graph_cache_path = graph_cache_arg ? graph_cache_arg : "";
+
+    if (!graph_cache_path.empty()) {
+        FILE* gcache_check = fopen(graph_cache_path.c_str(), "rb");
+        if (gcache_check) {
+            fclose(gcache_check);
+            try {
+                user_graph = pm::read_user_graph_cache(
+                    graph_cache_path,
+                    enable_correlations
+#ifdef USE_THREADS
+                    , config_parallel::M
+#ifdef USE_SHMEM
+                    , (int)config_parallel::division_strategy
+#endif
+#endif
+                );
+                loaded_from_graph_cache = true;
+                std::cerr << "Loaded cached graph from " << graph_cache_path << std::endl;
+            } catch (const pm::GraphCacheMismatchError& ex) {
+                std::cerr << "Graph cache invalid for this run (" << ex.what()
+                           << "); rebuilding from DEM." << std::endl;
+            }
+        }
+    }
+
     stim::DetectorErrorModel dem;
 
+    if (!loaded_from_graph_cache) {
     // DEM generation path: build in-memory or load from cache
     const char* gen_code_arg = stim::find_argument("--gen_code", argc, argv);
     const char* dem_cache_arg = stim::find_argument("--dem_cache_path", argc, argv);
@@ -197,6 +230,7 @@ int main_predict(int argc, const char** argv) {
                 else if (preset == "36obs") surgeries = pm::MultiObsDemGenerator::preset_36obs();
                 else if (preset == "48obs") surgeries = pm::MultiObsDemGenerator::preset_48obs();
                 else if (preset == "64obs") surgeries = pm::MultiObsDemGenerator::preset_64obs();
+                else if (preset == "72obs") surgeries = pm::MultiObsDemGenerator::preset_72obs();
                 else throw std::invalid_argument("Unknown --gen_surgery_preset: " + preset);
             } else if (spec_arg) {
                 surgeries = pm::MultiObsDemGenerator::parse_spec(spec_arg, gen_surgery_dur);
@@ -231,27 +265,65 @@ int main_predict(int argc, const char** argv) {
         dem = stim::DetectorErrorModel::from_file(dem_file);
         fclose(dem_file);
     }
+    } // end if (!loaded_from_graph_cache) DEM acquisition
+
+    pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
+
+    if (!loaded_from_graph_cache) {
+        user_graph = pm::detector_error_model_to_user_graph(dem, enable_correlations, num_buckets);
+        if (!graph_cache_path.empty()) {
+            // Only one rank writes: every PE independently re-parses the same DEM and would
+            // otherwise fopen(..., "wb") + fwrite the same path concurrently, corrupting it
+            // (fopen("wb") truncates, so concurrent writers can interleave/clobber each other).
+#ifdef USE_SHMEM
+            if (shmem_my_pe() == 0) {
+#endif
+                pm::write_user_graph_cache(
+                    user_graph,
+                    graph_cache_path,
+                    enable_correlations
+#ifdef USE_THREADS
+                    , config_parallel::M
+#ifdef USE_SHMEM
+                    , (int)config_parallel::division_strategy
+#endif
+#endif
+                );
+                std::cerr << "Cached graph to " << graph_cache_path << std::endl;
+#ifdef USE_SHMEM
+            }
+#endif
+        }
+    }
+#ifdef USE_SHMEM
+    // Ranks can take visibly different amounts of wall-clock time to obtain user_graph
+    // (a cache read races the OS page cache / disk I/O independently per rank, unlike a
+    // fresh DEM parse which tends to cost about the same on every rank). DecodingUnit's
+    // constructor makes several collective/symmetric shmem_malloc calls; without this
+    // barrier, a rank that finishes early can race ahead into those collective calls
+    // before a slower rank has even opened the cache file, corrupting the symmetric heap.
+    shmem_barrier_all();
+#endif
 
     FILE* shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
-    size_t num_obs = dem.count_observables();
-    size_t num_detectors = dem.count_detectors();
+    size_t num_obs = user_graph.get_num_observables();
+    size_t num_detectors = user_graph.get_num_detectors();
     auto reader = stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>::make(
         shots_in, shots_in_format.id, 0, num_detectors, append_obs * num_obs);
     auto writer = stim::MeasureRecordWriter::make(predictions_out, predictions_out_format.id);
     writer->begin_result_type('L');
 
-    pm::weight_int num_buckets = pm::NUM_DISTINCT_WEIGHTS;
-
 #ifdef USE_THREADS
     pm::DecodingUnit decoding_unit(
         std::move(reader),
         std::move(writer),
-        dem,
+        std::move(user_graph),
         num_buckets,
         enable_correlations,
         enable_correlations
 #ifdef ENABLE_DRAW_FLAGS
         , draw_frames
+        , (loaded_from_graph_cache ? nullptr : &dem)
 #endif
     );
 #ifdef USE_SHMEM
@@ -265,11 +337,7 @@ int main_predict(int argc, const char** argv) {
 #endif
     }
 #else
-    auto mwpm = pm::detector_error_model_to_mwpm(
-        dem,
-        num_buckets,
-        /*ensure_search_flooder_included=*/enable_correlations,
-        /*enable_correlations=*/enable_correlations);
+    auto mwpm = user_graph.to_mwpm(num_buckets, /*ensure_search_graph_included=*/enable_correlations);
 
     stim::SparseShot sparse_shot;
     sparse_shot.clear();

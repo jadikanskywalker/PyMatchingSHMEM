@@ -35,13 +35,15 @@
 pm::DecodingUnit::DecodingUnit(
     std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
     std::unique_ptr<stim::MeasureRecordWriter> writer,
-    const stim::DetectorErrorModel& detector_error_model,
+    pm::UserGraph user_graph,
     pm::weight_int num_distinct_weights,
     bool ensure_search_flooder_included,
     bool enable_correlations
 #ifdef ENABLE_DRAW_FLAGS
     ,
     bool draw_frames
+    ,
+    const stim::DetectorErrorModel* dem_for_drawing
 #endif
     )
     : ensure_search_flooder_included(ensure_search_flooder_included),
@@ -55,8 +57,6 @@ pm::DecodingUnit::DecodingUnit(
     pid = shmem_my_pe();
 #endif
     // --- Create shared matching graph ---
-    auto user_graph =
-        pm::detector_error_model_to_user_graph(detector_error_model, enable_correlations, num_distinct_weights);
 #ifdef USE_SHMEM
     nodes_nelems_per_buffer = user_graph.nodes.size();
     node_ephemeral_fields_ptr = static_cast<DetectorNodeEphemeralFields*>(
@@ -116,8 +116,8 @@ pm::DecodingUnit::DecodingUnit(
     if (child_edges_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate symmetric blossom child buffer.");
     }
-    task_fusion_summary_size_per_task = sizeof(FusionSummary) + 
-                                        regions_matched_to_vb_nelems * sizeof(GraphFillRegion*) + 
+    task_fusion_summary_size_per_task = sizeof(FusionSummary) +
+                                        regions_matched_to_vb_nelems * sizeof(GraphFillRegion*) +
                                         (std::max(2, config_parallel::k) * regions_nelems_per_solver / 8); /* bit map in bytes (== nelems/64 * 8) */
     task_fusion_summary_ptr = static_cast<FusionSummary*>(shmem_malloc(task_fusion_summary_size_per_task * num_cross_rank_fusions * NUM_BUFFERS_PER_UNIT));
     if (task_status_ptr == nullptr || task_fusion_summary_ptr == nullptr) {
@@ -214,7 +214,12 @@ pm::DecodingUnit::DecodingUnit(
     build_solvers();
 #ifdef ENABLE_DRAW_FLAGS
     if (draw_frames) {
-        auto coords = pm::pick_coords_for_drawing_from_dem(detector_error_model, 20);
+        if (dem_for_drawing == nullptr) {
+            throw std::invalid_argument(
+                "--draw_frames requires the DEM to be available, but the graph was loaded from "
+                "--graph_cache_path instead of parsed fresh. Remove --draw_frames or drop the graph cache.");
+        }
+        auto coords = pm::pick_coords_for_drawing_from_dem(*dem_for_drawing, 20);
         for (auto& s : solvers)
             s->coords = coords;
 #ifdef USE_SHMEM

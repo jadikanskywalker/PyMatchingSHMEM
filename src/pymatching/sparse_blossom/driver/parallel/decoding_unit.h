@@ -32,6 +32,14 @@
 
 namespace pm {
 
+// Forward declared rather than #included: user_graph.h conditionally #includes this
+// header (to get SharedMatchingGraph), so a full #include here would cycle back before
+// UserGraph is declared. A forward declaration is sufficient since UserGraph only
+// appears by value in the DecodingUnit constructor's declaration; decoding_unit.cc
+// (the definition) and namespaced_main.cc (the call site) both #include user_graph.h
+// directly, giving them the complete type where it's actually needed.
+class UserGraph;
+
 #ifdef USE_SHMEM
 #define SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION 3
 
@@ -143,15 +151,20 @@ struct DecodingUnit {
 #endif
 
     // Initialization Functions
+    // dem_for_drawing is only consulted when draw_frames is true, to extract detector
+    // coordinates for visualization; it may be null when the graph was loaded from a
+    // binary graph cache (--graph_cache_path) rather than parsed fresh from a DEM, in
+    // which case passing draw_frames=true will throw.
     DecodingUnit(
         std::unique_ptr<stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>> reader,
         std::unique_ptr<stim::MeasureRecordWriter> writer,
-        const stim::DetectorErrorModel& detector_error_model,
+        pm::UserGraph user_graph,
         weight_int num_distinct_weights,
         bool ensure_search_flooder_included,
         bool enable_correlations
 #ifdef ENABLE_DRAW_FLAGS
         , bool draw_frames
+        , const stim::DetectorErrorModel* dem_for_drawing = nullptr
 #endif
         );
 
