@@ -39,6 +39,12 @@ class MultiObsDemGenerator {
     // obs 72) combining each copy's adder_G operand group -- mirrors adder_G itself,
     // just one level higher. Total observables: 73.
     static std::vector<SurgerySpec> preset_72obs(int M = 21);
+    // preset_36obs() repeated `repeats` times back-to-back in time, reusing the
+    // SAME 36 observables each time (no new observable indices -- stays safely
+    // under the 64-observable limit), with a 2*M idle gap (no surgeries) between
+    // repetitions. Purely a larger/longer test case for scaling benchmarks, not a
+    // new computation. Total observables: 36. Round period per repetition: 2058 + 2*M.
+    static std::vector<SurgerySpec> preset_36obs_repeated(int repeats = 4, int M = 21);
 
     static std::vector<SurgerySpec> parse_spec(const std::string& spec, int default_duration = 1);
 

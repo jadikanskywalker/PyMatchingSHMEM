@@ -231,6 +231,7 @@ int main_predict(int argc, const char** argv) {
                 else if (preset == "48obs") surgeries = pm::MultiObsDemGenerator::preset_48obs();
                 else if (preset == "64obs") surgeries = pm::MultiObsDemGenerator::preset_64obs();
                 else if (preset == "72obs") surgeries = pm::MultiObsDemGenerator::preset_72obs();
+                else if (preset == "36obsx4") surgeries = pm::MultiObsDemGenerator::preset_36obs_repeated(4);
                 else throw std::invalid_argument("Unknown --gen_surgery_preset: " + preset);
             } else if (spec_arg) {
                 surgeries = pm::MultiObsDemGenerator::parse_spec(spec_arg, gen_surgery_dur);

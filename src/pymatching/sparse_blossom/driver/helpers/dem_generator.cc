@@ -600,6 +600,20 @@ std::vector<SurgerySpec> MultiObsDemGenerator::preset_72obs(int M) {
     return gates;
 }
 
+std::vector<SurgerySpec> MultiObsDemGenerator::preset_36obs_repeated(int repeats, int M) {
+    int period = 2058 + 2 * M;  // one repetition's span + 2*M idle gap before the next
+    std::vector<SurgerySpec> gates;
+    for (int rep = 0; rep < repeats; ++rep) {
+        auto one = preset_36obs();
+        int round_offset = rep * period;
+        for (auto& g : one) {
+            g.start_round += round_offset;
+        }
+        gates.insert(gates.end(), one.begin(), one.end());
+    }
+    return gates;
+}
+
 std::vector<SurgerySpec> MultiObsDemGenerator::preset_18obs() {
     std::vector<SurgerySpec> gates = {
         {0, 16, 0, 21}, {8, 16, 42, 21}, {1, 16, 84, 21}, {9, 16, 126, 21},
