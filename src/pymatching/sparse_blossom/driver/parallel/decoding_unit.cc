@@ -254,6 +254,10 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
 #else
     const int p_offset = 0;
 #endif
+    // Unit-checkpointed extraction (see plans/profiling-reveals-that-thread-buzzing-milner.md): each
+    // chain fusion built below (config_parallel::L > 0 case) counts as one extra "thing to wait for"
+    // beyond the one true root, once extraction-queue draining is wired up to consume it.
+    std::vector<int> num_checkpoints_per_buffer(NUM_BUFFERS_PER_UNIT, 0);
     // Build a full fusion tree: less than 2*N tasks. Reserve to keep element addresses stable.
     for (int shot_container_id=0; shot_container_id < NUM_BUFFERS_PER_UNIT; shot_container_id++) {  // Lazy repeat per shot container -- CAN BE IMPROVED!
         auto& shot_container = shot_buffer->buffer[shot_container_id];
@@ -262,46 +266,108 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
         for (int task_id : my_partition_task_ids) {
             tasks.emplace_back(task_id + p_offset);
         }
-        int task_id = my_partition_task_ids.size();
-        // Save odd trailing task
-        int tail_idx = -1;
-        if (my_partition_task_ids.size() % 2) {
-            tail_idx = my_partition_task_ids.size() - 1;
-        }
-        // Add each level of fusions
-        int last_step_starts = 0;
-        int this_step_starts = task_id;
-        int start = 0;
-        int step = 2;
-        while (start < my_partition_task_ids.size() - 1) {
-            int counter = 0;
-            int i;
-            for (i = start; i < my_partition_task_ids.size() - 1; i += step) {
-                Task* left_child = &(tasks)[last_step_starts + 2 * counter];
-                int right_child_idx;
-                if (last_step_starts + 2 * counter + 1 < this_step_starts) {
-                    right_child_idx = last_step_starts + 2 * counter + 1;
-                } else {
-                    if (tail_idx >= 0) {  // fuse last one with tail
-                        right_child_idx = tail_idx;
-                        tail_idx = -1;
-                    } else {  // save tail
-                        tail_idx = last_step_starts + 2 * counter;
-                        break;
+        if (config_parallel::L <= 0) {
+            // Checkpointing disabled: today's balanced fusion tree, unchanged.
+            int task_id = my_partition_task_ids.size();
+            // Save odd trailing task
+            int tail_idx = -1;
+            if (my_partition_task_ids.size() % 2) {
+                tail_idx = my_partition_task_ids.size() - 1;
+            }
+            // Add each level of fusions
+            int last_step_starts = 0;
+            int this_step_starts = task_id;
+            int start = 0;
+            int step = 2;
+            while (start < my_partition_task_ids.size() - 1) {
+                int counter = 0;
+                int i;
+                for (i = start; i < my_partition_task_ids.size() - 1; i += step) {
+                    Task* left_child = &(tasks)[last_step_starts + 2 * counter];
+                    int right_child_idx;
+                    if (last_step_starts + 2 * counter + 1 < this_step_starts) {
+                        right_child_idx = last_step_starts + 2 * counter + 1;
+                    } else {
+                        if (tail_idx >= 0) {  // fuse last one with tail
+                            right_child_idx = tail_idx;
+                            tail_idx = -1;
+                        } else {  // save tail
+                            tail_idx = last_step_starts + 2 * counter;
+                            break;
+                        }
                     }
+                    Task* right_child = &(tasks)[right_child_idx];
+                    tasks.emplace_back(i + p_offset, left_child, right_child);
+                    ++task_id;
+                    ++counter;
                 }
-                Task* right_child = &(tasks)[right_child_idx];
-                tasks.emplace_back(i + p_offset, left_child, right_child);
-                ++task_id;
-                ++counter;
+                if (last_step_starts + 2 * counter < this_step_starts) {  // save tail
+                    tail_idx = last_step_starts + 2 * counter;
+                }
+                last_step_starts = this_step_starts;
+                this_step_starts = task_id;
+                start += step / 2;
+                step *= 2;
             }
-            if (last_step_starts + 2 * counter < this_step_starts) {  // save tail
-                tail_idx = last_step_starts + 2 * counter;
+        } else {
+            // Unit-checkpointed extraction (see plans/profiling-reveals-that-thread-buzzing-
+            // milner.md): a sequential chain, not a balanced tree. Each unit (L consecutive leaves,
+            // fewer for a ragged last unit) is built as its own small balanced subtree; unit roots
+            // are then chained: F1=fuse(U0,U1), F2=fuse(F1,U2), .... Every chain fusion is tagged
+            // is_extraction_checkpoint. Task::parent (set by the Task(vb,left,right) constructor
+            // below) makes each link's natural parent the next link, so the existing climb-to-parent
+            // logic in decode_shots() needs no special-casing to advance the chain.
+            //
+            // vb id (part, for shot.virtual_boundary_hits[] lookup) is the position-based "rightmost
+            // leaf index of the left operand" -- unique across the whole structure, matching how the
+            // original balanced-tree code numbers vbs by position.
+            //
+            // Solver id is a *different* thing: solvers[] is indexed by genuine partition (leaf) id,
+            // not by vb id. A fusion inherits a solver id from a descendant leaf (doesn't matter
+            // which -- all descendant partitions are dormant before their ancestor fusion begins);
+            // using a vb id directly as a solver id is exactly what vb_solver_offset exists to
+            // prevent (e.g. under OBS partitioning num_p_per_obs - 1 == num_vb_per_obs, so doing so
+            // segfaults). So every fusion's vb_solver_offset is set such that part + vb_solver_offset
+            // resolves to its left operand's own leftmost leaf -- a real partition id, transitively
+            // inherited all the way down to an actual leaf -- exactly the existing
+            // get_solver_id(t->part + t->vb_solver_offset, ...) pattern already used elsewhere for
+            // fusion solver lookups.
+            struct RangeInfo { Task* task; size_t leftmost; size_t rightmost; };
+            int L = config_parallel::L;
+            size_t n_leaves = my_partition_task_ids.size();
+            std::vector<RangeInfo> unit_roots;
+            for (size_t ustart = 0; ustart < n_leaves; ustart += (size_t)L) {
+                size_t count = std::min((size_t)L, n_leaves - ustart);
+                std::vector<RangeInfo> level;
+                for (size_t k = 0; k < count; ++k) level.push_back({&tasks[ustart + k], ustart + k, ustart + k});
+                while (level.size() > 1) {
+                    std::vector<RangeInfo> next_level;
+                    for (size_t k = 0; k + 1 < level.size(); k += 2) {
+                        const RangeInfo& L_op = level[k];
+                        const RangeInfo& R_op = level[k + 1];
+                        size_t vb_id = L_op.rightmost;
+                        tasks.emplace_back((int)vb_id + p_offset, L_op.task, R_op.task);
+                        tasks.back().vb_solver_offset = (int)L_op.leftmost - (int)vb_id;
+                        next_level.push_back({&tasks.back(), L_op.leftmost, R_op.rightmost});
+                    }
+                    if (level.size() % 2) next_level.push_back(level.back());
+                    level = std::move(next_level);
+                }
+                unit_roots.push_back(level[0]);
             }
-            last_step_starts = this_step_starts;
-            this_step_starts = task_id;
-            start += step / 2;
-            step *= 2;
+            RangeInfo chain = unit_roots[0];
+            for (size_t k = 1; k < unit_roots.size(); ++k) {
+                const RangeInfo& next_unit = unit_roots[k];
+                size_t vb_id = chain.rightmost;
+                tasks.emplace_back((int)vb_id + p_offset, chain.task, next_unit.task);
+                Task* fusion = &tasks.back();
+                fusion->vb_solver_offset = (int)chain.leftmost - (int)vb_id;
+                fusion->is_extraction_checkpoint = true;
+                ++num_checkpoints_per_buffer[shot_container_id];
+                chain = {fusion, chain.leftmost, next_unit.rightmost};
+            }
+            // If only one unit exists, no checkpoints were built (is_extraction_checkpoint stays
+            // false on every fusion) and this correctly falls back to plain whole-tree extraction.
         }
     }
     if (DEBUG) {
@@ -309,10 +375,15 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
         for (auto& buffer : shot_buffer->buffer) {
             std::cout << "Buffer" << std::endl;
             for (Task& t : buffer.tasks) {
-                std::cout << "--part: " << t.part << std::endl
+                std::cout << "--addr: " << &t << std::endl
+                        << "  part: " << t.part << std::endl
                         << "  vb_left: " << t.vb_left << std::endl
                         << "  vb_right: " << t.vb_right << std::endl
                         << "  is_fusion: " << t.is_fusion << std::endl
+                        << "  is_extraction_checkpoint: " << t.is_extraction_checkpoint << std::endl
+#ifdef USE_SHMEM
+                        << "  vb_solver_offset: " << t.vb_solver_offset << std::endl
+#endif
                         << "  child_bit: " << t.child_bit << std::endl
                         << "  left_child: " << t.left_child << std::endl
                         << "  right_child: " << t.right_child << std::endl
@@ -327,8 +398,11 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
     int my_partitions_end   = (int)my_partition_task_ids.back() + 1 + p_offset;
     for (int i=0; i < NUM_BUFFERS_PER_UNIT; ++i) {
         shot_buffer->buffer[i].cross_rank_tasks.reserve(2);
-        // ROUND always has exactly one chain top regardless of CRT count.
-        shot_buffer->buffer[i].num_task_roots = 1;
+        // ROUND always has exactly one chain top regardless of CRT count, plus one more "thing to
+        // wait for" per unit-checkpoint once extraction-queue draining is wired up to consume it
+        // (see num_checkpoints_per_buffer above). With L <= 0 this is always 0, so num_task_roots
+        // stays 1, unchanged from today.
+        shot_buffer->buffer[i].num_task_roots = 1 + num_checkpoints_per_buffer[i];
         shot_buffer->buffer[i].thread_results.assign(num_threads, pm::MatchingResult{});
         shot_buffer->buffer[i].num_roots_done.store(0, std::memory_order_relaxed);
         if (pid > 0) { // Add cross-rank fusion on left

@@ -2,7 +2,7 @@
 
 #include <limits>
 
-#define DEBUG 0 // 0 = none; 1 = full;
+#define DEBUG 1 // 0 = none; 1 = full;
 #define BARE_DEBUG 0
 
 #define ENABLE_DRAW_FLAGS
@@ -28,6 +28,10 @@
 namespace config_parallel {
     inline int M = std::numeric_limits<int>::max();
     inline bool obs_coors_included = false;
+    // Unit-checkpointed extraction (see plans/profiling-reveals-that-thread-buzzing-milner.md).
+    // L = 0 disables checkpointed extraction (today's whole-root balanced-tree behavior); else must
+    // be a power of 2, and is the number of partitions per extraction "unit".
+    inline int L = 0;
 #ifdef USE_SHMEM
     enum div_strgy { ROUND, OBS };
     inline int k = 1;

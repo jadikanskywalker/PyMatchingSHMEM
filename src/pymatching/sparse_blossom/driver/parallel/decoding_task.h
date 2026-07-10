@@ -111,6 +111,12 @@ struct Task : public TaskBase {
     Task* left_child{nullptr};
     Task* right_child{nullptr};
 
+    // Unit-checkpointed extraction (see plans/profiling-reveals-that-thread-buzzing-milner.md).
+    // Only meaningful when is_fusion == true. true iff this fusion is a link in a unit-checkpoint
+    // chain (built in build_tasks_for_round_partitioning when config_parallel::L > 0). Consumed by
+    // the extraction-queue logic added separately -- this field is purely a tag at construction time.
+    bool is_extraction_checkpoint{false};
+
 #ifdef USE_SHMEM
     // bool only_child{ false };
     int vb_solver_offset{ 0 }; // For OBS patch i, this is i (Because no vb between patches, we lose one vb index relative to partition index)
@@ -151,6 +157,7 @@ struct Task : public TaskBase {
         right_child = other.right_child;
         // parent is in TaskBase and moved by TaskBase(std::move(other))
         child_bit = other.child_bit;
+        is_extraction_checkpoint = other.is_extraction_checkpoint;
 #ifdef USE_SHMEM
         // seam_vb_slot = other.seam_vb_slot;
         left_obs_patch_id = other.left_obs_patch_id;
@@ -164,6 +171,7 @@ struct Task : public TaskBase {
         right_child = other.right_child;
         // parent is in TaskBase and moved by TaskBase::operator=(std::move(other))
         child_bit = other.child_bit;
+        is_extraction_checkpoint = other.is_extraction_checkpoint;
 #ifdef USE_SHMEM
         // seam_vb_slot = other.seam_vb_slot;
         left_obs_patch_id = other.left_obs_patch_id;
