@@ -29,6 +29,14 @@ namespace pm {
 
 #ifdef USE_SHMEM
 enum ShotStatus : uint64_t { READY, PUT_SUMMARY, PUT_RESULT, WROTE_RESULT };
+
+// Unit-checkpointed extraction (see plans/profiling-reveals-that-thread-buzzing-milner.md Design
+// §4): a self-describing extraction job posted by the winner of a checkpoint fusion. Self-describing
+// so any thread can process it regardless of which shot it's nominally working on.
+struct ExtractionJob {
+    Task* checkpoint;
+    int shot_container_id;
+};
 #endif
 
 // ShotContainer isolates everything needed to solve
@@ -57,6 +65,21 @@ struct ShotContainer {
     // Per-thread partial MatchingResult accumulator (indexed by omp thread id).
     // Sized to num_threads during build_tasks_*.
     std::vector<pm::MatchingResult> thread_results;
+
+    // Unit-checkpointed extraction queue (Design §4). Posting (rare, ~num_partitions/L per shot) is
+    // mutex-guarded; claiming (hot, up to ~2*num_partitions steal attempts per shot) is non-locking
+    // via a fetch_add cursor. extraction_jobs' capacity is reserved once in the constructor and never
+    // grown, so a claimer reading extraction_jobs[i] without the lock never races a reallocation.
+    std::mutex extraction_post_mutex;
+    std::vector<ExtractionJob> extraction_jobs;
+    alignas(64) std::atomic<size_t> extraction_posted_count{0};  // published (release) job count
+    alignas(64) std::atomic<size_t> extraction_claim_cursor{0};  // next unclaimed job index
+    // Gates ShotContainer reuse until every posted job has actually been executed (not just
+    // claimed) -- incremented on post, decremented once a claimed job finishes processing.
+    alignas(64) std::atomic<int> pending_extraction_jobs{0};
+
+    void post_extraction_job(Task* checkpoint, int shot_container_id);
+    ExtractionJob* try_claim_extraction_job();
 #endif
 
     std::vector<Task> tasks;  // Tasks handle dynamic fusion tree synchonization

@@ -38,7 +38,20 @@ ShotContainer::ShotContainer(
       i_solved_p(num_partitions, 0),
       i_solved_vb(num_virtual_boundaries, 0),
 #endif
-      res(num_observables_in) {}
+      res(num_observables_in)
+{
+#ifdef USE_SHMEM
+    // Upper bound on checkpoints any single PE could build: ceil(num_partitions / L) units means
+    // at most ceil(num_partitions / L) - 1 chain fusions get tagged is_extraction_checkpoint, so
+    // ceil(num_partitions / L) itself is a safe (off-by-one-conservative) reservation. Reserved once,
+    // up front, so extraction_jobs never reallocates during concurrent access. L <= 0 means
+    // checkpointing is disabled entirely (see config_parallel::L), so no jobs are ever posted.
+    if (config_parallel::L > 0) {
+        size_t num_units = (static_cast<size_t>(num_partitions) + config_parallel::L - 1) / config_parallel::L;
+        extraction_jobs.reserve(num_units);
+    }
+#endif
+}
 
 ShotContainer::ShotContainer(ShotContainer&& other) noexcept
     : sparse_shot(std::move(other.sparse_shot)),
@@ -51,11 +64,15 @@ ShotContainer::ShotContainer(ShotContainer&& other) noexcept
       i_solved_vb(std::move(other.i_solved_vb)),
       num_task_roots(other.num_task_roots),
       thread_results(std::move(other.thread_results)),
+      extraction_jobs(std::move(other.extraction_jobs)),
 #endif
       tasks(std::move(other.tasks))
 {
 #ifdef USE_SHMEM
     num_roots_done.store(other.num_roots_done.load());
+    extraction_posted_count.store(other.extraction_posted_count.load());
+    extraction_claim_cursor.store(other.extraction_claim_cursor.load());
+    pending_extraction_jobs.store(other.pending_extraction_jobs.load());
     cross_rank_tasks = std::move(other.cross_rank_tasks);
 #endif
 }
@@ -74,6 +91,10 @@ ShotContainer& ShotContainer::operator=(ShotContainer&& other) noexcept {
         num_task_roots = other.num_task_roots;
         num_roots_done.store(other.num_roots_done.load());
         thread_results = std::move(other.thread_results);
+        extraction_jobs = std::move(other.extraction_jobs);
+        extraction_posted_count.store(other.extraction_posted_count.load());
+        extraction_claim_cursor.store(other.extraction_claim_cursor.load());
+        pending_extraction_jobs.store(other.pending_extraction_jobs.load());
         cross_rank_tasks = std::move(other.cross_rank_tasks);
 #endif
     }
@@ -89,7 +110,44 @@ void ShotContainer::clear() {
         hits.clear();
     }
     res.reset();
+#ifdef USE_SHMEM
+    // Per-shot queue state, reset here to mirror partition_hits/virtual_boundary_hits/res above --
+    // called exactly when this container is about to be reused for the next shot, at which point
+    // the caller has already established pending_extraction_jobs == 0 (Design §4).
+    extraction_jobs.clear();
+    extraction_posted_count.store(0, std::memory_order_relaxed);
+    extraction_claim_cursor.store(0, std::memory_order_relaxed);
+    pending_extraction_jobs.store(0, std::memory_order_relaxed);
+#endif
 }
+
+#ifdef USE_SHMEM
+void ShotContainer::post_extraction_job(Task* checkpoint, int shot_container_id) {
+    // Incremented before the job is published (posted_count's release store below) so no thread
+    // can ever observe a claimable job that pending_extraction_jobs hasn't already counted.
+    pending_extraction_jobs.fetch_add(1, std::memory_order_acq_rel);
+    {
+        std::lock_guard<std::mutex> lock(extraction_post_mutex);
+        extraction_jobs.push_back({checkpoint, shot_container_id});
+    }
+    extraction_posted_count.fetch_add(1, std::memory_order_release);
+}
+
+ExtractionJob* ShotContainer::try_claim_extraction_job() {
+    size_t claimed = extraction_claim_cursor.load(std::memory_order_relaxed);
+    for (;;) {
+        size_t posted = extraction_posted_count.load(std::memory_order_acquire);
+        if (claimed >= posted) {
+            return nullptr;
+        }
+        if (extraction_claim_cursor.compare_exchange_weak(
+                claimed, claimed + 1, std::memory_order_acq_rel, std::memory_order_relaxed)) {
+            return &extraction_jobs[claimed];
+        }
+        // claimed was updated to the current cursor value by the failed CAS; retry.
+    }
+}
+#endif
 
 void ShotContainer::reset() {
     current_buffer_round.store(-1, std::memory_order_release);
