@@ -98,10 +98,11 @@ struct Task : public TaskBase {
     // for partition solves,
     //    status = id of last shot for which task was claimed
     // for fusions,
-    //    status = 0 (Unclaimed for current shot)
-    //             1 (Left child solved and tried to steal me first)
-    //             2 (Right child solved and tried to steal me first)
-    //             3 (Both children solved and second one who tried to steal me won)
+    //    status = number of children that have arrived so far this shot (0 = unclaimed). Every
+    //             child does the identical fetch_add(1); whoever's fetch_add returns N-1 (last of
+    //             N arrivals, N=2 for today's binary fusions) is the winner. Generalizes cleanly to
+    //             any future N-way fusion with no per-child bit-position bookkeeping, unlike the
+    //             fetch_or/child_bit scheme this replaced.
     // Thus, fusions require resetting status to 0 in mark_solved
     alignas(64) std::atomic<int64_t> status{0};
 
@@ -211,7 +212,11 @@ struct Task : public TaskBase {
     }
 
     // for partition leaf, val is the shot id
-    // for fusion parent, val is the child's child_bit
+    // for fusion parent, val is unused -- kept only for interface uniformity with the leaf-claim/
+    // CrossRankTask overloads of try_to_steal (see decoding_task.h Design §3 note on Task::status
+    // above). The fetch_add-based race needs no per-caller value the way the old fetch_or/child_bit
+    // scheme did: every child does the identical fetch_add(1), and whoever's fetch_add returns N-1
+    // (last of N arrivals) is the winner.
     bool try_to_steal(size_t val) override {
         if (!is_fusion) { // partition
             int64_t expected = static_cast<int64_t>(val) - 1;
@@ -222,12 +227,10 @@ struct Task : public TaskBase {
                 return true;
             }
 #endif
-            int64_t old = status.fetch_or(static_cast<int64_t>(val), std::memory_order_acq_rel);
-            if ((old | static_cast<int64_t>(val)) == 3) {
-                return old != 3;
-            } else {
-                return false;
-            }
+            (void)val;
+            constexpr int64_t N = 2; // ordinary binary fusion; generalizes to N>2 with no other change
+            int64_t old = status.fetch_add(1, std::memory_order_acq_rel);
+            return old == N - 1;
         }
     }
 
