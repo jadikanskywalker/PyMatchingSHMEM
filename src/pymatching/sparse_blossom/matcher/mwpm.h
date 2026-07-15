@@ -94,12 +94,23 @@ struct Mwpm {
     void unmatch_virtual_boundaries_between_partitions();
     void prepare_for_task(TaskBase* task, int shot_id);
 #endif
-    GraphFillRegion* pair_and_shatter_subblossoms_and_extract_matches(GraphFillRegion* region, MatchingResult& res);
-    MatchingResult shatter_blossom_and_extract_matches(GraphFillRegion* region);
+    // destroyed, when non-null, receives every GraphFillRegion* freed during the call (not just the
+    // one passed in -- a single shatter can free the passed-in region, its match.region, and every
+    // paired sub-blossom recursively). Used by DecodingUnit::divide_vb (see
+    // plans/this-is-a-broader-purrfect-crystal.md Design §6) to prune stale pointers out of a
+    // fusion's regions_matched_to_virtual_boundary after dividing. Defaults to nullptr and is purely
+    // additive -- every existing call site is unaffected.
+    GraphFillRegion* pair_and_shatter_subblossoms_and_extract_matches(
+        GraphFillRegion* region, MatchingResult& res, std::vector<GraphFillRegion*>* destroyed = nullptr);
+    MatchingResult shatter_blossom_and_extract_matches(
+        GraphFillRegion* region, std::vector<GraphFillRegion*>* destroyed = nullptr);
 
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_match_edges(
-        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges);
-    void shatter_blossom_and_extract_match_edges(GraphFillRegion* region, std::vector<CompressedEdge>& match_edges);
+        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges,
+        std::vector<GraphFillRegion*>* destroyed = nullptr);
+    void shatter_blossom_and_extract_match_edges(
+        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges,
+        std::vector<GraphFillRegion*>* destroyed = nullptr);
     void extract_paths_from_match_edges(
         const std::vector<CompressedEdge>& match_edges, uint8_t* obs_begin_ptr, pm::total_weight_int& weight);
 

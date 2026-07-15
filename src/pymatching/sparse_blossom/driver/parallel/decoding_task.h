@@ -45,7 +45,11 @@ struct TaskBase {
     int vb_right;
     bool is_fusion;
 
+#ifdef USE_SHMEM
+    // SHMEM-only: whether this node's parent in the chain is a CrossRankTask. Meaningless without
+    // cross-rank fusion, so not worth carrying under plain USE_THREADS.
     bool is_cross_rank_fusion;
+#endif
 
     // Parent in the task chain: local Task fusion or CrossRankTask above this node.
     // nullptr means this node is the chain top (a task graph root).
@@ -55,7 +59,12 @@ struct TaskBase {
     std::vector<pm::GraphFillRegion*> regions_matched_to_virtual_boundary;
 
     TaskBase(int part, int vb_left, int vb_right, bool is_fusion, bool is_cross_rank_fusion)
-        : part(part), vb_left(vb_left), vb_right(vb_right), is_fusion(is_fusion), is_cross_rank_fusion(is_cross_rank_fusion) {
+        : part(part), vb_left(vb_left), vb_right(vb_right), is_fusion(is_fusion)
+#ifdef USE_SHMEM
+        , is_cross_rank_fusion(is_cross_rank_fusion)
+#endif
+    {
+        (void)is_cross_rank_fusion;
         if (is_fusion)
             vb_marker = part;
         else
@@ -72,7 +81,10 @@ struct TaskBase {
     TaskBase(TaskBase&& other) noexcept
         : part(other.part), vb_marker(other.vb_marker),
           vb_left(other.vb_left), vb_right(other.vb_right),
-          is_fusion(other.is_fusion), is_cross_rank_fusion(other.is_cross_rank_fusion),
+          is_fusion(other.is_fusion),
+#ifdef USE_SHMEM
+          is_cross_rank_fusion(other.is_cross_rank_fusion),
+#endif
           parent(other.parent),
           regions_to_unmatch(std::move(other.regions_to_unmatch)),
           regions_matched_to_virtual_boundary(std::move(other.regions_matched_to_virtual_boundary))
@@ -84,7 +96,9 @@ struct TaskBase {
         vb_left = other.vb_left;
         vb_right = other.vb_right;
         is_fusion = other.is_fusion;
+#ifdef USE_SHMEM
         is_cross_rank_fusion = other.is_cross_rank_fusion;
+#endif
         parent = other.parent;
         other.parent = nullptr;
         regions_to_unmatch = std::move(other.regions_to_unmatch);
@@ -112,15 +126,23 @@ struct Task : public TaskBase {
     Task* left_child{nullptr};
     Task* right_child{nullptr};
 
-    // Unit-checkpointed extraction (see plans/profiling-reveals-that-thread-buzzing-milner.md).
-    // Only meaningful when is_fusion == true. true iff this fusion is a link in a unit-checkpoint
-    // chain (built in build_tasks_for_round_partitioning when config_parallel::L > 0). Consumed by
-    // the extraction-queue logic added separately -- this field is purely a tag at construction time.
-    bool is_extraction_checkpoint{false};
+    // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md). Only meaningful
+    // when is_fusion == true. Two roles, mutually exclusive:
+    //   is_extraction_unit_connector: this fusion joins two already-independent units/unit-groups
+    //     (a chain link when extract_preemptively, or an inter-unit fusion in the balanced-over-units
+    //     tree otherwise). Its vb must be divided before either side is touched independently.
+    //   is_extraction_unit_root: this is the top of one standalone extraction unit (a raw leaf, or the
+    //     root of a unit's own internal balanced subtree) -- where posting/recursion stops.
+    // Both purely tags at construction time, consumed by the extraction-queue logic added separately.
+    bool is_extraction_unit_connector{false};
+    bool is_extraction_unit_root{false};
 
-#ifdef USE_SHMEM
     // bool only_child{ false };
+    // Every fusion inherits a real leaf partition id (part + vb_solver_offset) for solver lookup --
+    // needed unconditionally since build_tasks_for_round_partitioning's chain-construction branch
+    // (config_parallel::extract_preemptively) sets this regardless of USE_SHMEM.
     int vb_solver_offset{ 0 }; // For OBS patch i, this is i (Because no vb between patches, we lose one vb index relative to partition index)
+#ifdef USE_SHMEM
     // int seam_vb_slot{ -1 };             // virtual_boundaries slot index for this seam's VB nodes
     int left_obs_patch_id{-1};   // For OBS local seam tasks: left obs patch
     int right_obs_patch_id{-1};  // For OBS local seam tasks: right obs patch
@@ -158,7 +180,9 @@ struct Task : public TaskBase {
         right_child = other.right_child;
         // parent is in TaskBase and moved by TaskBase(std::move(other))
         child_bit = other.child_bit;
-        is_extraction_checkpoint = other.is_extraction_checkpoint;
+        is_extraction_unit_connector = other.is_extraction_unit_connector;
+        is_extraction_unit_root = other.is_extraction_unit_root;
+        vb_solver_offset = other.vb_solver_offset;
 #ifdef USE_SHMEM
         // seam_vb_slot = other.seam_vb_slot;
         left_obs_patch_id = other.left_obs_patch_id;
@@ -172,7 +196,9 @@ struct Task : public TaskBase {
         right_child = other.right_child;
         // parent is in TaskBase and moved by TaskBase::operator=(std::move(other))
         child_bit = other.child_bit;
-        is_extraction_checkpoint = other.is_extraction_checkpoint;
+        is_extraction_unit_connector = other.is_extraction_unit_connector;
+        is_extraction_unit_root = other.is_extraction_unit_root;
+        vb_solver_offset = other.vb_solver_offset;
 #ifdef USE_SHMEM
         // seam_vb_slot = other.seam_vb_slot;
         left_obs_patch_id = other.left_obs_patch_id;
@@ -389,7 +415,7 @@ public:
     };
 
 
-    /* Sychnorization Methods */
+    /* Sychronization Methods */
     // Should be called on PE who solved fusion
     void mark_solved(size_t my_pid) override {
 #ifdef SCOREP_USER_ENABLE

@@ -63,7 +63,8 @@ int main_predict(int argc, const char** argv) {
             "--rounds_per_partition",
             "--use_threads",
             "--obs_coors_included",
-            "--extraction_unit_size"
+            "--extraction_unit_size",
+            "--extract_preemptively"
 #endif
 #ifdef ENABLE_DRAW_FLAGS
             ,
@@ -133,10 +134,8 @@ int main_predict(int argc, const char** argv) {
     config_parallel::M = stim::find_int64_argument("--rounds_per_partition", 10, 1, INT64_MAX, argc, argv);
     config_parallel::obs_coors_included = stim::find_bool_argument("--obs_coors_included", argc, argv);
     bool use_threads = stim::find_bool_argument("--use_threads", argc, argv);
-    config_parallel::L = (int)stim::find_int64_argument("--extraction_unit_size", 0, 0, INT64_MAX, argc, argv);
-    if (config_parallel::L != 0 && (config_parallel::L & (config_parallel::L - 1)) != 0) {
-        throw std::invalid_argument("--extraction_unit_size (L) must be a power of 2.");
-    }
+    config_parallel::extract_preemptively = stim::find_bool_argument("--extract_preemptively", argc, argv);
+    config_parallel::L = (int)stim::find_int64_argument("--extraction_unit_size", 1, 1, INT64_MAX, argc, argv);
 // ===============
 #endif
 #ifdef ENABLE_DRAW_FLAGS

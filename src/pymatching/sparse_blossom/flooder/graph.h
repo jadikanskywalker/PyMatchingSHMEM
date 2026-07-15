@@ -126,11 +126,16 @@ struct SharedMatchingGraph {
     size_t num_virtual_boundaries;
     size_t num_rounds;
 
+    // Per-partition/per-vb node index ranges (inclusive), scanned once from node_part_id. Purely a
+    // function of node_part_id/num_partitions/num_virtual_boundaries -- nothing SHMEM-specific about
+    // the logic itself (see construct_partition_vb_bounds's implementation) -- needed under plain
+    // USE_THREADS too now that unit-checkpointed extraction's divide_vb needs a vb's node range.
+    std::vector<std::pair<size_t, size_t>> partition_bounds;
+    std::vector<std::pair<size_t, size_t>> vb_bounds;
+
 #ifdef USE_SHMEM
     size_t num_obs_patches{ 0 };
     size_t p_per_obs_patch, vb_per_obs_patch;
-    std::vector<std::pair<size_t, size_t>> partition_bounds;
-    std::vector<std::pair<size_t, size_t>> vb_bounds;
 #endif
 
     SharedMatchingGraph();
@@ -147,9 +152,7 @@ struct SharedMatchingGraph {
 #endif
     );
 
-#ifdef USE_SHMEM
     void construct_partition_vb_bounds();
-#endif
 };
 #endif
 

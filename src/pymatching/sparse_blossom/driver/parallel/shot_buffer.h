@@ -17,6 +17,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <fstream>
 #include <mutex>
 #include <vector>
 
@@ -29,15 +30,20 @@ namespace pm {
 
 #ifdef USE_SHMEM
 enum ShotStatus : uint64_t { READY, PUT_SUMMARY, PUT_RESULT, WROTE_RESULT };
-
-// Unit-checkpointed extraction (see plans/profiling-reveals-that-thread-buzzing-milner.md Design
-// §4): a self-describing extraction job posted by the winner of a checkpoint fusion. Self-describing
-// so any thread can process it regardless of which shot it's nominally working on.
-struct ExtractionJob {
-    Task* checkpoint;
-    int shot_container_id;
-};
 #endif
+
+// Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md Design §3): a
+// self-describing extraction job, unconditional across build configs since checkpoint chains and
+// post-hoc chunking both run under plain USE_THREADS too, not just USE_SHMEM. Any thread can process
+// a job regardless of which shot/root it's nominally working on. A job always names a fully-closed
+// unit subtree -- closed meaning both its boundaries (if any) have already been "divided" (see
+// DecodingUnit::divide_vb) before the job is posted, so it's safe to extract independently, by any
+// thread, at any time. Cross-rank fusion extraction is handled inline by the resolving thread
+// instead of going through this queue (posting would only add overhead there).
+struct ExtractionJob {
+    int shot_container_id;
+    Task* subtree_root;
+};
 
 // ShotContainer isolates everything needed to solve
 // a single shot in parallel.
@@ -53,11 +59,9 @@ struct ShotContainer {
     pm::MatchingResult obs_mask;
     pm::ExtendedMatchingResult res;
 
-#ifdef USE_SHMEM
-    std::vector<uint8_t> i_solved_p;
-    std::vector<uint8_t> i_solved_vb;
-
-    // Set during build_tasks_*; count of chain tops (parent==nullptr) across tasks + CRTs.
+    // Set during build_tasks_*; count of chain tops (parent==nullptr) across tasks + CRTs. Always 1
+    // for round-partitioning (a single true root regardless of extract_preemptively/L -- checkpoint
+    // chain-links are never independent roots, see this-is-a-broader-purrfect-crystal.md Design §2).
     int num_task_roots{0};
     // Incremented by each thread when it finishes all its roots for a shot.
     // Last thread (cumulative count reaches num_task_roots) resets to 0 and writes result.
@@ -66,7 +70,7 @@ struct ShotContainer {
     // Sized to num_threads during build_tasks_*.
     std::vector<pm::MatchingResult> thread_results;
 
-    // Unit-checkpointed extraction queue (Design §4). Posting (rare, ~num_partitions/L per shot) is
+    // Unit-checkpointed extraction queue (Design §3-6). Posting (rare, ~num_partitions/L per shot) is
     // mutex-guarded; claiming (hot, up to ~2*num_partitions steal attempts per shot) is non-locking
     // via a fetch_add cursor. extraction_jobs' capacity is reserved once in the constructor and never
     // grown, so a claimer reading extraction_jobs[i] without the lock never races a reallocation.
@@ -78,9 +82,11 @@ struct ShotContainer {
     // claimed) -- incremented on post, decremented once a claimed job finishes processing.
     alignas(64) std::atomic<int> pending_extraction_jobs{0};
 
-    void post_extraction_job(Task* checkpoint, int shot_container_id);
+    // t_out: optional per-thread debug stream; when DEBUG and non-null, logs the vb/task address of
+    // the job being posted (see this-is-a-broader-purrfect-crystal.md) so posting/draining can be
+    // traced end-to-end alongside decode_shots()'s existing per-thread traces.
+    void post_extraction_job(const ExtractionJob& job, std::ofstream* t_out = nullptr);
     ExtractionJob* try_claim_extraction_job();
-#endif
 
     std::vector<Task> tasks;  // Tasks handle dynamic fusion tree synchonization
 #ifdef USE_SHMEM

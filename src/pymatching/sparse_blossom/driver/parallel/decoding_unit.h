@@ -191,8 +191,60 @@ struct DecodingUnit {
     // Decoding Functions
 #ifdef USE_SHMEM
     void send_solution_to_remote_pe(size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &task, std::ofstream &t_out);
-    bool get_solution_from_remote_pe(size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &task, std::ofstream &t_out, std::vector<uint64_t>& hitsref); // returns whether solving is necessary
+    bool get_solution_from_remote_pe(
+        size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &task, std::ofstream &t_out,
+        std::vector<uint64_t>& hitsref); // returns whether solving is necessary
+    // Extracts a cross-rank fusion's received window immediately, inline on the resolving thread --
+    // not queued (queuing would only add overhead here, since this thread is already doing the
+    // work). Computes the received partition/vb range directly from crt's own fields
+    // (division-strategy-aware), then extracts it the same way an ordinary leaf/vb would be.
+    // Assumes crt->part's own vb has already been divided (see divide_vb) by the caller.
+    void extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, CrossRankTask& crt, int tid);
 #endif
+
+    // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md). Universal
+    // across build configs -- both plain USE_THREADS and USE_SHMEM+USE_THREADS builds post to and
+    // drain the same job queue.
+
+    // Separates the two subgraphs joined at vb_id: loops every node in graph.vb_bounds[vb_id]
+    // (not just ones with "hits" -- a blossom can span the vb without either side registering a hit
+    // exactly there) and shatters/extracts any non-null region_that_arrived_top. Synchronous/inline,
+    // never queued -- this is what makes it safe to later post an extraction job for either side
+    // independently: once divided, neither side's regions reference across the boundary anymore.
+    // anchor_partition must be a genuine descendant leaf id (caller's own vb_solver_offset-resolved
+    // partition, not an arbitrary fixed choice -- see definition for why).
+    // prune_target: the fusion task whose vb this is (Task* for a checkpoint, CrossRankTask* for a
+    // cross-rank fusion -- both derive from TaskBase). A blossom shattered here can span farther than
+    // this vb and destroy a region still referenced in prune_target->regions_matched_to_virtual_
+    // boundary (kept there for a LATER setup() call to consume) -- passing prune_target makes divide_vb
+    // prune any now-stale pointers out of that list afterward. Pass nullptr only when no future
+    // setup() call will ever read that list again (post-hoc chunking, run after the whole tree is
+    // already fully solved).
+    // t_out: optional per-thread debug stream; when DEBUG and non-null, logs the vb being divided and
+    // the anchor/prune_target so divide timing can be traced end-to-end (see this-is-a-broader-
+    // purrfect-crystal.md).
+    void divide_vb(ShotContainer& shot, int shot_container_id, int vb_id, int anchor_partition, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
+
+    // Shatter+extract an entire unit subtree (job.subtree_root), accumulating into
+    // shot.thread_results[tid] (bit-packed) or shot.res directly (extended observables, under omp
+    // critical). Any solver from this job's shot_container_id block works as a scratch accumulator
+    // (region ownership is globally node-indexed, not solver-private) -- tid must be the
+    // *processing* thread's own, since get_solver_id depends on tid under plain USE_THREADS.
+    // Decrements pending_extraction_jobs when done. Precondition: subtree_root is a fully-closed
+    // unit (see divide_vb) -- every vb this subtree touches on its way to being posted has already
+    // been divided by the poster, so no vb-boundary handling is needed inside the walk itself...
+    // except each internal fusion's *own* vb, still extracted here via the simpler (pre-existing,
+    // not yet fixed -- tracked separately) virtual_boundary_hits-based approach.
+    // t_out: optional per-thread debug stream; when DEBUG and non-null, logs the vb/task address of
+    // the job being processed.
+    void process_extraction_job(ShotContainer& shot, const ExtractionJob& job, int tid, std::ofstream* t_out = nullptr);
+
+    // Non-preemptive (extract_preemptively == false) post-hoc chunking: a single top-down walk of the
+    // balanced-over-units tree, driven entirely by the extraction-role tags (see
+    // decoding_task.h/build_tasks_for_round_partitioning) -- no dynamic leaf-counting needed. At a
+    // unit root, post it and return; at a connector, divide its own vb inline (making both children
+    // independently safe to post/recurse into) and recurse into both.
+    void post_hoc_chunk_and_post(Task* node, ShotContainer& shot, int shot_container_id, int tid, std::ofstream* t_out = nullptr);
 
     void decode_shots();
     void reset();

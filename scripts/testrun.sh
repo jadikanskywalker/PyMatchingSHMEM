@@ -25,7 +25,7 @@ fi
 
 
 serial_build=~/PyMatchingSHMEM/build/pymatching
-threads_build=~/PyMatchingSHMEM/build_threads_release/pymatching
+threads_build=~/PyMatchingSHMEM/build_threads/pymatching
 echo "serial_build:  $serial_build"
 echo "threads_build: $threads_build"
 
@@ -130,6 +130,7 @@ $threads_build predict \
     --out_format 01 \
     --rounds_per_partition $M \
     --use_threads \
+    --extraction_unit_size 2 \
     --draw_frames \
     > log_parallel.out
 end_parallel=$(date +%s)

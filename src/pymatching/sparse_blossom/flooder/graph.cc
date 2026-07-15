@@ -263,12 +263,9 @@ pm::SharedMatchingGraph::SharedMatchingGraph(
     vb_per_obs_patch(vb_per_obs_patch_)
 #endif
 {
-#ifdef USE_SHMEM
     construct_partition_vb_bounds();
-#endif
 }
 
-#ifdef USE_SHMEM
 // Scans node_part_id sequentially and fills partition_bounds / vb_bounds.
 // Handles four transition types:
 //   p → vb : close current partition, open new vb entry
@@ -327,7 +324,6 @@ void pm::SharedMatchingGraph::construct_partition_vb_bounds() {
         std::cout << "\n" << std::flush;
     }
 }
-#endif
 #endif
 
 }  // namespace pm

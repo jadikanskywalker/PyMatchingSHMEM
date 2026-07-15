@@ -2,8 +2,12 @@
 
 #include <limits>
 
-#define DEBUG 1 // 0 = none; 1 = full;
-#define BARE_DEBUG 0
+#define DEBUG 1 // set for full debugging
+#if !DEBUG
+#define BARE_DEBUG 0 // set for only per shot prints
+#else
+#define BARE_DEBUG 1
+#endif
 
 #define ENABLE_DRAW_FLAGS
 
@@ -28,10 +32,15 @@
 namespace config_parallel {
     inline int M = std::numeric_limits<int>::max();
     inline bool obs_coors_included = false;
-    // Unit-checkpointed extraction (see plans/profiling-reveals-that-thread-buzzing-milner.md).
-    // L = 0 disables checkpointed extraction (today's whole-root balanced-tree behavior); else must
-    // be a power of 2, and is the number of partitions per extraction "unit".
-    inline int L = 0;
+    // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md). L is always
+    // active and is the number of partitions per extraction job/unit; must be >= 1 (no power-of-2
+    // constraint -- the per-unit balanced-subtree/post-hoc chunking logic handles ragged unit sizes).
+    inline int L = 1;
+    // Selects tree shape / job-posting timing, decoupled from L's value: false (default) builds the
+    // ordinary balanced fusion tree and defers all extraction-job posting until the whole root is
+    // solved, then recursively chunks it into <=L-leaf jobs; true builds the chain-of-unit-subtrees
+    // and posts one job per checkpoint incrementally, as each one resolves during decode.
+    inline bool extract_preemptively = false;
 #ifdef USE_SHMEM
     enum div_strgy { ROUND, OBS };
     inline int k = 1;
