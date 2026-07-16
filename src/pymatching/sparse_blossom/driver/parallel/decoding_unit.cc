@@ -143,10 +143,8 @@ pm::DecodingUnit::DecodingUnit(
         std::cout << "DEBUG: Setting num threads\n" << std::flush;
     }
     int max_threads = omp_get_max_threads();
-#ifdef USE_SHMEM
-    // std::cout << "NOTE: For now, ensure the number of partitions and the number of ranks is a power of 2. This ensures clean divisions in the task tree.\n" << std::flush;
-    num_partition_units = 1; // FIX THIS??
     num_solvers_per_buffer = graph.num_partitions;
+#ifdef USE_SHMEM
     // --- Populate my_partition_task_ids ---
     if (config_parallel::division_strategy == config_parallel::OBS) {
         const int base         = (int)graph.num_obs_patches / n_pes;
@@ -168,13 +166,11 @@ pm::DecodingUnit::DecodingUnit(
     }
     num_threads = std::min(max_threads, (int)my_partition_task_ids.size());
 #else
-    num_threads =
-        (max_threads > graph.num_partitions) ? graph.num_partitions : max_threads;  // max num_partitions threads
-    num_partition_units = graph.num_partitions / num_threads + (graph.num_partitions % num_threads > 0);
-    num_solvers_per_buffer = num_threads*num_partition_units;
     for (int i = 0; i < graph.num_partitions; ++i) {
         my_partition_task_ids.push_back(i);
     }
+    num_threads =
+        (max_threads > graph.num_partitions) ? graph.num_partitions : max_threads;  // max num_partitions threadss
 #endif
     std::cout << "graph.num_partitions = " << graph.num_partitions << "; num_threads: " << num_threads << std::endl;
     omp_set_num_threads(num_threads);
@@ -268,14 +264,19 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
     // balanced-tree code numbers vbs by position.
     //
     // Solver id is a *different* thing: solvers[] is indexed by genuine partition (leaf) id, not by vb
-    // id. A fusion inherits a solver id from a descendant leaf (doesn't matter which -- all descendant
-    // partitions are dormant before their ancestor fusion begins); using a vb id directly as a solver
-    // id is exactly what vb_solver_offset exists to prevent (e.g. under OBS partitioning
-    // num_p_per_obs - 1 == num_vb_per_obs, so doing so segfaults). So every fusion's vb_solver_offset
-    // is set such that part + vb_solver_offset resolves to its left operand's own leftmost leaf -- a
-    // real partition id, transitively inherited all the way down to an actual leaf -- exactly the
-    // existing get_solver_id(t->part + t->vb_solver_offset, ...) pattern used elsewhere for fusion
-    // solver lookups.
+    // id -- but for ROUND partitioning specifically, a vb id (rightmost leaf of the left operand) IS
+    // already a genuine, in-range partition id, so no adjustment is needed: vb_solver_offset stays at
+    // its default 0 for every round-based fusion, and get_solver_id(t->part + t->vb_solver_offset, ...)
+    // uses t->part directly. (vb_solver_offset only exists for OBS partitioning, where a vb id and a
+    // partition id occupy different, non-1:1 ranges -- num_p_per_obs - 1 == num_vb_per_obs -- so OBS
+    // sets it explicitly elsewhere, equal to the observable id, to remap into partition-id space.)
+    //
+    // This also matters for correctness, not just indexing: since a fusion's own solver id must be
+    // *some partition within its own subtree* for Arena safety (see GraphFlooder::create_blossom and
+    // this-is-a-broader-purrfect-crystal.md), always resolving to the vb's own position (rather than,
+    // e.g., always collapsing back to the chain's original leftmost leaf) keeps a preemptive chain's
+    // later links from reusing an earlier link's solver after that earlier unit has already been
+    // divided off and posted for concurrent extraction.
     struct RangeInfo { Task* task; size_t leftmost; size_t rightmost; };
     // Build a full fusion tree: less than 2*N tasks. Reserve to keep element addresses stable.
     for (int shot_container_id=0; shot_container_id < NUM_BUFFERS_PER_UNIT; shot_container_id++) {  // Lazy repeat per shot container -- CAN BE IMPROVED!
@@ -298,7 +299,6 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                     size_t vb_id = L_op.rightmost;
                     tasks.emplace_back((int)vb_id + p_offset, L_op.task, R_op.task);
                     Task* fusion = &tasks.back();
-                    fusion->vb_solver_offset = (int)L_op.leftmost - (int)vb_id;
                     if (tag_connector) fusion->is_extraction_unit_connector = true;
                     next_level.push_back({fusion, L_op.leftmost, R_op.rightmost});
                 }
@@ -328,8 +328,17 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                 size_t vb_id = chain.rightmost;
                 tasks.emplace_back((int)vb_id + p_offset, chain.task, next_unit.task);
                 Task* fusion = &tasks.back();
-                fusion->vb_solver_offset = (int)chain.leftmost - (int)vb_id;
                 fusion->is_extraction_unit_connector = true;
+                if (k > 1) {
+                    // chain.task is the previous chain-link fusion, not a raw leaf: its own vb
+                    // (chain.task->part) was already divided and its left/older unit posted for
+                    // (possibly concurrent) extraction by the time THIS fusion resolves. Restrict
+                    // vb_left so this fusion's flooding can never grow back into that now-separate
+                    // unit -- the Task(vb, left, right) constructor otherwise inherits
+                    // left_child->vb_left unconditionally, which for a chain link still spans all
+                    // the way back to the very first unit's own original vb_left.
+                    fusion->vb_left = chain.task->part;
+                }
                 chain = {fusion, chain.leftmost, next_unit.rightmost};
             }
             // If only one unit exists, no connectors were built -- unit_roots[0].task is already
@@ -1446,7 +1455,7 @@ void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t s
     }
 
     int anchor = (p_hi >= p_lo) ? p_lo : 0;
-    auto& solver = *solvers[get_solver_id(shot_container_id, anchor, tid)];
+    auto& solver = *solvers[get_solver_id(shot_container_id, anchor)];
     bool extended = shot.num_observables > sizeof(pm::obs_int) * 8;
     pm::MatchingResult local_res{};
     auto do_walk = [&]() {
@@ -1481,7 +1490,7 @@ void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, int
     // fixed anchor can collide with whichever solver this thread is legitimately still using for
     // its own in-flight work at this exact moment -- a real, previously-hit crash.
     auto& vb_bounds = graph.vb_bounds[vb_id];
-    auto& solver = *solvers[get_solver_id(shot_container_id, anchor_partition, tid)];
+    auto& solver = *solvers[get_solver_id(shot_container_id, anchor_partition)];
     bool extended = shot.num_observables > sizeof(pm::obs_int) * 8;
     // A blossom shattered here can span farther than this vb and include a region still referenced
     // in prune_target->regions_matched_to_virtual_boundary (propagated forward for a LATER setup()
@@ -1524,14 +1533,14 @@ void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, int
 void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, const ExtractionJob& job, int tid, std::ofstream* t_out) {
     Task* root = job.subtree_root;
     if (DEBUG && t_out) {
-        *t_out << "  PROCESS_JOB vb=" << root->part << " task=" << static_cast<void*>(root)
-               << std::endl << std::flush;
+        *t_out << "  PROCESS_JOB " << (root->is_fusion ? "vb=" : "p=") << root->part
+               << " task=" << static_cast<void*>(root) << std::endl << std::flush;
     }
     // Anchor on the subtree's own (vb_solver_offset-resolved) leaf id, matching the existing
     // fusion-solver-lookup pattern -- any solver from this shot_container_id block would work
     // (region ownership is globally node-indexed, not solver-private).
     int anchor = root->part + root->vb_solver_offset;
-    auto& solver = *solvers[get_solver_id(job.shot_container_id, anchor, tid)];
+    auto& solver = *solvers[get_solver_id(job.shot_container_id, anchor)];
     bool extended = shot.num_observables > sizeof(pm::obs_int) * 8;
     pm::MatchingResult local_res{};
 
@@ -1553,8 +1562,6 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, const Extract
     };
 
     if (extended) {
-        // No synchronization needed: process_extraction_job only ever runs inside the single-threaded
-        // self-drain loop for round-partitioning (num_task_roots == 1) -- see Design §10.
         do_walk();
         solver.extract_paths_from_match_edges(solver.flooder.match_edges, shot.res.obs_crossed.data(), shot.res.weight);
         solver.flooder.match_edges.clear();
@@ -1609,6 +1616,19 @@ void pm::DecodingUnit::decode_shots() {
         SCOREP_USER_REGION_DEFINE(shot_iteration);
 #endif
         const int tid = omp_get_thread_num();
+#if NUM_BUFFERS_PER_UNIT == 1
+        // Idle-helper participation gate (see this-is-a-broader-purrfect-crystal.md Design §11 and
+        // i-see-here-s-the-delegated-pelican.md): bounds how many threads ever spin on the extraction
+        // queue at once to roughly the number of extraction units that could ever exist, so idle
+        // threads for a small job don't pay any contention cost at all. Strided (not a tid < N
+        // prefix) so helper duty doesn't concentrate on the low-tid threads that also own the next
+        // shot's earliest static-leaf partitions. Pure function of already-fixed values (num_threads,
+        // graph.num_partitions, config_parallel::L) -- identical, deterministic result on every thread.
+        const int num_extraction_units =
+            ((int)graph.num_partitions + config_parallel::L - 1) / config_parallel::L;  // ceil
+        const int helper_stride = std::max(1, (int)num_threads / std::max(1, num_extraction_units));
+        if (DEBUG && tid == 0) std::cout << "helper_stride: " << helper_stride << std::endl;
+#endif
         std::ofstream t_out;
         if (BARE_DEBUG || DEBUG) {
             std::string t_out_dir = "out_parallel/";
@@ -1632,6 +1652,7 @@ void pm::DecodingUnit::decode_shots() {
         // in practice at most one thread ends up with a non-empty list per shot.
         struct RootInfo { Task* task; int solver_id; };
         std::vector<RootInfo> roots_i_solved;
+        bool i_solved_last_root = false;
         try {
             while (true) {
                 if (BARE_DEBUG) {
@@ -1680,7 +1701,7 @@ void pm::DecodingUnit::decode_shots() {
                 Task* t = &shot.tasks[my_partition_task_ids[tid]];
                 size_t next_p_inc = num_threads; // cannot inc by two for 1 threads --- does not work for odd
                 size_t next_p_id = tid+next_p_inc;
-                int solver_id = get_solver_id(shot_container_id, t->part, tid);
+                int solver_id = get_solver_id(shot_container_id, t->part);
                 if (DEBUG) t_out << "solvers[" << solver_id << "]\n";
                 bool stolen = t->try_to_steal(shot_buffer_round);
                 roots_i_solved.clear();
@@ -1749,13 +1770,13 @@ void pm::DecodingUnit::decode_shots() {
                         Task* local_parent = static_cast<Task*>(t->parent);
                         bool iamleft = t->child_bit == 1;
                         Task* sibling = (iamleft) ? local_parent->right_child : local_parent->left_child;
-                        solver_id = get_solver_id(shot_container_id, local_parent->part + local_parent->vb_solver_offset, tid);
+                        solver_id = get_solver_id(shot_container_id, local_parent->part + local_parent->vb_solver_offset);
                         if (DEBUG) t_out << "    t->parent->part=" << local_parent->part << "  t->parent->vb_solver_offset=" << local_parent->vb_solver_offset << "\n" << std::flush;
                         stolen = local_parent->try_to_steal(t->child_bit);
                         t = local_parent;
                         // Try to steal sibling or descendent of sibling
                         if (!stolen && !sibling->is_fusion) {
-                            solver_id = get_solver_id(shot_container_id, sibling->part, tid);
+                            solver_id = get_solver_id(shot_container_id, sibling->part);
                             stolen = sibling->try_to_steal(shot_buffer_round);
                             t = sibling;
                         }
@@ -1766,7 +1787,7 @@ void pm::DecodingUnit::decode_shots() {
                     }
                     while (!stolen && next_p_id < my_partition_task_ids.size()) {
                         t = &shot.tasks[my_partition_task_ids[next_p_id]];
-                        solver_id = get_solver_id(shot_container_id, t->part, tid);
+                        solver_id = get_solver_id(shot_container_id, t->part);
                         stolen = t->try_to_steal(shot_buffer_round);
                         next_p_id += next_p_inc;
                     }
@@ -1894,57 +1915,114 @@ void pm::DecodingUnit::decode_shots() {
                     // for (auto* crt : crts_i_handled) crt->wait_until_done(pid, shot_buffer_round);
                     // if (BARE_DEBUG) t_out << "    all done" << std::endl << std::flush;
 #endif
-
-                    // Drain this shot's entire extraction queue before checking completion.
-                    // Airtight for round-partitioning without needing the (separately tracked)
-                    // idle/leave loop: num_task_roots is always 1, so exactly one thread reaches
-                    // this point per shot, and every job-posting site above runs on this same
-                    // thread's own climb/CRT-handling path strictly before this loop -- nothing can
-                    // post a new job for this shot after the drain starts.
-                    while (ExtractionJob* job = shot.try_claim_extraction_job()) {
-                        process_extraction_job(shot, *job, tid, &t_out);
-                    }
-
                     // Last thread (cumulative count == num_task_roots) combines and writes.
                     int n_my = (int)roots_i_solved.size();
                     int prev = shot.num_roots_done.fetch_add(n_my, std::memory_order_acq_rel);
                     if (prev + n_my == shot.num_task_roots) {
-                        // Negative-weight correction: a whole-graph constant
-                        // (graph.negative_weight_*_set), identical across every solver, folded in
-                        // exactly once per shot here -- any solver works (see process_extraction_job).
-                        auto& any_solver = *solvers[get_solver_id(shot_container_id, 0, tid)];
-                        if (shot.num_observables > sizeof(pm::obs_int) * 8) {
-                            if (!any_solver.flooder.negative_weight_detection_events.empty()) {
-                                pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
-                                    any_solver, any_solver.flooder.negative_weight_detection_events);
-                                any_solver.extract_paths_from_match_edges(
-                                    any_solver.flooder.match_edges, shot.res.obs_crossed.data(), shot.res.weight);
-                                any_solver.flooder.match_edges.clear();
-                            }
-                            for (auto& obs : any_solver.flooder.negative_weight_observables)
-                                *(shot.res.obs_crossed.data() + obs) ^= 1;
-                            shot.res.weight += any_solver.flooder.negative_weight_sum;
-                        } else {
-                            pm::MatchingResult combined{};
-                            for (int ti = 0; ti < num_threads; ++ti) {
-                                combined += shot.thread_results[ti];
-                                shot.thread_results[ti] = {}; // reset
-                            }
-                            if (!any_solver.flooder.negative_weight_detection_events.empty()) {
-                                combined += pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
-                                    any_solver, any_solver.flooder.negative_weight_detection_events);
-                            }
-                            combined.obs_mask ^= any_solver.flooder.negative_weight_obs_mask;
-                            combined.weight   += any_solver.flooder.negative_weight_sum;
-                            if (DEBUG) t_out << "   combined obs_mask: " << combined.obs_mask << std::endl << std::flush;
-                            pm::fill_bit_vector_from_obs_mask(
-                                combined.obs_mask, shot.res.obs_crossed.data(), shot.num_observables);
-                            shot.res.weight = combined.weight;
-                        }
-                        // Reset before unlocking: prevents next-shot threads racing on this counter.
-                        shot.num_roots_done.store(0, std::memory_order_release);
-                        shot_buffer->write_result_and_get_next_shot(shot_container_id, graph.node_part_id);
+                        i_solved_last_root = true;
                     }
+                }
+#if NUM_BUFFERS_PER_UNIT == 1
+                // This thread's own static leaf stride is exhausted without ever reaching a local
+                // root this shot -- help drain the extraction queue instead of idling until the
+                // shot completes (real parallel extraction, not just the single root-reaching
+                // thread's own serial drain; also a stress test for extraction-job independence).
+                // Not attempted for NUM_BUFFERS_PER_UNIT > 1: there, an idle thread has a genuine
+                // choice (keep helping this shot vs. advance into the next shot's data) that this
+                // mechanism doesn't address -- see profiling-reveals-...milner.md §7's
+                // active_workers/floor mechanism for that, separate future work.
+                //
+                // Plain busy-spin, not .wait()/.notify() -- deliberately: a spin loop always re-reads
+                // the current value, so there's no "asleep" state to miss a wakeup from (see
+                // i-see-here-s-the-delegated-pelican.md for the three wait/notify bugs this replaces).
+                // Gated to a strided subset of threads (tid % helper_stride == 0) so the number of
+                // threads simultaneously spinning on these shared atomics is bounded by how many
+                // extraction units could ever exist, not by how many threads happen to be idle --
+                // profiling showed naive spinning on a shared atomic scales badly at high thread
+                // counts. Strided (not a contiguous tid < N prefix) so helper duty doesn't
+                // concentrate on the low-tid threads that also own the next shot's earliest
+                // partitions -- most threads never enter this loop at all and are immediately free
+                // for the next shot the moment current_buffer_round advances.
+                if (tid % helper_stride == 0) {
+                    while (true) {
+                        if (ExtractionJob* job = shot.try_claim_extraction_job()) {
+                            process_extraction_job(shot, *job, tid, &t_out);
+                            continue;
+                        }
+                        // Generation check: with NUM_BUFFERS_PER_UNIT == 1, this shot_container gets
+                        // reused in place for the next round the moment it fully completes
+                        // (ShotContainer::clear() resets extraction_jobs/extraction_posted_count/
+                        // extraction_claim_cursor; num_roots_done is reset separately just before
+                        // that). A thread that's lagging (e.g. lost every sibling-steal race this
+                        // round) can reach this loop after some *other* thread already finished this
+                        // round entirely and moved the container on to a newer one -- in that case
+                        // num_roots_done/extraction_posted_count no longer even belong to this
+                        // thread's round, so continuing to spin on them is unsafe (races the next
+                        // round's own posts/resets). Bail: this round is already done without this
+                        // thread's help, exactly as if it had helped and finished.
+                        if (shot.num_roots_done.load(std::memory_order_acquire) == shot.num_task_roots
+                            || shot.current_buffer_round.load(std::memory_order_acquire) != shot_buffer_round) {
+                            break;
+                        }
+                    }
+                }
+#else
+                // Drain this shot's entire extraction queue before checking completion.
+                // num_task_roots is always 1, so exactly one thread reaches this point per shot,
+                // and every job-posting site above runs on this same thread's own climb/CRT-
+                // handling path strictly before this loop -- nothing can post a new job for this
+                // shot after the drain starts.
+                while (ExtractionJob* job = shot.try_claim_extraction_job()) {
+                    process_extraction_job(shot, *job, tid, &t_out);
+                }
+#endif
+                if (i_solved_last_root) {
+                    i_solved_last_root = false;
+                    // Idle-helper threads (above) may still be concurrently draining -- the loop just
+                    // above returning empty only proves nothing is left to *claim*, not that every
+                    // claimed job has *finished*. Spin for that too before proceeding: write_result_
+                    // and_get_next_shot's ShotContainer::clear() must never run concurrently with a
+                    // still-in-flight process_extraction_job call. Plain busy-spin (this thread is
+                    // never cross-round-stale -- it's the one causing the round to complete -- so no
+                    // generation check needed); bounded by however long the last in-flight
+                    // process_extraction_job calls, if any, take to finish, typically negligible.
+                    while (shot.pending_extraction_jobs.load(std::memory_order_acquire) != 0) {
+                    }
+                    // Negative-weight correction: a whole-graph constant
+                    // (graph.negative_weight_*_set), identical across every solver, folded in
+                    // exactly once per shot here -- any solver works (see process_extraction_job).
+                    auto& any_solver = *solvers[get_solver_id(shot_container_id, 0)];
+                    if (shot.num_observables > sizeof(pm::obs_int) * 8) {
+                        if (!any_solver.flooder.negative_weight_detection_events.empty()) {
+                            pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
+                                any_solver, any_solver.flooder.negative_weight_detection_events);
+                            any_solver.extract_paths_from_match_edges(
+                                any_solver.flooder.match_edges, shot.res.obs_crossed.data(), shot.res.weight);
+                            any_solver.flooder.match_edges.clear();
+                        }
+                        for (auto& obs : any_solver.flooder.negative_weight_observables)
+                            *(shot.res.obs_crossed.data() + obs) ^= 1;
+                        shot.res.weight += any_solver.flooder.negative_weight_sum;
+                    } else {
+                        pm::MatchingResult combined{};
+                        for (int ti = 0; ti < num_threads; ++ti) {
+                            combined += shot.thread_results[ti];
+                            shot.thread_results[ti] = {}; // reset
+                        }
+                        if (!any_solver.flooder.negative_weight_detection_events.empty()) {
+                            combined += pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
+                                any_solver, any_solver.flooder.negative_weight_detection_events);
+                        }
+                        combined.obs_mask ^= any_solver.flooder.negative_weight_obs_mask;
+                        combined.weight   += any_solver.flooder.negative_weight_sum;
+                        if (DEBUG) t_out << "   combined obs_mask: " << combined.obs_mask << std::endl << std::flush;
+                        pm::fill_bit_vector_from_obs_mask(
+                            combined.obs_mask, shot.res.obs_crossed.data(), shot.num_observables);
+                        shot.res.weight = combined.weight;
+                    }
+                    // Reset before unlocking: prevents next-shot threads racing on this counter.
+                    shot.num_roots_done.store(0, std::memory_order_release);
+                    shot_buffer->write_result_and_get_next_shot(shot_container_id, graph.node_part_id);
                 }
 // #ifdef PROFILE_OMP_BARRIERS
 //                 #pragma omp barrier

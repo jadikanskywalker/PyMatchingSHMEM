@@ -14,8 +14,8 @@ thisThreads=$2
 source ~/.bash_profile
 conda activate pymatching
 
-threads_build=~/PyMatchingSHMEM/build_threads_release/pymatching
-sos_build=~/PyMatchingSHMEM/build_sos/pymatching
+threads_build=~/PyMatchingSHMEM/build_threads/pymatching
+# sos_build=~/PyMatchingSHMEM/build_sos/pymatching
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close
 export OMP_NUM_THREADS=$thisThreads
@@ -23,14 +23,15 @@ export OMP_NUM_THREADS=$thisThreads
 
 start=$(date +%s)
 $threads_build predict \
-    --dem error_model.dem \
-    --in detection_events.b8 \
+    --dem ../error_model.dem \
+    --in ../detection_events.b8 \
     --in_format b8 \
-    --out predicted_obs_flips.01 \
+    --out ../predicted_obs_flips.01 \
     --out_format 01 \
     --rounds_per_partition $thisM \
     --use_threads \
-    --num_repeats 10
+    --num_repeats 10 \
+    --extraction_unit_size 8
 
 # $SWHOME/sos_1.5_scalable/bin/oshrun  \
 #     -n 1 \

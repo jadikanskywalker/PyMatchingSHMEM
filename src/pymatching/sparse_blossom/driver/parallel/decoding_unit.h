@@ -73,7 +73,7 @@ struct DecodingUnit {
 
     // Solvers
     size_t num_threads;
-    size_t num_partition_units;
+    // size_t num_partition_units;
     size_t num_solvers_per_buffer;
     std::vector<std::shared_ptr<Mwpm>> solvers;
 
@@ -177,14 +177,9 @@ struct DecodingUnit {
 
     void build_solvers();
 
-    inline int get_solver_id(int shot_container_id, int partition, int tid=0) 
+    inline int get_solver_id(int shot_container_id, int partition)
     {
-#ifdef USE_SHMEM
         return num_solvers_per_buffer * shot_container_id + partition;
-#else
-        int partition_unit = partition / num_threads;
-        return num_solvers_per_buffer * shot_container_id + num_threads*partition_unit + tid;
-#endif
     }
 
 

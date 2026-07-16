@@ -151,12 +151,6 @@ void GraphFlooder::do_region_created_at_empty_detector_node(GraphFillRegion& reg
     detector_node.wrapped_radius_cached = 0;
 #endif
     region.shell_area.push_back(&detector_node);
-    // #ifdef USE_THREADS
-    //     if (DEBUG) {
-    //         // std::cout << "    region created at detector node " << &detector_node << std::endl;
-    //         debug_validate_region_nodes(region, graph.nodes, active_partitions);
-    //     }
-    // #endif
     reschedule_events_at_detector_node(detector_node);
 }
 
@@ -585,12 +579,21 @@ MwpmEvent GraphFlooder::do_blossom_shattering(GraphFillRegion& region) {
 }
 
 GraphFillRegion* GraphFlooder::create_blossom(std::vector<RegionEdge>& contained_regions) {
-    auto blossom_region = region_arena.alloc_default_constructed();
 #ifdef USE_THREADS
-    // std::cout << "constructed blossom " << blossom_region << " owner_arena=" << blossom_region->owner_arena << std::endl << std::flush;
-    blossom_region->owner_arena = &region_arena;
-    // std::cout << "set blossom " << blossom_region << " owner_arena=" << blossom_region->owner_arena << std::endl << std::flush;
+    // Attribute the blossom to a child's owner_arena, not this solver's own region_arena: the
+    // solver running this fusion step is not necessarily related to which partition(s) the
+    // blossom's own regions actually came from (a fusion's flooding can collide with still-alive
+    // regions left over from either child's own, already-completed solve). A blossom always has
+    // at least one child, so contained_regions[0] is always valid. This keeps every region's
+    // owner_arena confined to the task subtree that actually created it, which is what makes
+    // Arena::del() safe to call from any thread without synchronizing `available` -- see
+    // this-is-a-broader-purrfect-crystal.md for the full argument.
+    auto* target_arena = contained_regions[0].region->owner_arena;
+    auto blossom_region = target_arena->alloc_default_constructed();
+    blossom_region->owner_arena = target_arena;
     blossom_region->rotating_buffer_idx = rotating_buffer_idx;
+#else
+    auto blossom_region = region_arena.alloc_default_constructed();
 #endif
     blossom_region->radius = VaryingCT::growing_varying_with_zero_distance_at_time(queue.cur_time);
     blossom_region->blossom_children = std::move(contained_regions);

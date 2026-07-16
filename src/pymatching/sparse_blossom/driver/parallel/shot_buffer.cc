@@ -108,7 +108,7 @@ void ShotContainer::clear() {
 
 void ShotContainer::post_extraction_job(const ExtractionJob& job, std::ofstream* t_out) {
     if (DEBUG && t_out) {
-        *t_out << "  POST_JOB vb=" << job.subtree_root->part
+        *t_out << "  POST_JOB " << (job.subtree_root->is_fusion ? "vb=" : "p=") << job.subtree_root->part
                << " task=" << job.subtree_root << std::endl << std::flush;
     }
     // Incremented before the job is published (posted_count's release store below) so no thread

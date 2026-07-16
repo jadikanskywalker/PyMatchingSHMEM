@@ -50,7 +50,7 @@ task=rotated_memory_x
 p=0.$p_dec
 
 serial_build=~/PyMatchingSHMEM/build/pymatching
-threads_build=~/PyMatchingSHMEM/build_threads_release/pymatching
+threads_build=~/PyMatchingSHMEM/build_threads/pymatching
 echo "serial_build:  $serial_build" >> bench.out
 echo "threads_build: $threads_build"
 
@@ -74,19 +74,6 @@ if $build_circuit; then
         --obs_out_format 01 \
         --out detection_events.b8 \
         --out_format b8
-
-    # rerun serial for new circuit
-    # start_serial=$(date +%s)
-    # $serial_build predict \
-    #     --dem error_model.dem \
-    #     --in detection_events.b8 \
-    #     --in_format b8 \
-    #     --out predicted_obs_flips.01 \
-    #     --out_format 01 \
-    #     > log_0.out
-    # end_serial=$(date +%s)
-    # serial_time=$((end_serial - start_serial))
-    # echo "0: $serial_time seconds"
 fi
 
 for ((m=0; m<${#M[@]}; m++ )); do
@@ -95,9 +82,10 @@ for ((m=0; m<${#M[@]}; m++ )); do
     echo "M: $thisM"
     for ((i=0; i<${#threads[@]}; i++ )); do
         thisThreads=${threads[$i]}
-
+        mkdir log_M${thisM}_${thisThreads}threads
         sbatch \
-            --output=log_M${thisM}_${thisThreads}threads.out \
+            --chdir=log_M${thisM}_${thisThreads}threads \
+            --output=../log_M${thisM}_${thisThreads}threads.out \
             ~/PyMatchingSHMEM/scripts/benchmark_call.sh $thisM $thisThreads
     done
 done
