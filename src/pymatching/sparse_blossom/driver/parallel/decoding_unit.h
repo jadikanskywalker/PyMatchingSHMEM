@@ -194,7 +194,7 @@ struct DecodingUnit {
     // work). Computes the received partition/vb range directly from crt's own fields
     // (division-strategy-aware), then extracts it the same way an ordinary leaf/vb would be.
     // Assumes crt->part's own vb has already been divided (see divide_vb) by the caller.
-    void extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, CrossRankTask& crt, int tid);
+    void extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, CrossRankTask& crt, int tid, std::ofstream* t_out = nullptr);
 #endif
 
     // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md). Universal

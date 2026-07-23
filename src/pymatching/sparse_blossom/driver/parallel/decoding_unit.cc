@@ -16,6 +16,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <omp.h>
 #include <set>
 #include <vector>
@@ -239,6 +240,64 @@ pm::DecodingUnit::~DecodingUnit() {
 #endif
 }
 
+namespace {
+// Shared by build_tasks_for_round_partitioning() and build_tasks_for_obs_patch_partitioning() --
+// see the extraction-unit design comment at the top of build_tasks_for_round_partitioning() for the
+// full rationale (unit-checkpointed extraction, is_extraction_unit_root/connector tagging).
+struct RangeInfo { Task* task; size_t leftmost; size_t rightmost; };
+
+// Pairs adjacent entries of `level`, carrying an odd one forward to the next level, until one root
+// remains. Used both for each unit's own internal subtree (raw leaves in `level`,
+// tag_connector=false) and for combining units into a balanced tree (unit roots in `level`,
+// tag_connector=true). `on_fusion`, if given, is called right after each new fusion Task is
+// constructed with (fusion, vb_id) -- vb_id is the *local* position (relative to whatever range
+// `level` covers), letting a caller set fields the Task(vb, left, right) constructor doesn't default
+// correctly on its own (OBS partitioning's vb_marker/vb_solver_offset; round partitioning needs no
+// callback, since its constructor defaults -- vb_marker=part, vb_solver_offset=0 -- are already
+// correct).
+RangeInfo pair_up(
+    std::vector<Task>& tasks, int p_offset, std::vector<RangeInfo> level, bool tag_connector,
+    const std::function<void(Task*, size_t)>& on_fusion = {}) {
+    while (level.size() > 1) {
+        std::vector<RangeInfo> next_level;
+        for (size_t k = 0; k + 1 < level.size(); k += 2) {
+            const RangeInfo& L_op = level[k];
+            const RangeInfo& R_op = level[k + 1];
+            size_t vb_id = L_op.rightmost;
+            tasks.emplace_back((int)vb_id + p_offset, L_op.task, R_op.task);
+            Task* fusion = &tasks.back();
+            if (tag_connector) fusion->is_extraction_unit_connector = true;
+            if (on_fusion) on_fusion(fusion, vb_id);
+            next_level.push_back({fusion, L_op.leftmost, R_op.rightmost});
+        }
+        if (level.size() % 2) next_level.push_back(level.back());
+        level = std::move(next_level);
+    }
+    return level[0];
+}
+
+// Groups `n_leaves` consecutive leaves starting at tasks[leaf_base_idx] into L-sized units, builds
+// each as its own balanced subtree (via pair_up, tag_connector=false), and tags each unit's root
+// is_extraction_unit_root. Returns the unit roots, left for the caller to combine (a balanced tree
+// for non-preemptive extraction, or a sequential chain for preemptive -- see
+// build_tasks_for_round_partitioning for both).
+std::vector<RangeInfo> build_extraction_units(
+    std::vector<Task>& tasks, int p_offset, size_t leaf_base_idx, size_t n_leaves, int L,
+    const std::function<void(Task*, size_t)>& on_fusion = {}) {
+    std::vector<RangeInfo> unit_roots;
+    for (size_t ustart = 0; ustart < n_leaves; ustart += (size_t)L) {
+        size_t count = std::min((size_t)L, n_leaves - ustart);
+        std::vector<RangeInfo> level;
+        for (size_t k = 0; k < count; ++k)
+            level.push_back({&tasks[leaf_base_idx + ustart + k], ustart + k, ustart + k});
+        RangeInfo unit_root = pair_up(tasks, p_offset, std::move(level), /*tag_connector=*/false, on_fusion);
+        unit_root.task->is_extraction_unit_root = true;
+        unit_roots.push_back(unit_root);
+    }
+    return unit_roots;
+}
+}  // namespace
+
 // Builds balanced fusion tree assuming round-based partitioning
 void pm::DecodingUnit::build_tasks_for_round_partitioning() {
     if (my_partition_task_ids.empty()) return;
@@ -277,7 +336,6 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
     // e.g., always collapsing back to the chain's original leftmost leaf) keeps a preemptive chain's
     // later links from reusing an earlier link's solver after that earlier unit has already been
     // divided off and posted for concurrent extraction.
-    struct RangeInfo { Task* task; size_t leftmost; size_t rightmost; };
     // Build a full fusion tree: less than 2*N tasks. Reserve to keep element addresses stable.
     for (int shot_container_id=0; shot_container_id < NUM_BUFFERS_PER_UNIT; shot_container_id++) {  // Lazy repeat per shot container -- CAN BE IMPROVED!
         auto& shot_container = shot_buffer->buffer[shot_container_id];
@@ -286,39 +344,11 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
         for (int task_id : my_partition_task_ids) {
             tasks.emplace_back(task_id + p_offset);
         }
-        // Pairs adjacent entries of `level`, carrying an odd one forward to the next level, until one
-        // root remains -- the shared balanced-pairing algorithm used both for each unit's own internal
-        // subtree (raw leaves in `level`, tag_connector=false) and for combining units into a balanced
-        // tree (unit roots in `level`, tag_connector=true, non-preemptive only).
-        auto pair_up = [&](std::vector<RangeInfo> level, bool tag_connector) -> RangeInfo {
-            while (level.size() > 1) {
-                std::vector<RangeInfo> next_level;
-                for (size_t k = 0; k + 1 < level.size(); k += 2) {
-                    const RangeInfo& L_op = level[k];
-                    const RangeInfo& R_op = level[k + 1];
-                    size_t vb_id = L_op.rightmost;
-                    tasks.emplace_back((int)vb_id + p_offset, L_op.task, R_op.task);
-                    Task* fusion = &tasks.back();
-                    if (tag_connector) fusion->is_extraction_unit_connector = true;
-                    next_level.push_back({fusion, L_op.leftmost, R_op.rightmost});
-                }
-                if (level.size() % 2) next_level.push_back(level.back());
-                level = std::move(next_level);
-            }
-            return level[0];
-        };
 
         int L = config_parallel::L;
         size_t n_leaves = my_partition_task_ids.size();
-        std::vector<RangeInfo> unit_roots;
-        for (size_t ustart = 0; ustart < n_leaves; ustart += (size_t)L) {
-            size_t count = std::min((size_t)L, n_leaves - ustart);
-            std::vector<RangeInfo> level;
-            for (size_t k = 0; k < count; ++k) level.push_back({&tasks[ustart + k], ustart + k, ustart + k});
-            RangeInfo unit_root = pair_up(std::move(level), /*tag_connector=*/false);
-            unit_root.task->is_extraction_unit_root = true;
-            unit_roots.push_back(unit_root);
-        }
+        std::vector<RangeInfo> unit_roots =
+            build_extraction_units(tasks, p_offset, /*leaf_base_idx=*/0, n_leaves, L);
 
         if (config_parallel::extract_preemptively) {
             // Sequential chain over unit_roots.
@@ -346,7 +376,7 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
         } else {
             // Balanced tree over unit_roots -- same pair_up algorithm, one level higher. If only one
             // unit exists, pair_up is a no-op (returns unit_roots[0] unchanged, no task created).
-            pair_up(unit_roots, /*tag_connector=*/true);
+            pair_up(tasks, p_offset, unit_roots, /*tag_connector=*/true);
         }
     }
     if (DEBUG) {
@@ -571,47 +601,27 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             for (int lp = 0; lp < K_p; ++lp)
                 tasks.emplace_back(obs_p_offset + lp, lp - 1, lp);
 
-            int task_id = K_p;
-            int tail_idx = -1;
-            if (K_p % 2) tail_idx = K_p - 1;
-
-            int last_step_starts = 0;
-            int this_step_starts = task_id;
-            int start = 0;
-            int step  = 2;
-            while (start < K_p - 1) {
-                int counter = 0;
-                int i;
-                for (i = start; i < K_p - 1; i += step) {
-                    Task* left_child = &tasks[tree_start + last_step_starts + 2 * counter];
-                    int right_child_idx;
-                    if (last_step_starts + 2 * counter + 1 < this_step_starts) {
-                        right_child_idx = last_step_starts + 2 * counter + 1;
-                    } else {
-                        if (tail_idx >= 0) {
-                            right_child_idx = tail_idx;
-                            tail_idx = -1;
-                        } else {
-                            tail_idx = last_step_starts + 2 * counter;
-                            break;
-                        }
-                    }
-                    Task* right_child = &tasks[tree_start + right_child_idx];
-                    tasks.emplace_back(obs_vb_offset + i, left_child, right_child);
-                    tasks.back().vb_marker = i;
-                    tasks.back().vb_solver_offset = lo + my_obs_start;
-                    ++task_id;
-                    ++counter;
-                }
-                if (last_step_starts + 2 * counter < this_step_starts)
-                    tail_idx = last_step_starts + 2 * counter;
-                last_step_starts = this_step_starts;
-                this_step_starts = task_id;
-                start += step / 2;
-                step  *= 2;
-            }
-
-            obs_roots[lo] = &tasks.back();
+            // Unit-checkpointed extraction: group this observable's own K_p leaves into
+            // extraction_unit_size-sized units (build_extraction_units tags each unit root
+            // is_extraction_unit_root), then combine unit roots into a balanced tree
+            // (pair_up(..., tag_connector=true) tags every inter-unit fusion
+            // is_extraction_unit_connector) -- same shared machinery round partitioning uses, applied
+            // once per locally-owned observable. `on_fusion` restores this observable's own vb_marker
+            // (the *local*, position-only vb id -- matches DetectorNode::vb, see decoding_task.h's
+            // vb_marker comment) and vb_solver_offset (o, remapping a local vb id into obs o's own
+            // partition-id space) on every fusion, since the shared pair_up's own defaults
+            // (vb_marker=part, vb_solver_offset=0) are only correct for round partitioning, where vb
+            // ids and partition ids share one space -- OBS's per-patch vb/partition spaces don't line
+            // up 1:1 (K_vb == K_p - 1), so both fields need this explicit remap.
+            auto on_fusion = [&](Task* fusion, size_t vb_id) {
+                fusion->vb_marker = (int)vb_id;
+                fusion->vb_solver_offset = o;
+            };
+            std::vector<RangeInfo> unit_roots = build_extraction_units(
+                tasks, obs_vb_offset, /*leaf_base_idx=*/tree_start, (size_t)K_p,
+                config_parallel::L, on_fusion);
+            RangeInfo obs_root = pair_up(tasks, obs_vb_offset, unit_roots, /*tag_connector=*/true, on_fusion);
+            obs_roots[lo] = obs_root.task;
         }
 
         // --- Local seam tasks (skip cross-PE seams) ---
@@ -648,6 +658,12 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                 tasks.emplace_back(global_vb, ri, rj);
             }
             tasks.back().vb_solver_offset = -global_vb + si.oi * K_p + si.vb_left + 1;
+            // Tag this local-seam fusion is_extraction_unit_connector so post_hoc_chunk_and_post's
+            // existing, fully generic walk divides the seam (via divide_vb) before recursing into
+            // each observable's own (already unit-tagged, see the per-observable construction above)
+            // subtree -- exactly the "seams are unilaterally divided first" requirement, with no
+            // changes needed to post_hoc_chunk_and_post/divide_vb themselves.
+            tasks.back().is_extraction_unit_connector = true;
             // tasks.back().seam_vb_slot          = K_vb + s;
 #ifdef ENABLE_DRAW_FLAGS
             tasks.back().left_obs_patch_id = si.oi;
@@ -727,10 +743,14 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             for (Task& t : buffer.tasks) {
                 tasks += "--part: " + (std::string)((t.is_fusion) ? "f" : "p") + std::to_string(t.part)
                        + "  vb_left: " + std::to_string(t.vb_left)
-                       + "  vb_right: " + std::to_string(t.vb_right) + "\n"
+                       + "  vb_right: " + std::to_string(t.vb_right)
+                       + "  vb_marker: " + std::to_string(t.vb_marker)
+                       + "  vb_solver_offset: " + std::to_string(t.vb_solver_offset) + "\n"
+                       + "    is_extraction_unit_root: " + std::to_string(t.is_extraction_unit_root)
+                       + "  is_extraction_unit_connector: " + std::to_string(t.is_extraction_unit_connector) + "\n"
                        + "    left_child: " + std::format("{:p}",static_cast<void*>(t.left_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.left_child->part) + ")" : "")
                        + "  me: " + std::format("{:p}", static_cast<void*>(&t))
-                       + "  right_child: " + std::format("{:p}", static_cast<void*>(t.right_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.right_child->part) + ")" : "") + "\n"
+                       + "  right_child: " + std::format("{:p}", static_cast<void*>(t.right_child)) + ((t.right_child) ? "(" + (std::string)(t.right_child->is_fusion ? "f" : "p") + std::to_string(t.right_child->part) + ")" : "") + "\n"
                        + "    parent: f" + std::format("{:p}", static_cast<void*>(t.parent)) + (t.child_bit == 1 ? "  left" : "  right")
                     //    + "  only_child: " + std::to_string(t.only_child)
                        + "\n";
@@ -1422,7 +1442,7 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(
     return true;
 }
 
-void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, CrossRankTask& crt, int tid) {
+void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, CrossRankTask& crt, int tid, std::ofstream* t_out) {
     // Computes the received partition/vb range directly from crt's own fields -- independent of
     // whatever range get_solution_from_remote_pe used internally for rebasing, since that's a
     // different concern (this needs the actual shot.partition_hits[]/virtual_boundary_hits[]
@@ -1455,6 +1475,12 @@ void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t s
     }
 
     int anchor = (p_hi >= p_lo) ? p_lo : 0;
+    if (DEBUG && t_out) {
+        *t_out << "  EXTRACT_CRT part=" << crt.part
+               << " p=[" << p_lo << ", " << p_hi << "]"
+               << " vb=[" << vb_lo << ", " << vb_hi << "]"
+               << " anchor=" << anchor << std::endl << std::flush;
+    }
     auto& solver = *solvers[get_solver_id(shot_container_id, anchor)];
     bool extended = shot.num_observables > sizeof(pm::obs_int) * 8;
     pm::MatchingResult local_res{};
@@ -1855,7 +1881,7 @@ void pm::DecodingUnit::decode_shots() {
                                 // solved) so the received window can be safely extracted alongside
                                 // it, in the same breath.
                                 divide_vb(shot, (int)shot_container_id, crt->part, crt_anchor, tid, /*prune_target=*/crt, &t_out);
-                                extract_crt_received_window(shot, shot_container_id, *crt, tid);
+                                extract_crt_received_window(shot, shot_container_id, *crt, tid, &t_out);
 #ifdef ENABLE_DRAW_FLAGS
                                 if (draw_frames) draw_frame(crt_solver, pm::MwpmEvent::no_event(), 1001, true, tid);
 #endif
@@ -1864,7 +1890,15 @@ void pm::DecodingUnit::decode_shots() {
                                 crt->setup();
 #ifdef ENABLE_DRAW_FLAGS
                                 if (draw_frames) {
-                                    auto& dbg_solver = *solvers[get_solver_id(shot_container_id, crt->part)];
+                                    // crt->part is a vb/fusion id, not a partition -- using it directly
+                                    // here (as opposed to a crt_anchor-style local partition base, see
+                                    // the receiving branch above) aliases whatever real local task
+                                    // happens to already own that solver index, clobbering its live
+                                    // task/flooder state out from under it. Anchor on my own local side
+                                    // of the boundary instead, same as the receiving branch's crt_anchor.
+                                    int dbg_anchor = (int)((crt->iamleft) ? crt->left_global_offset.first
+                                                                           : crt->right_global_offset.first);
+                                    auto& dbg_solver = *solvers[get_solver_id(shot_container_id, dbg_anchor)];
                                     dbg_solver.prepare_for_task(crt, shot_id);
                                     if (config_parallel::division_strategy == config_parallel::OBS) {
                                         dbg_solver.flooder.p_offsets  = { crt->left_global_offset.first,  crt->right_global_offset.first  };
