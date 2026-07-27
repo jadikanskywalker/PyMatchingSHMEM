@@ -144,7 +144,6 @@ pm::DecodingUnit::DecodingUnit(
         std::cout << "DEBUG: Setting num threads\n" << std::flush;
     }
     int max_threads = omp_get_max_threads();
-    num_solvers_per_buffer = graph.num_partitions;
 #ifdef USE_SHMEM
     // --- Populate my_partition_task_ids ---
     if (config_parallel::division_strategy == config_parallel::OBS) {
@@ -158,40 +157,46 @@ pm::DecodingUnit::DecodingUnit(
             for (size_t p = p_base; p < p_base + graph.p_per_obs_patch; ++p)
                 my_partition_task_ids.push_back(p);
         }
+        // Global partition id of my own first local partition, and how many I own -- contiguous by
+        // construction (obs-major numbering, per-PE contiguous observable ownership). Distinct from
+        // my_partition_task_ids above, which holds indices into this PE's own tasks[] array, not
+        // global partition ids.
+        my_partitions_start = my_obs_start * (int)graph.p_per_obs_patch;
+        my_partition_count  = my_obs_count * (int)graph.p_per_obs_patch;
     } else {
         const int p_base   = (int)graph.num_partitions / n_pes;
         const int my_count = p_base + (pid == n_pes - 1 ? (int)graph.num_partitions % n_pes : 0);
         my_partition_task_ids.reserve(my_count);
         for (int i = 0; i < my_count; ++i)
             my_partition_task_ids.push_back(i);
+        my_partitions_start = (int)graph.num_partitions / n_pes * pid;
+        my_partition_count  = my_count;
     }
     num_threads = std::min(max_threads, (int)my_partition_task_ids.size());
 #else
     for (int i = 0; i < graph.num_partitions; ++i) {
         my_partition_task_ids.push_back(i);
     }
+    my_partitions_start = 0;
+    my_partition_count  = (int)graph.num_partitions;
     num_threads =
         (max_threads > graph.num_partitions) ? graph.num_partitions : max_threads;  // max num_partitions threadss
 #endif
+    // solvers only exist for this PE's own partitions -- see build_solvers() and the plan for this
+    // refactor (a full Mwpm is unnecessary for a remote partition, only its SHMEMArena is).
+    num_solvers_per_buffer = (size_t)my_partition_count;
     std::cout << "graph.num_partitions = " << graph.num_partitions << "; num_threads: " << num_threads << std::endl;
     omp_set_num_threads(num_threads);
-    // --- Build local merge-tree tasks and cross-rank fusions ---
-#ifdef USE_SHMEM
-    if (config_parallel::division_strategy == config_parallel::OBS) {
-        build_tasks_for_obs_patch_partitioning();
-    } else {
-        build_tasks_for_round_partitioning();
-    }
-#else
-    build_tasks_for_round_partitioning();
-#endif
 #ifdef USE_SHMEM
     // --- Allocate buffer for GraphFillRegion arenas ---
+    // Sized globally (graph.num_partitions, not num_solvers_per_buffer/my_partition_count): the
+    // underlying SHMEM region buffer must stay addressable by every PE's own global partition ids for
+    // RMA puts, independent of how many local Mwpm solver objects this PE actually constructs.
     if (DEBUG) {
         std::cout << "DEBUG: Allocating Regions\n" << std::flush;
     }
     regions_ptr = static_cast<GraphFillRegion*>(
-        shmem_malloc(regions_nelems_per_solver * num_solvers_per_buffer * NUM_BUFFERS_PER_UNIT * sizeof(GraphFillRegion)));
+        shmem_malloc(regions_nelems_per_solver * graph.num_partitions * NUM_BUFFERS_PER_UNIT * sizeof(GraphFillRegion)));
     if (regions_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate symmetric region buffer.");
     }
@@ -207,8 +212,19 @@ pm::DecodingUnit::DecodingUnit(
                   << std::flush;
     }
 #endif
-    // --- Build solvers ---
+    // --- Build solvers (before tasks: task construction assigns each task's own ->solver, which
+    // needs solvers[]/remote_arenas already built) ---
     build_solvers();
+    // --- Build local merge-tree tasks and cross-rank fusions ---
+#ifdef USE_SHMEM
+    if (config_parallel::division_strategy == config_parallel::OBS) {
+        build_tasks_for_obs_patch_partitioning();
+    } else {
+        build_tasks_for_round_partitioning();
+    }
+#else
+    build_tasks_for_round_partitioning();
+#endif
 #ifdef ENABLE_DRAW_FLAGS
     if (draw_frames) {
         if (dem_for_drawing == nullptr) {
@@ -251,12 +267,20 @@ struct RangeInfo { Task* task; size_t leftmost; size_t rightmost; };
 // tag_connector=false) and for combining units into a balanced tree (unit roots in `level`,
 // tag_connector=true). `on_fusion`, if given, is called right after each new fusion Task is
 // constructed with (fusion, vb_id) -- vb_id is the *local* position (relative to whatever range
-// `level` covers), letting a caller set fields the Task(vb, left, right) constructor doesn't default
-// correctly on its own (OBS partitioning's vb_marker/vb_solver_offset; round partitioning needs no
-// callback, since its constructor defaults -- vb_marker=part, vb_solver_offset=0 -- are already
-// correct).
+// `level` covers), letting a caller set fields the Task constructor doesn't default correctly on its
+// own (OBS partitioning's vb_marker; round partitioning needs no callback, since its constructor
+// default -- vb_marker=part -- is already correct).
+//
+// `solver_base`: every fusion's own solver is "the partition directly left of the fusion," i.e.
+// solvers[some_p_offset + vb_id] for whatever global-partition offset is correct in the caller's own
+// scope (round partitioning's own p_offset; OBS's per-observable obs_p_offset, which is *not* the
+// same value as the vb-id offset OBS passes as `p_offset` above, since K_vb = K_p - 1). Rather than
+// passing that offset in and making pair_up reach into DecodingUnit state to resolve it, each caller
+// precomputes the starting pointer into DecodingUnit::solvers once and passes it in directly --
+// solver_base[vb_id] is then plain pointer arithmetic, no lookup call needed.
 RangeInfo pair_up(
     std::vector<Task>& tasks, int p_offset, std::vector<RangeInfo> level, bool tag_connector,
+    const std::shared_ptr<pm::Mwpm>* solver_base,
     const std::function<void(Task*, size_t)>& on_fusion = {}) {
     while (level.size() > 1) {
         std::vector<RangeInfo> next_level;
@@ -264,7 +288,7 @@ RangeInfo pair_up(
             const RangeInfo& L_op = level[k];
             const RangeInfo& R_op = level[k + 1];
             size_t vb_id = L_op.rightmost;
-            tasks.emplace_back((int)vb_id + p_offset, L_op.task, R_op.task);
+            tasks.emplace_back((int)vb_id + p_offset, L_op.task, R_op.task, solver_base[vb_id].get());
             Task* fusion = &tasks.back();
             if (tag_connector) fusion->is_extraction_unit_connector = true;
             if (on_fusion) on_fusion(fusion, vb_id);
@@ -283,6 +307,7 @@ RangeInfo pair_up(
 // build_tasks_for_round_partitioning for both).
 std::vector<RangeInfo> build_extraction_units(
     std::vector<Task>& tasks, int p_offset, size_t leaf_base_idx, size_t n_leaves, int L,
+    const std::shared_ptr<pm::Mwpm>* solver_base,
     const std::function<void(Task*, size_t)>& on_fusion = {}) {
     std::vector<RangeInfo> unit_roots;
     for (size_t ustart = 0; ustart < n_leaves; ustart += (size_t)L) {
@@ -290,7 +315,8 @@ std::vector<RangeInfo> build_extraction_units(
         std::vector<RangeInfo> level;
         for (size_t k = 0; k < count; ++k)
             level.push_back({&tasks[leaf_base_idx + ustart + k], ustart + k, ustart + k});
-        RangeInfo unit_root = pair_up(tasks, p_offset, std::move(level), /*tag_connector=*/false, on_fusion);
+        RangeInfo unit_root = pair_up(tasks, p_offset, std::move(level), /*tag_connector=*/false,
+                                       solver_base, on_fusion);
         unit_root.task->is_extraction_unit_root = true;
         unit_roots.push_back(unit_root);
     }
@@ -304,11 +330,9 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
     if (DEBUG) {
         std::cout << "DEBUG: initializing tasks" << std::endl;
     }
-#ifdef USE_SHMEM
-    const int p_offset = graph.num_partitions / n_pes * pid;
-#else
-    const int p_offset = 0;
-#endif
+    // p_offset (the vb-id-to-part-space offset) and my_partitions_start (the global-partition-to-
+    // solvers[]-index offset) are the same value for round partitioning -- reuse the member directly.
+    const int p_offset = my_partitions_start;
     // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md). Every unit (L
     // consecutive leaves, fewer for a ragged last unit) is built as its own small balanced subtree,
     // tagging its root is_extraction_unit_root -- this step is unconditional, regardless of
@@ -322,33 +346,35 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
     // index of the left operand" -- unique across the whole structure, matching how the original
     // balanced-tree code numbers vbs by position.
     //
-    // Solver id is a *different* thing: solvers[] is indexed by genuine partition (leaf) id, not by vb
-    // id -- but for ROUND partitioning specifically, a vb id (rightmost leaf of the left operand) IS
-    // already a genuine, in-range partition id, so no adjustment is needed: vb_solver_offset stays at
-    // its default 0 for every round-based fusion, and get_solver_id(t->part + t->vb_solver_offset, ...)
-    // uses t->part directly. (vb_solver_offset only exists for OBS partitioning, where a vb id and a
-    // partition id occupy different, non-1:1 ranges -- num_p_per_obs - 1 == num_vb_per_obs -- so OBS
-    // sets it explicitly elsewhere, equal to the observable id, to remap into partition-id space.)
+    // Every task's own solver is assigned once at construction (TaskBase::solver, see decoding_task.h)
+    // rather than recomputed later. For ROUND partitioning, p_offset (the vb-id-to-part-space offset)
+    // and my_partitions_start (the global-partition-to-solvers[]-index offset) are the same value, so
+    // solver_base -- the pointer into solvers[] for this shot_container_id's own local block --
+    // already points at "solver for global partition p_offset + 0", and solver_base[vb_id] is exactly
+    // solvers[]'s entry for the fusion's own vb id. (OBS partitioning's per-observable tree needs its
+    // own, separately-derived solver_base since its p_offset there is a *vb*-space offset, not a
+    // partition-space one -- see build_tasks_for_obs_patch_partitioning.)
     //
-    // This also matters for correctness, not just indexing: since a fusion's own solver id must be
-    // *some partition within its own subtree* for Arena safety (see GraphFlooder::create_blossom and
-    // this-is-a-broader-purrfect-crystal.md), always resolving to the vb's own position (rather than,
-    // e.g., always collapsing back to the chain's original leftmost leaf) keeps a preemptive chain's
-    // later links from reusing an earlier link's solver after that earlier unit has already been
-    // divided off and posted for concurrent extraction.
+    // This also matters for correctness, not just indexing: since a fusion's own solver must be *some
+    // partition within its own subtree* for Arena safety (see GraphFlooder::create_blossom), always
+    // resolving to the vb's own position (rather than, e.g., always collapsing back to the chain's
+    // original leftmost leaf) keeps a preemptive chain's later links from reusing an earlier link's
+    // solver after that earlier unit has already been divided off and posted for concurrent
+    // extraction.
     // Build a full fusion tree: less than 2*N tasks. Reserve to keep element addresses stable.
     for (int shot_container_id=0; shot_container_id < NUM_BUFFERS_PER_UNIT; shot_container_id++) {  // Lazy repeat per shot container -- CAN BE IMPROVED!
         auto& shot_container = shot_buffer->buffer[shot_container_id];
         auto& tasks = shot_container.tasks;
         tasks.reserve(static_cast<size_t>(2 * graph.num_partitions - 1));
+        const std::shared_ptr<pm::Mwpm>* solver_base = &solvers[num_solvers_per_buffer * shot_container_id];
         for (int task_id : my_partition_task_ids) {
-            tasks.emplace_back(task_id + p_offset);
+            tasks.emplace_back(task_id + p_offset, solver_base[task_id].get());
         }
 
         int L = config_parallel::L;
         size_t n_leaves = my_partition_task_ids.size();
         std::vector<RangeInfo> unit_roots =
-            build_extraction_units(tasks, p_offset, /*leaf_base_idx=*/0, n_leaves, L);
+            build_extraction_units(tasks, p_offset, /*leaf_base_idx=*/0, n_leaves, L, solver_base);
 
         if (config_parallel::extract_preemptively) {
             // Sequential chain over unit_roots.
@@ -356,7 +382,7 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
             for (size_t k = 1; k < unit_roots.size(); ++k) {
                 const RangeInfo& next_unit = unit_roots[k];
                 size_t vb_id = chain.rightmost;
-                tasks.emplace_back((int)vb_id + p_offset, chain.task, next_unit.task);
+                tasks.emplace_back((int)vb_id + p_offset, chain.task, next_unit.task, solver_base[vb_id].get());
                 Task* fusion = &tasks.back();
                 fusion->is_extraction_unit_connector = true;
                 if (k > 1) {
@@ -376,7 +402,7 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
         } else {
             // Balanced tree over unit_roots -- same pair_up algorithm, one level higher. If only one
             // unit exists, pair_up is a no-op (returns unit_roots[0] unchanged, no task created).
-            pair_up(tasks, p_offset, unit_roots, /*tag_connector=*/true);
+            pair_up(tasks, p_offset, unit_roots, /*tag_connector=*/true, solver_base);
         }
     }
     if (DEBUG) {
@@ -391,7 +417,7 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                         << "  is_fusion: " << t.is_fusion << std::endl
                         << "  is_extraction_unit_connector: " << t.is_extraction_unit_connector << std::endl
                         << "  is_extraction_unit_root: " << t.is_extraction_unit_root << std::endl
-                        << "  vb_solver_offset: " << t.vb_solver_offset << std::endl
+                        << "  solver: " << t.solver << std::endl
                         << "  child_bit: " << t.child_bit << std::endl
                         << "  left_child: " << t.left_child << std::endl
                         << "  right_child: " << t.right_child << std::endl
@@ -413,14 +439,15 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
 #ifdef USE_SHMEM
     // --- Build cross-rank fusions (ROUND topology) ---
     //   THIS IS ALL BASED ON SIMPLE ROUND BASED FUSION ACROSS PEs
-    int my_partitions_start = my_partition_task_ids.front() + p_offset;
-    int my_partitions_end   = (int)my_partition_task_ids.back() + 1 + p_offset;
+    int my_partitions_end = my_partitions_start + my_partition_count;
     for (int i=0; i < NUM_BUFFERS_PER_UNIT; ++i) {
         shot_buffer->buffer[i].cross_rank_tasks.reserve(2);
         if (pid > 0) { // Add cross-rank fusion on left
             uint64_t* task_status_p = get_task_status_ptr(i, false);
             FusionSummary* fusion_summary_p = get_fusion_summary_ptr(i, false);
             int vb = my_partitions_start-1;
+            // Anchor on my own first local partition, right at this boundary -- same "a partition
+            // this CRT touches, on my own local side" pattern as OBS's CRT anchor.
             shot_buffer->buffer[i].cross_rank_tasks.emplace_back(
                 vb,
                 &shot_buffer->buffer[i].tasks.back(),
@@ -431,7 +458,8 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                 task_status_p,     // status_shm
                 task_status_p + 1, // signal_shm
                 task_status_p + 2, // done_shm
-                fusion_summary_p
+                fusion_summary_p,
+                solver_for(i, my_partitions_start)
             );
             if (DEBUG) {
                 auto& t = shot_buffer->buffer[i].cross_rank_tasks.back();
@@ -451,6 +479,7 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
             uint64_t* task_status_p = get_task_status_ptr(i, true);
             FusionSummary* fusion_summary_p = get_fusion_summary_ptr(i, true);
             int vb = my_partitions_end-1;
+            // Anchor on my own last local partition, right at this boundary.
             shot_buffer->buffer[i].cross_rank_tasks.emplace_back(
                 vb,
                 &shot_buffer->buffer[i].tasks.back(),
@@ -461,7 +490,8 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                 task_status_p,     // status_shm
                 task_status_p + 1, // signal_shm
                 task_status_p + 2, // done_shm
-                fusion_summary_p
+                fusion_summary_p,
+                solver_for(i, my_partitions_end - 1)
             );
             if (DEBUG) {
                 auto& t = shot_buffer->buffer[i].cross_rank_tasks.back();
@@ -596,10 +626,17 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             const int obs_p_offset  = o * K_p;
             const int obs_vb_offset = o * K_vb;
             const int tree_start    = lo * (2*K_p - 1);  // local offset into tasks[]
+            // Pointer into solvers[] for "solver for global partition obs_p_offset + 0" -- distinct
+            // from obs_vb_offset above (the vb-id-to-part-space offset pair_up/build_extraction_units
+            // use for numbering, not the same value since K_vb = K_p - 1): every fusion's own solver
+            // is "the partition directly left of it," i.e. solvers[obs_p_offset + vb_id], so
+            // solver_base[vb_id] below always resolves correctly regardless of the vb-numbering offset.
+            const std::shared_ptr<pm::Mwpm>* solver_base =
+                &solvers[num_solvers_per_buffer * shot_id + (obs_p_offset - my_partitions_start)];
 
             // Leaf tasks: explicit local vb bounds so is_active() uses shared slot indices
             for (int lp = 0; lp < K_p; ++lp)
-                tasks.emplace_back(obs_p_offset + lp, lp - 1, lp);
+                tasks.emplace_back(obs_p_offset + lp, lp - 1, lp, solver_base[lp].get());
 
             // Unit-checkpointed extraction: group this observable's own K_p leaves into
             // extraction_unit_size-sized units (build_extraction_units tags each unit root
@@ -608,19 +645,17 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             // is_extraction_unit_connector) -- same shared machinery round partitioning uses, applied
             // once per locally-owned observable. `on_fusion` restores this observable's own vb_marker
             // (the *local*, position-only vb id -- matches DetectorNode::vb, see decoding_task.h's
-            // vb_marker comment) and vb_solver_offset (o, remapping a local vb id into obs o's own
-            // partition-id space) on every fusion, since the shared pair_up's own defaults
-            // (vb_marker=part, vb_solver_offset=0) are only correct for round partitioning, where vb
-            // ids and partition ids share one space -- OBS's per-patch vb/partition spaces don't line
-            // up 1:1 (K_vb == K_p - 1), so both fields need this explicit remap.
+            // vb_marker comment) on every fusion, since the shared pair_up's own default (vb_marker=
+            // part) is only correct for round partitioning, where vb ids and partition ids share one
+            // space -- OBS's per-patch vb/partition spaces don't line up 1:1 (K_vb == K_p - 1).
             auto on_fusion = [&](Task* fusion, size_t vb_id) {
                 fusion->vb_marker = (int)vb_id;
-                fusion->vb_solver_offset = o;
             };
             std::vector<RangeInfo> unit_roots = build_extraction_units(
                 tasks, obs_vb_offset, /*leaf_base_idx=*/tree_start, (size_t)K_p,
-                config_parallel::L, on_fusion);
-            RangeInfo obs_root = pair_up(tasks, obs_vb_offset, unit_roots, /*tag_connector=*/true, on_fusion);
+                config_parallel::L, solver_base, on_fusion);
+            RangeInfo obs_root = pair_up(tasks, obs_vb_offset, unit_roots, /*tag_connector=*/true,
+                                          solver_base, on_fusion);
             obs_roots[lo] = obs_root.task;
         }
 
@@ -650,14 +685,20 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             int global_vb = K_vb * (int)graph.num_obs_patches + s;
             Task* ri = group_root[loi];
             Task* rj = group_root[loj];
-
+            // A partition this seam touches, on obs oi's own side: si.oi*K_p is oi's global partition
+            // base, si.vb_left+1 is the local partition offset within oi immediately right of the
+            // seam's own vb_left boundary. Verified this session: this is exactly the partition the
+            // old vb_solver_offset formula (-global_vb + si.oi*K_p + si.vb_left+1, combined with
+            // t->part == global_vb) resolved to -- also exactly send_solution_to_remote_pe's/
+            // get_solution_from_remote_pe's own independently-derived window-start formula for the
+            // oi side (p_start = vb_left+1+<oi's own p_offset>).
+            pm::Mwpm* seam_solver = solver_for(shot_id, si.oi * K_p + si.vb_left + 1);
             if (ri == rj) {
-                tasks.emplace_back(global_vb, ri, ri);
+                tasks.emplace_back(global_vb, ri, ri, seam_solver);
                 // ri->only_child = true;
             } else {
-                tasks.emplace_back(global_vb, ri, rj);
+                tasks.emplace_back(global_vb, ri, rj, seam_solver);
             }
-            tasks.back().vb_solver_offset = -global_vb + si.oi * K_p + si.vb_left + 1;
             // Tag this local-seam fusion is_extraction_unit_connector so post_hoc_chunk_and_post's
             // existing, fully generic walk divides the seam (via divide_vb) before recursing into
             // each observable's own (already unit-tagged, see the per-observable construction above)
@@ -703,10 +744,13 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             const int global_vb = K_vb * (int)graph.num_obs_patches + s;
             uint64_t*      sp = get_task_status_ptr_for_seam(shot_id, s);
             FusionSummary* fp = get_fusion_summary_ptr_for_seam(shot_id, s);
+            // Same anchor pattern as the local-seam case above, generalized to whichever side is
+            // local -- a partition this CRT touches, in my own local observable.
+            pm::Mwpm* crt_solver = solver_for(shot_id, (oi_local ? si.oi : si.oj) * K_p + si.vb_left + 1);
 
             crt.emplace_back(global_vb, local_child, iamleft,
                              si.vb_left, si.vb_right,
-                             other_pid, sp, sp+1, sp+2, fp);
+                             other_pid, sp, sp+1, sp+2, fp, crt_solver);
             crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
             crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
 
@@ -745,7 +789,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                        + "  vb_left: " + std::to_string(t.vb_left)
                        + "  vb_right: " + std::to_string(t.vb_right)
                        + "  vb_marker: " + std::to_string(t.vb_marker)
-                       + "  vb_solver_offset: " + std::to_string(t.vb_solver_offset) + "\n"
+                       + "  solver: " + std::format("{:p}", static_cast<void*>(t.solver)) + "\n"
                        + "    is_extraction_unit_root: " + std::to_string(t.is_extraction_unit_root)
                        + "  is_extraction_unit_connector: " + std::to_string(t.is_extraction_unit_connector) + "\n"
                        + "    left_child: " + std::format("{:p}",static_cast<void*>(t.left_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.left_child->part) + ")" : "")
@@ -761,7 +805,9 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
 }
 #endif
 
-// Build solver for each shot container for each thread
+// Build a full solver for each of this PE's own local partitions, for each shot container. A full
+// Mwpm/GraphFlooder is unnecessary for a remote partition -- only its SHMEMArena (bitmap + buffer
+// pointer) is, see the remote_arenas block below and region_arena_for().
 void pm::DecodingUnit::build_solvers() {
     if (ensure_search_flooder_included || enable_correlations) {
         throw std::invalid_argument("Correlations and SearchFlooder are not yet supported with threads");
@@ -771,9 +817,10 @@ void pm::DecodingUnit::build_solvers() {
     if (DEBUG) std::cout << "num_solvers_per_buffer: " << num_solvers_per_buffer << std::endl << std::flush;
     for (size_t idx = 0; idx < NUM_BUFFERS_PER_UNIT; ++idx) {
         for (size_t t = 0; t < num_solvers_per_buffer; ++t) {
+            int global_partition = my_partitions_start + (int)t;
             // Each solver shares the same MatchingGraph via shared_ptr.
 #ifdef USE_SHMEM
-            if (DEBUG) std::cout << "solver: " << idx*num_solvers_per_buffer + t << "  " << get_regions_ptr(idx, t) << std::endl << std::flush;
+            if (DEBUG) std::cout << "solver: " << idx*num_solvers_per_buffer + t << "  " << get_regions_ptr(idx, global_partition) << std::endl << std::flush;
 #endif
             solvers.emplace_back(
                 std::make_shared<pm::Mwpm>(pm::GraphFlooder(
@@ -781,7 +828,7 @@ void pm::DecodingUnit::build_solvers() {
                     idx
 #ifdef USE_SHMEM
                     ,
-                    get_regions_ptr(idx, t),
+                    get_regions_ptr(idx, global_partition),
                     regions_nelems_per_solver
 #endif
 #ifdef ENABLE_DRAW_FLAGS
@@ -791,7 +838,34 @@ void pm::DecodingUnit::build_solvers() {
             solvers.back()->flooder.sync_negative_weight_observables_and_detection_events();
         }
     }
+#ifdef USE_SHMEM
+    // Bare region-tracking arenas for every partition NOT owned by this PE. get_solution_from_remote_pe
+    // copies the sender's bitmap into one of these and stamps owner_arena on every rebased region,
+    // purely for later del() bookkeeping -- no other Mwpm/GraphFlooder machinery is ever touched for a
+    // remote partition. Ordered to match remote_index(): every global partition outside my own local
+    // range, in order. Reserved to the exact final size up front so addresses stay stable -- owner_arena
+    // pointers into this vector must never dangle.
+    size_t num_remote = (size_t)graph.num_partitions - (size_t)my_partition_count;
+    remote_arenas.clear();
+    remote_arenas.reserve(num_remote * NUM_BUFFERS_PER_UNIT);
+    for (size_t idx = 0; idx < NUM_BUFFERS_PER_UNIT; ++idx) {
+        for (int p = 0; p < (int)graph.num_partitions; ++p) {
+            if (p >= my_partitions_start && p < my_partitions_start + my_partition_count) continue;
+            remote_arenas.emplace_back(get_regions_ptr(idx, p), regions_nelems_per_solver);
+        }
+    }
+#endif
 }
+
+#ifdef USE_SHMEM
+SHMEMArena<pm::GraphFillRegion>& pm::DecodingUnit::region_arena_for(int shot_container_id, int global_partition) {
+    if (global_partition >= my_partitions_start && global_partition < my_partitions_start + my_partition_count) {
+        return solver_for(shot_container_id, global_partition)->flooder.region_arena;
+    }
+    size_t num_remote = (size_t)graph.num_partitions - (size_t)my_partition_count;
+    return remote_arenas[num_remote * (size_t)shot_container_id + (size_t)remote_index(global_partition)];
+}
+#endif
 
 namespace {
 // Shatter+extract one hits list, handling extended-vs-bit-packed accumulation identically
@@ -920,19 +994,21 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_BEGIN(solution_isolation, "Sender Solution Isolation", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
-    // Validation Pass: scan all live regions in the k-partition send window.
-    size_t solver_id = get_solver_id(shot_container_id, p_start);
-    auto& solver = *solvers[solver_id];
+    // Validation Pass: scan all live regions in the k-partition send window. p_start is always one of
+    // my own local partitions (a PE only ever sends its own data), so a direct local lookup works --
+    // not t.solver, since the window-scan loop below needs consecutive partitions starting exactly at
+    // p_start, which isn't guaranteed to equal t.solver's own independently-chosen anchor.
+    auto& solver = *solver_for(shot_container_id, p_start);
     uint64_t* bitmap_base = (uint64_t*)((char*)fusion_summary_base->regions_to_unmatch);
     // reset to 1's for safety
-    size_t bitmap_words = solvers[solver_id]->flooder.region_arena.shmem_bitmap.size() * p_k;
+    size_t bitmap_words = solver.flooder.region_arena.shmem_bitmap.size() * p_k;
     for (size_t w = 0; w < bitmap_words; ++w) {
         bitmap_base[w] = ~0ULL;
     }
     // validate all blossom roots
     for (size_t i = 0; i < p_k; ++i) {
         int p_scan = p_start + i;
-        auto& solver_scan = *solvers[solver_id + i];
+        auto& solver_scan = *solver_for(shot_container_id, p_scan);
         auto& bitmap = solver_scan.flooder.region_arena.shmem_bitmap;
         GraphFillRegion* p_regions_base = get_regions_ptr(shot_container_id, p_scan);
 
@@ -1018,7 +1094,10 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
     if (DEBUG) t_out << "  isolated solution" << std::endl << std::flush;
 #ifdef ENABLE_DRAW_FLAGS
     if (draw_frames) {
-        draw_frame(*solvers[get_solver_id(shot_container_id, t.part)], pm::MwpmEvent::no_event(), 1001, true, omp_get_thread_num());
+        // t.part is a vb/fusion id, not a partition -- same class of bug as the dbg_solver fix
+        // elsewhere in this file (using it directly here would alias whatever real local task happens
+        // to already own that solver index). t.solver is my own already-assigned local anchor.
+        draw_frame(*t.solver, pm::MwpmEvent::no_event(), 1001, true, omp_get_thread_num());
     }
 #endif
 
@@ -1076,7 +1155,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
         if (rtu_offset >= 0 && rtu_offset < (ptrdiff_t)(p_k * regions_nelems_per_solver)) {
             size_t i_solver  = (size_t)rtu_offset / regions_nelems_per_solver;
             size_t local_idx = (size_t)rtu_offset % regions_nelems_per_solver;
-            auto& bm = solvers[solver_id + i_solver]->flooder.region_arena.shmem_bitmap;
+            auto& bm = solver_for(shot_container_id, p_start + (int)i_solver)->flooder.region_arena.shmem_bitmap;
             allocated = !((bm[local_idx / 64] >> (local_idx % 64)) & 1ULL);
         }
         if (!allocated) {
@@ -1098,7 +1177,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
     size_t total_bitmap_bytes = 0;
     for (size_t i = 0; i < p_k; ++i) {
         int p = p_start + i;
-        auto& solver = *solvers[solver_id + i];
+        auto& solver = *solver_for(shot_container_id, p);
         auto& bitmap = solver.flooder.region_arena.shmem_bitmap;
         size_t bitmap_len = bitmap.size();
         // Copy bitmap to FusiionSummary
@@ -1207,8 +1286,12 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(
         p_k     = p_end - p_start + 1;
     }
 
-    size_t solver_id = get_solver_id(shot_container_id, p_start);
-    auto& solver = *solvers[solver_id];
+    // p_start above is the REMOTE side's own window base -- not a local partition, so it must not be
+    // used to index solvers[] (which only covers this PE's own partitions now). This shatter step
+    // isolates *my own* prior local flooding around the seam boundary before merging in the remote
+    // side's data, so my own already-assigned local anchor (t.solver) is what belongs here, not
+    // anything derived from the remote offset.
+    auto& solver = *t.solver;
 
     // Isolating local window from the rest of the graph
     if (DEBUG) t_out << "    isolating solution" << std::endl << std::flush;
@@ -1318,13 +1401,18 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(
         t_out << "    reconstructing solution state\n"
               << "      Remote Regions To Unmatch Size: " << fusion_summary_base->regions_to_unmatch_size << std::endl << std::flush;
     }
-    uint64_t* bitmap_base = (uint64_t*)((char*)fusion_summary_base->regions_to_unmatch 
+    uint64_t* bitmap_base = (uint64_t*)((char*)fusion_summary_base->regions_to_unmatch
                                         + sizeof(GraphFillRegion*) * fusion_summary_base->regions_to_unmatch_size);
-    size_t bitmap_len = solvers[solver_id]->flooder.region_arena.shmem_bitmap.size();
+    // p_start..p_start+p_k-1 is the REMOTE side's own partition range -- genuinely needs remote arena
+    // access (region_arena_for), the one place in this whole refactor that does: a full Mwpm is never
+    // built for a remote partition, only its bare SHMEMArena (see build_solvers()/region_arena_for()),
+    // since this loop only needs the bitmap + later del() bookkeeping via owner_arena below, not any
+    // other Mwpm/GraphFlooder machinery.
+    size_t bitmap_len = region_arena_for(shot_container_id, p_start).shmem_bitmap.size();
     for (size_t i = 0; i < p_k; ++i) {
         int p = p_start + i;
-        auto& solver = *solvers[solver_id + i];
-        auto& bitmap_dst = solver.flooder.region_arena.shmem_bitmap;
+        auto& region_arena = region_arena_for(shot_container_id, p);
+        auto& bitmap_dst = region_arena.shmem_bitmap;
         // Copy bitmap
         memcpy(bitmap_dst.data(), bitmap_base + i*bitmap_len, bitmap_dst.size() * sizeof(uint64_t));
 
@@ -1363,7 +1451,7 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(
                         new (&r->shell_area) std::vector<DetectorNode*>();
                         r->shrink_event_tracker.clear();
                         r->alt_tree_node = nullptr;
-                        r->owner_arena = &solver.flooder.region_arena;
+                        r->owner_arena = &region_arena;
                     }
                 }
             }
@@ -1474,14 +1562,13 @@ void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t s
         vb_hi = crt.vb_right + (int)rem_off.second - 1;
     }
 
-    int anchor = (p_hi >= p_lo) ? p_lo : 0;
     if (DEBUG && t_out) {
         *t_out << "  EXTRACT_CRT part=" << crt.part
                << " p=[" << p_lo << ", " << p_hi << "]"
                << " vb=[" << vb_lo << ", " << vb_hi << "]"
-               << " anchor=" << anchor << std::endl << std::flush;
+               << " solver=" << crt.solver << std::endl << std::flush;
     }
-    auto& solver = *solvers[get_solver_id(shot_container_id, anchor)];
+    auto& solver = *crt.solver;
     bool extended = shot.num_observables > sizeof(pm::obs_int) * 8;
     pm::MatchingResult local_res{};
     auto do_walk = [&]() {
@@ -1502,21 +1589,20 @@ void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t s
 }
 #endif
 
-void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, int vb_id, int anchor_partition, int tid, TaskBase* prune_target, std::ofstream* t_out) {
+void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, int vb_id, pm::Mwpm* solver_arg, int tid, TaskBase* prune_target, std::ofstream* t_out) {
     if (DEBUG && t_out) {
-        *t_out << "  DIVIDE_VB vb=" << vb_id << " anchor=" << anchor_partition
+        *t_out << "  DIVIDE_VB vb=" << vb_id << " solver=" << solver_arg
                << " prune_target=" << static_cast<void*>(prune_target) << std::endl << std::flush;
     }
     // Loop every node in the vb's range (not just ones with "hits" -- a blossom can span the vb
     // without either side registering a hit exactly there) and shatter any region that reached it.
     // Any solver works as scratch in principle (region ownership is globally node-indexed via
-    // node.state(...), not solver-private) -- but anchor_partition must still be a genuine
-    // descendant leaf id (the caller's own vb_solver_offset-resolved partition), NOT an arbitrary
-    // fixed choice: under plain USE_THREADS, get_solver_id is keyed by (partition_unit, tid), so a
-    // fixed anchor can collide with whichever solver this thread is legitimately still using for
-    // its own in-flight work at this exact moment -- a real, previously-hit crash.
+    // node.state(...), not solver-private) -- but the caller's own ->solver must still be a genuine
+    // descendant leaf's solver, NOT an arbitrary fixed choice: a fixed anchor can collide with
+    // whichever solver this thread (or another) is legitimately still using for its own in-flight
+    // work at this exact moment -- a real, previously-hit crash.
     auto& vb_bounds = graph.vb_bounds[vb_id];
-    auto& solver = *solvers[get_solver_id(shot_container_id, anchor_partition)];
+    auto& solver = *solver_arg;
     bool extended = shot.num_observables > sizeof(pm::obs_int) * 8;
     // A blossom shattered here can span farther than this vb and include a region still referenced
     // in prune_target->regions_matched_to_virtual_boundary (propagated forward for a LATER setup()
@@ -1562,11 +1648,9 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, const Extract
         *t_out << "  PROCESS_JOB " << (root->is_fusion ? "vb=" : "p=") << root->part
                << " task=" << static_cast<void*>(root) << std::endl << std::flush;
     }
-    // Anchor on the subtree's own (vb_solver_offset-resolved) leaf id, matching the existing
-    // fusion-solver-lookup pattern -- any solver from this shot_container_id block would work
-    // (region ownership is globally node-indexed, not solver-private).
-    int anchor = root->part + root->vb_solver_offset;
-    auto& solver = *solvers[get_solver_id(job.shot_container_id, anchor)];
+    // Any solver from this shot_container_id block would work as scratch here (region ownership is
+    // globally node-indexed, not solver-private) -- use the subtree root's own already-assigned solver.
+    auto& solver = *root->solver;
     bool extended = shot.num_observables > sizeof(pm::obs_int) * 8;
     pm::MatchingResult local_res{};
 
@@ -1607,7 +1691,7 @@ void pm::DecodingUnit::post_hoc_chunk_and_post(Task* node, ShotContainer& shot, 
     // children independently safe to post/recurse into, regardless of order or which thread
     // eventually drains them -- then recurse into each. Single top-down pass, every node visited
     // exactly once, so there's no risk of double-posting a subtree.
-    divide_vb(shot, shot_container_id, node->part, node->part + node->vb_solver_offset, tid, /*prune_target=*/nullptr, t_out);
+    divide_vb(shot, shot_container_id, node->part, node->solver, tid, /*prune_target=*/nullptr, t_out);
     post_hoc_chunk_and_post(node->left_child, shot, shot_container_id, tid, t_out);
     if (node->right_child != node->left_child) {
         post_hoc_chunk_and_post(node->right_child, shot, shot_container_id, tid, t_out);
@@ -1676,7 +1760,7 @@ void pm::DecodingUnit::decode_shots() {
         // it exhausts all its assigned partition leaves (via next_p_id). Universal across build
         // configs -- round-partitioning always has exactly one true root (num_task_roots == 1), so
         // in practice at most one thread ends up with a non-empty list per shot.
-        struct RootInfo { Task* task; int solver_id; };
+        struct RootInfo { Task* task; };
         std::vector<RootInfo> roots_i_solved;
         bool i_solved_last_root = false;
         try {
@@ -1727,8 +1811,7 @@ void pm::DecodingUnit::decode_shots() {
                 Task* t = &shot.tasks[my_partition_task_ids[tid]];
                 size_t next_p_inc = num_threads; // cannot inc by two for 1 threads --- does not work for odd
                 size_t next_p_id = tid+next_p_inc;
-                int solver_id = get_solver_id(shot_container_id, t->part);
-                if (DEBUG) t_out << "solvers[" << solver_id << "]\n";
+                if (DEBUG) t_out << "solver: " << t->solver << "\n";
                 bool stolen = t->try_to_steal(shot_buffer_round);
                 roots_i_solved.clear();
 #ifdef SCOREP_USER_ENABLE
@@ -1739,8 +1822,8 @@ void pm::DecodingUnit::decode_shots() {
                     auto& hitsref = (t->is_fusion) ? shot.virtual_boundary_hits[t->part] : shot.partition_hits[t->part];
                     // Solve task
                     t->setup();
-                    if (DEBUG) t_out << "  solvers[" << solver_id << "]\n";
-                    pm::Mwpm& solver = *solvers[solver_id];
+                    if (DEBUG) t_out << "  solver: " << t->solver << "\n";
+                    pm::Mwpm& solver = *t->solver;
                     solver.prepare_for_task(t, shot_id);
 #ifdef USE_SHMEM
                     if (DEBUG) t_out << "  solver bounds: " << solver.flooder.vb_left << "(vb_left) " << solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
@@ -1781,7 +1864,7 @@ void pm::DecodingUnit::decode_shots() {
                     // separately once it's recognized as the root below (nothing more will ever
                     // fuse with it).
                     if (config_parallel::extract_preemptively && t->is_extraction_unit_connector) {
-                        divide_vb(shot, (int)shot_container_id, t->part, t->part + t->vb_solver_offset, tid, /*prune_target=*/t, &t_out);
+                        divide_vb(shot, (int)shot_container_id, t->part, t->solver, tid, /*prune_target=*/t, &t_out);
                         Task* closed_unit = t->left_child->is_extraction_unit_connector
                             ? t->left_child->right_child  // Fk, k>1: U(k-1), just closed on its right
                             : t->left_child;               // F1: U0, left_child IS the unit itself
@@ -1796,24 +1879,21 @@ void pm::DecodingUnit::decode_shots() {
                         Task* local_parent = static_cast<Task*>(t->parent);
                         bool iamleft = t->child_bit == 1;
                         Task* sibling = (iamleft) ? local_parent->right_child : local_parent->left_child;
-                        solver_id = get_solver_id(shot_container_id, local_parent->part + local_parent->vb_solver_offset);
-                        if (DEBUG) t_out << "    t->parent->part=" << local_parent->part << "  t->parent->vb_solver_offset=" << local_parent->vb_solver_offset << "\n" << std::flush;
+                        if (DEBUG) t_out << "    t->parent->part=" << local_parent->part << "  t->parent->solver=" << local_parent->solver << "\n" << std::flush;
                         stolen = local_parent->try_to_steal(t->child_bit);
                         t = local_parent;
                         // Try to steal sibling or descendent of sibling
                         if (!stolen && !sibling->is_fusion) {
-                            solver_id = get_solver_id(shot_container_id, sibling->part);
                             stolen = sibling->try_to_steal(shot_buffer_round);
                             t = sibling;
                         }
                     } else {
                         // t is a local tree root: parent==nullptr or parent is a CrossRankTask
                         stolen = false;
-                        roots_i_solved.push_back({t, solver_id});
+                        roots_i_solved.push_back({t});
                     }
                     while (!stolen && next_p_id < my_partition_task_ids.size()) {
                         t = &shot.tasks[my_partition_task_ids[next_p_id]];
-                        solver_id = get_solver_id(shot_container_id, t->part);
                         stolen = t->try_to_steal(shot_buffer_round);
                         next_p_id += next_p_inc;
                     }
@@ -1832,7 +1912,7 @@ void pm::DecodingUnit::decode_shots() {
                     pm::MatchingResult& my_result = shot.thread_results[tid];
 #endif
 
-                    for (auto& [root_task, root_solver_id] : roots_i_solved) {
+                    for (auto& [root_task] : roots_i_solved) {
 #ifdef USE_SHMEM
                         // Walk the CRT chain above this local root
                         TaskBase* chain_node = root_task->parent;
@@ -1850,10 +1930,7 @@ void pm::DecodingUnit::decode_shots() {
                             if (crt->try_to_steal(pid)) {
                                 if (BARE_DEBUG) t_out << "  Stole CRT with " << crt->other_pid << std::endl << std::flush;
                                 crt->setup();
-                                int crt_anchor = (int)((crt->iamleft) ? crt->left_global_offset.first
-                                                                       : crt->right_global_offset.first);
-                                int crt_sid = get_solver_id(shot_container_id, crt_anchor);
-                                auto& crt_solver = *solvers[crt_sid];
+                                auto& crt_solver = *crt->solver;
                                 crt_solver.prepare_for_task(crt, shot_id);
 #ifdef ENABLE_DRAW_FLAGS
                                 if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
@@ -1880,7 +1957,7 @@ void pm::DecodingUnit::decode_shots() {
                                 // doing the work). Divide crt->part first (now that it's fully
                                 // solved) so the received window can be safely extracted alongside
                                 // it, in the same breath.
-                                divide_vb(shot, (int)shot_container_id, crt->part, crt_anchor, tid, /*prune_target=*/crt, &t_out);
+                                divide_vb(shot, (int)shot_container_id, crt->part, crt->solver, tid, /*prune_target=*/crt, &t_out);
                                 extract_crt_received_window(shot, shot_container_id, *crt, tid, &t_out);
 #ifdef ENABLE_DRAW_FLAGS
                                 if (draw_frames) draw_frame(crt_solver, pm::MwpmEvent::no_event(), 1001, true, tid);
@@ -1890,15 +1967,13 @@ void pm::DecodingUnit::decode_shots() {
                                 crt->setup();
 #ifdef ENABLE_DRAW_FLAGS
                                 if (draw_frames) {
-                                    // crt->part is a vb/fusion id, not a partition -- using it directly
-                                    // here (as opposed to a crt_anchor-style local partition base, see
-                                    // the receiving branch above) aliases whatever real local task
-                                    // happens to already own that solver index, clobbering its live
-                                    // task/flooder state out from under it. Anchor on my own local side
-                                    // of the boundary instead, same as the receiving branch's crt_anchor.
-                                    int dbg_anchor = (int)((crt->iamleft) ? crt->left_global_offset.first
-                                                                           : crt->right_global_offset.first);
-                                    auto& dbg_solver = *solvers[get_solver_id(shot_container_id, dbg_anchor)];
+                                    // crt->solver is assigned once at construction, anchored on my own
+                                    // local side of the boundary (see build_tasks_for_obs_patch_
+                                    // partitioning) -- using it directly here is what makes the old bug
+                                    // (using crt->part, a vb/fusion id, as if it were a partition index,
+                                    // aliasing whatever real local task happened to already own that
+                                    // solver) structurally impossible to reintroduce.
+                                    auto& dbg_solver = *crt->solver;
                                     dbg_solver.prepare_for_task(crt, shot_id);
                                     if (config_parallel::division_strategy == config_parallel::OBS) {
                                         dbg_solver.flooder.p_offsets  = { crt->left_global_offset.first,  crt->right_global_offset.first  };
@@ -2024,8 +2099,10 @@ void pm::DecodingUnit::decode_shots() {
                     }
                     // Negative-weight correction: a whole-graph constant
                     // (graph.negative_weight_*_set), identical across every solver, folded in
-                    // exactly once per shot here -- any solver works (see process_extraction_job).
-                    auto& any_solver = *solvers[get_solver_id(shot_container_id, 0)];
+                    // exactly once per shot here -- any of my own local solvers works (see
+                    // process_extraction_job). solvers[] only covers my own partitions now, so anchor
+                    // on my own first local partition rather than a fixed global index.
+                    auto& any_solver = *solver_for((int)shot_container_id, my_partitions_start);
                     if (shot.num_observables > sizeof(pm::obs_int) * 8) {
                         if (!any_solver.flooder.negative_weight_detection_events.empty()) {
                             pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(

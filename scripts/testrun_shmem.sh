@@ -187,6 +187,8 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --cross_rank_fusion_window_size $k \
     --task_division_strategy observable \
     --use_threads \
+    --extraction_unit_size 2 \
+    --draw_frames \
     > log_shmem.out 2>log_shmem.err
 
 

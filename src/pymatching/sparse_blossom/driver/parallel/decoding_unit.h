@@ -29,6 +29,9 @@
 #endif
 
 #include "pymatching/sparse_blossom/flooder/blossom_child.h"
+#ifdef USE_SHMEM
+#include "pymatching/sparse_blossom/flooder/helpers/shmem_arena.h"
+#endif
 
 namespace pm {
 
@@ -74,8 +77,25 @@ struct DecodingUnit {
     // Solvers
     size_t num_threads;
     // size_t num_partition_units;
+    // Local partition count -- solvers only exist for this PE's own partitions (see build_solvers()
+    // and the plan for this refactor: a full Mwpm is unnecessary for a remote partition, only its
+    // SHMEMArena is, see remote_arenas below).
     size_t num_solvers_per_buffer;
     std::vector<std::shared_ptr<Mwpm>> solvers;
+#ifdef USE_SHMEM
+    // Bare region-tracking arenas for every partition NOT owned by this PE, needed only so
+    // get_solution_from_remote_pe can copy a sender's bitmap and stamp owner_arena on rebased regions
+    // for later del() bookkeeping -- see region_arena_for(). Built once per shot container in
+    // build_solvers(), sized/ordered by remote_index() below.
+    std::vector<SHMEMArena<GraphFillRegion>> remote_arenas;
+#endif
+    // Global partition id of this PE's own first local partition, and how many local partitions it
+    // owns -- both contiguous by construction (obs-major numbering, per-PE contiguous ownership for
+    // OBS; a contiguous partition-id slice for ROUND). Computed once in the constructor, right where
+    // my_partition_task_ids itself is populated. Used to translate a global partition id into an index
+    // into solvers[] (this PE's own partitions) or remote_arenas[] (everyone else's).
+    int my_partitions_start{0};
+    int my_partition_count{0};
 
     std::vector<size_t> my_partition_task_ids;
 
@@ -177,10 +197,30 @@ struct DecodingUnit {
 
     void build_solvers();
 
-    inline int get_solver_id(int shot_container_id, int partition)
-    {
-        return num_solvers_per_buffer * shot_container_id + partition;
+    // Local-only: global_partition must be one of this PE's own partitions (guaranteed by every
+    // solver-anchor formula in the task-building functions -- see the plan for this refactor).
+    inline Mwpm* solver_for(int shot_container_id, int global_partition) {
+        return solvers[num_solvers_per_buffer * shot_container_id
+                        + (global_partition - my_partitions_start)].get();
     }
+
+#ifdef USE_SHMEM
+    // My own local range is one contiguous block, but its complement generally isn't (e.g. PE1 with
+    // local [8..15] has "remote" split across PE0's [0..7] and PE2's [16..23]). remote_arenas is built
+    // by iterating every global partition once and appending everything outside my own local range, in
+    // order -- so the index back is a two-branch formula, not a plain subtraction. Only ever called
+    // for partitions the caller has already confirmed are non-local.
+    inline int remote_index(int global_partition) const {
+        if (global_partition < my_partitions_start) return global_partition;
+        return global_partition - my_partition_count;
+    }
+
+    // Dispatches to solvers[...]->flooder.region_arena for a local partition, or remote_arenas[...]
+    // for a remote one. Used only by get_solution_from_remote_pe's bitmap-copy/rebase loop -- nowhere
+    // else needs remote arena access, since every other solver reference goes through a task's own
+    // ->solver (always local by construction).
+    SHMEMArena<GraphFillRegion>& region_arena_for(int shot_container_id, int global_partition);
+#endif
 
 
     // Decoding Functions
@@ -206,8 +246,8 @@ struct DecodingUnit {
     // exactly there) and shatters/extracts any non-null region_that_arrived_top. Synchronous/inline,
     // never queued -- this is what makes it safe to later post an extraction job for either side
     // independently: once divided, neither side's regions reference across the boundary anymore.
-    // anchor_partition must be a genuine descendant leaf id (caller's own vb_solver_offset-resolved
-    // partition, not an arbitrary fixed choice -- see definition for why).
+    // solver_arg must be a genuine descendant leaf's own solver (the caller's own already-assigned
+    // ->solver, not an arbitrary fixed choice -- see definition for why).
     // prune_target: the fusion task whose vb this is (Task* for a checkpoint, CrossRankTask* for a
     // cross-rank fusion -- both derive from TaskBase). A blossom shattered here can span farther than
     // this vb and destroy a region still referenced in prune_target->regions_matched_to_virtual_
@@ -216,15 +256,15 @@ struct DecodingUnit {
     // setup() call will ever read that list again (post-hoc chunking, run after the whole tree is
     // already fully solved).
     // t_out: optional per-thread debug stream; when DEBUG and non-null, logs the vb being divided and
-    // the anchor/prune_target so divide timing can be traced end-to-end (see this-is-a-broader-
+    // the solver/prune_target so divide timing can be traced end-to-end (see this-is-a-broader-
     // purrfect-crystal.md).
-    void divide_vb(ShotContainer& shot, int shot_container_id, int vb_id, int anchor_partition, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
+    void divide_vb(ShotContainer& shot, int shot_container_id, int vb_id, Mwpm* solver_arg, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
 
     // Shatter+extract an entire unit subtree (job.subtree_root), accumulating into
     // shot.thread_results[tid] (bit-packed) or shot.res directly (extended observables, under omp
-    // critical). Any solver from this job's shot_container_id block works as a scratch accumulator
-    // (region ownership is globally node-indexed, not solver-private) -- tid must be the
-    // *processing* thread's own, since get_solver_id depends on tid under plain USE_THREADS.
+    // critical). Uses the subtree root's own already-assigned solver as a scratch accumulator -- any
+    // solver from this job's shot_container_id block would work (region ownership is globally
+    // node-indexed, not solver-private).
     // Decrements pending_extraction_jobs when done. Precondition: subtree_root is a fully-closed
     // unit (see divide_vb) -- every vb this subtree touches on its way to being posted has already
     // been divided by the poster, so no vb-boundary handling is needed inside the walk itself...

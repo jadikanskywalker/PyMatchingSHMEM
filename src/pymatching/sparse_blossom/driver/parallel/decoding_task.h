@@ -32,6 +32,7 @@
 namespace pm {
 class GraphFillRegion;
 struct FusionSummary;
+struct Mwpm;
 }
 
 enum Status { BUSY, FREE };
@@ -55,14 +56,22 @@ struct TaskBase {
     // nullptr means this node is the chain top (a task graph root).
     TaskBase* parent{nullptr};
 
+    // The solver this task uses when it resolves, chosen once at construction time (see
+    // decoding_unit.cc's task-building functions) rather than recomputed from part/vb_solver_offset
+    // at use time -- eliminates a whole class of "same partition index, computed two different ways,
+    // disagreeing" bugs. Raw, non-owning pointer: lifetime is guaranteed by DecodingUnit's own
+    // solvers/remote-arena storage outliving every task built from its shot_buffer.
+    pm::Mwpm* solver{nullptr};
+
     std::vector<pm::GraphFillRegion*> regions_to_unmatch;
     std::vector<pm::GraphFillRegion*> regions_matched_to_virtual_boundary;
 
-    TaskBase(int part, int vb_left, int vb_right, bool is_fusion, bool is_cross_rank_fusion)
+    TaskBase(int part, int vb_left, int vb_right, bool is_fusion, bool is_cross_rank_fusion, pm::Mwpm* solver)
         : part(part), vb_left(vb_left), vb_right(vb_right), is_fusion(is_fusion)
 #ifdef USE_SHMEM
         , is_cross_rank_fusion(is_cross_rank_fusion)
 #endif
+        , solver(solver)
     {
         (void)is_cross_rank_fusion;
         if (is_fusion)
@@ -86,6 +95,7 @@ struct TaskBase {
           is_cross_rank_fusion(other.is_cross_rank_fusion),
 #endif
           parent(other.parent),
+          solver(other.solver),
           regions_to_unmatch(std::move(other.regions_to_unmatch)),
           regions_matched_to_virtual_boundary(std::move(other.regions_matched_to_virtual_boundary))
     { other.parent = nullptr; }
@@ -101,6 +111,7 @@ struct TaskBase {
 #endif
         parent = other.parent;
         other.parent = nullptr;
+        solver = other.solver;
         regions_to_unmatch = std::move(other.regions_to_unmatch);
         regions_matched_to_virtual_boundary = std::move(other.regions_matched_to_virtual_boundary);
         return *this;
@@ -138,29 +149,25 @@ struct Task : public TaskBase {
     bool is_extraction_unit_root{false};
 
     // bool only_child{ false };
-    // Every fusion inherits a real leaf partition id (part + vb_solver_offset) for solver lookup --
-    // needed unconditionally since build_tasks_for_round_partitioning's chain-construction branch
-    // (config_parallel::extract_preemptively) sets this regardless of USE_SHMEM.
-    int vb_solver_offset{ 0 }; // For OBS patch i, this is i (Because no vb between patches, we lose one vb index relative to partition index)
 #ifdef USE_SHMEM
     // int seam_vb_slot{ -1 };             // virtual_boundaries slot index for this seam's VB nodes
     int left_obs_patch_id{-1};   // For OBS local seam tasks: left obs patch
     int right_obs_patch_id{-1};  // For OBS local seam tasks: right obs patch
 #endif
 
-    Task(int partition)
-        : TaskBase(partition, partition - 1, partition, false, false)
+    Task(int partition, pm::Mwpm* solver)
+        : TaskBase(partition, partition - 1, partition, false, false, solver)
     {
         status.store(-1, std::memory_order_release);
     }
     // Partition leaf with explicit local vb bounds (needed for OBS partitioning)
-    Task(int part, int vb_l, int vb_r)
-        : TaskBase(part, vb_l, vb_r, false, false)
+    Task(int part, int vb_l, int vb_r, pm::Mwpm* solver)
+        : TaskBase(part, vb_l, vb_r, false, false, solver)
     {
         status.store(-1, std::memory_order_release);
     }
-    Task(int vb, Task* left_child, Task* right_child) : 
-        TaskBase(vb, left_child->vb_left, right_child->vb_right, true, false),
+    Task(int vb, Task* left_child, Task* right_child, pm::Mwpm* solver) :
+        TaskBase(vb, left_child->vb_left, right_child->vb_right, true, false, solver),
         left_child(left_child),
         right_child(right_child)
     {
@@ -182,7 +189,6 @@ struct Task : public TaskBase {
         child_bit = other.child_bit;
         is_extraction_unit_connector = other.is_extraction_unit_connector;
         is_extraction_unit_root = other.is_extraction_unit_root;
-        vb_solver_offset = other.vb_solver_offset;
 #ifdef USE_SHMEM
         // seam_vb_slot = other.seam_vb_slot;
         left_obs_patch_id = other.left_obs_patch_id;
@@ -198,7 +204,6 @@ struct Task : public TaskBase {
         child_bit = other.child_bit;
         is_extraction_unit_connector = other.is_extraction_unit_connector;
         is_extraction_unit_root = other.is_extraction_unit_root;
-        vb_solver_offset = other.vb_solver_offset;
 #ifdef USE_SHMEM
         // seam_vb_slot = other.seam_vb_slot;
         left_obs_patch_id = other.left_obs_patch_id;
@@ -348,8 +353,9 @@ public:
         uint64_t* status_ptr,
         uint64_t* signal_ptr,
         uint64_t* done_ptr,
-        pm::FusionSummary* fusion_summary_ptr
-    ) : TaskBase(vb, vb_left, vb_right, true, true),
+        pm::FusionSummary* fusion_summary_ptr,
+        pm::Mwpm* solver
+    ) : TaskBase(vb, vb_left, vb_right, true, true, solver),
         child(child),
         iamleft(iamleft),
         other_pid(other_pid),
