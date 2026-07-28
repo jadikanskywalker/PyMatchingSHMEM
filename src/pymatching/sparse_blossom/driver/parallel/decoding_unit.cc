@@ -145,24 +145,24 @@ pm::DecodingUnit::DecodingUnit(
     }
     int max_threads = omp_get_max_threads();
 #ifdef USE_SHMEM
-    // --- Populate my_partition_task_ids ---
+    // --- Populate my_partition_task_ids (ROUND only -- OBS populates this itself, from inside
+    // build_tasks_for_obs_patch_partitioning, recording each leaf's *actual* tasks[] index as it's
+    // created. A fixed p_base formula here would assume every observable occupies a fixed-size block
+    // in tasks[], which no longer holds once seams/CRTs/continuation fusions get interleaved into
+    // tasks[] by the preemptive-extraction worklist construction -- see now-its-time-to-jazzy-
+    // turing.md.) ---
     if (config_parallel::division_strategy == config_parallel::OBS) {
         const int base         = (int)graph.num_obs_patches / n_pes;
         const int rem          = (int)graph.num_obs_patches % n_pes;
         const int my_obs_start = base * pid + std::min(pid, rem);
         const int my_obs_count = base + (pid < rem ? 1 : 0);
-        my_partition_task_ids.reserve(graph.p_per_obs_patch * my_obs_count);
-        for (int lo = 0; lo < my_obs_count; ++lo) {
-            size_t p_base = lo * (2 * graph.p_per_obs_patch - 1);
-            for (size_t p = p_base; p < p_base + graph.p_per_obs_patch; ++p)
-                my_partition_task_ids.push_back(p);
-        }
         // Global partition id of my own first local partition, and how many I own -- contiguous by
         // construction (obs-major numbering, per-PE contiguous observable ownership). Distinct from
-        // my_partition_task_ids above, which holds indices into this PE's own tasks[] array, not
-        // global partition ids.
+        // my_partition_task_ids, which holds indices into this PE's own tasks[] array, not global
+        // partition ids -- populated later, see above.
         my_partitions_start = my_obs_start * (int)graph.p_per_obs_patch;
         my_partition_count  = my_obs_count * (int)graph.p_per_obs_patch;
+        my_partition_task_ids.reserve((size_t)my_partition_count);
     } else {
         const int p_base   = (int)graph.num_partitions / n_pes;
         const int my_count = p_base + (pid == n_pes - 1 ? (int)graph.num_partitions % n_pes : 0);
@@ -172,7 +172,12 @@ pm::DecodingUnit::DecodingUnit(
         my_partitions_start = (int)graph.num_partitions / n_pes * pid;
         my_partition_count  = my_count;
     }
-    num_threads = std::min(max_threads, (int)my_partition_task_ids.size());
+    // OBS: my_partition_task_ids isn't populated yet at this point (filled in by
+    // build_tasks_for_obs_patch_partitioning below), so size it off my_partition_count instead --
+    // the two are always equal once construction finishes, just not yet at this line for OBS.
+    num_threads = std::min(max_threads,
+        (config_parallel::division_strategy == config_parallel::OBS)
+            ? my_partition_count : (int)my_partition_task_ids.size());
 #else
     for (int i = 0; i < graph.num_partitions; ++i) {
         my_partition_task_ids.push_back(i);
@@ -529,7 +534,9 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
 
     // For each seam: determine the two obs patches it connects and the local partition
     // range it touches (used for vb_left/vb_right on cross-PE fusion tasks).
-    struct SeamInfo { int oi, oj, vb_left, vb_right; };
+    // unit_lo/unit_hi (populated below, after window conflict resolution) are this seam's extraction-
+    // unit span for preemptive extraction -- see now-its-time-to-jazzy-turing.md Design §1.
+    struct SeamInfo { int oi, oj, vb_left, vb_right; int unit_lo{-1}, unit_hi{-1}; };
     std::vector<SeamInfo> seam_infos(num_seams);
     for (int s = 0; s < num_seams; ++s) {
         auto [first, last] = graph.vb_bounds[K_vb * graph.num_obs_patches + s];
@@ -614,156 +621,330 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
         }
     }
 
+    // --- Extraction-unit span per seam (preemptive extraction only; harmless to always compute) ---
+    // [si.vb_left+1, si.vb_right] (already k-padded, symmetric across both oi's and oj's own local
+    // partition numbering -- see now-its-time-to-jazzy-turing.md Design §1) maps directly to the range
+    // of L-sized extraction units this seam's deferred span must cover, using the same ustart/L
+    // grouping build_extraction_units itself uses.
+    const int L = config_parallel::L;
+    for (auto& si : seam_infos) {
+        si.unit_lo = (si.vb_left + 1) / L;
+        si.unit_hi = si.vb_right / L;
+    }
+    // Two seams sharing an observable must not claim the same extraction unit ("same-unit double
+    // seams" -- explicitly out of scope for this construction, see the plan). The existing window
+    // conflict resolution above only guarantees non-overlapping *partition* ranges, not unit ranges,
+    // so this needs its own check. Only meaningful for preemptive extraction -- non-preemptive never
+    // looks at unit_lo/unit_hi at all, so a "conflict" here is not actually a conflict for it.
+    // Fail loudly during construction rather than silently building a wrong graph.
+    for (int si_idx = 0; config_parallel::extract_preemptively && si_idx < num_seams; ++si_idx) {
+        auto& si = seam_infos[si_idx];
+        for (int sj_idx = si_idx + 1; sj_idx < num_seams; ++sj_idx) {
+            auto& sj = seam_infos[sj_idx];
+            if (si.oi != sj.oi && si.oi != sj.oj && si.oj != sj.oi && si.oj != sj.oj)
+                continue;
+            if (si.unit_lo <= sj.unit_hi && sj.unit_lo <= si.unit_hi) {
+                throw std::invalid_argument(
+                    "PE" + std::to_string(pid) + ": seams " + std::to_string(si_idx) + " and " +
+                    std::to_string(sj_idx) + " claim overlapping extraction units [" +
+                    std::to_string(si.unit_lo) + "," + std::to_string(si.unit_hi) + "] / [" +
+                    std::to_string(sj.unit_lo) + "," + std::to_string(sj.unit_hi) +
+                    "] -- same-unit double seams are not supported by preemptive extraction yet.");
+            }
+        }
+    }
+
+    // Which observable(s) of each seam are local to this PE -- computed once, reused every shot_id
+    // (identical graph structure every shot) and by both the preemptive and non-preemptive branches.
+    struct SeamOwnership { bool oi_local, oj_local; };
+    std::vector<SeamOwnership> seam_ownership(num_seams);
+    for (int s = 0; s < num_seams; ++s) {
+        const auto& si = seam_infos[s];
+        const int loi = si.oi - my_obs_start, loj = si.oj - my_obs_start;
+        seam_ownership[s] = { (loi >= 0 && loi < my_obs_count), (loj >= 0 && loj < my_obs_count) };
+    }
+    const int base_pe = (int)graph.num_obs_patches / n_pes;
+    const int rem_pe  = (int)graph.num_obs_patches % n_pes;
+    auto other_pid_for = [&](int remote_obs) {
+        if (remote_obs < rem_pe * (base_pe + 1)) return remote_obs / (base_pe + 1);
+        return rem_pe + (remote_obs - rem_pe * (base_pe + 1)) / base_pe;
+    };
+
     for (int shot_id = 0; shot_id < NUM_BUFFERS_PER_UNIT; ++shot_id) {
         auto& tasks = shot_buffer->buffer[shot_id].tasks;
-        tasks.reserve(static_cast<size_t>(my_obs_count * (2*K_p - 1) + num_seams + 1));
-
-        std::vector<Task*> obs_roots(my_obs_count, nullptr);
-
-        // --- Balanced trees for my obs patches only ---
-        for (int lo = 0; lo < my_obs_count; ++lo) {
-            const int o           = my_obs_start + lo;
-            const int obs_p_offset  = o * K_p;
-            const int obs_vb_offset = o * K_vb;
-            const int tree_start    = lo * (2*K_p - 1);  // local offset into tasks[]
-            // Pointer into solvers[] for "solver for global partition obs_p_offset + 0" -- distinct
-            // from obs_vb_offset above (the vb-id-to-part-space offset pair_up/build_extraction_units
-            // use for numbering, not the same value since K_vb = K_p - 1): every fusion's own solver
-            // is "the partition directly left of it," i.e. solvers[obs_p_offset + vb_id], so
-            // solver_base[vb_id] below always resolves correctly regardless of the vb-numbering offset.
-            const std::shared_ptr<pm::Mwpm>* solver_base =
-                &solvers[num_solvers_per_buffer * shot_id + (obs_p_offset - my_partitions_start)];
-
-            // Leaf tasks: explicit local vb bounds so is_active() uses shared slot indices
-            for (int lp = 0; lp < K_p; ++lp)
-                tasks.emplace_back(obs_p_offset + lp, lp - 1, lp, solver_base[lp].get());
-
-            // Unit-checkpointed extraction: group this observable's own K_p leaves into
-            // extraction_unit_size-sized units (build_extraction_units tags each unit root
-            // is_extraction_unit_root), then combine unit roots into a balanced tree
-            // (pair_up(..., tag_connector=true) tags every inter-unit fusion
-            // is_extraction_unit_connector) -- same shared machinery round partitioning uses, applied
-            // once per locally-owned observable. `on_fusion` restores this observable's own vb_marker
-            // (the *local*, position-only vb id -- matches DetectorNode::vb, see decoding_task.h's
-            // vb_marker comment) on every fusion, since the shared pair_up's own default (vb_marker=
-            // part) is only correct for round partitioning, where vb ids and partition ids share one
-            // space -- OBS's per-patch vb/partition spaces don't line up 1:1 (K_vb == K_p - 1).
-            auto on_fusion = [&](Task* fusion, size_t vb_id) {
-                fusion->vb_marker = (int)vb_id;
-            };
-            std::vector<RangeInfo> unit_roots = build_extraction_units(
-                tasks, obs_vb_offset, /*leaf_base_idx=*/tree_start, (size_t)K_p,
-                config_parallel::L, solver_base, on_fusion);
-            RangeInfo obs_root = pair_up(tasks, obs_vb_offset, unit_roots, /*tag_connector=*/true,
-                                          solver_base, on_fusion);
-            obs_roots[lo] = obs_root.task;
-        }
-
-        // --- Local seam tasks (skip cross-PE seams) ---
-        std::vector<Task*> group_root(my_obs_count);
-        for (int lo = 0; lo < my_obs_count; ++lo) {
-            group_root[lo] = obs_roots[lo];
-            if (DEBUG) std::cout << "  " << group_root[lo];
-        }
-        if (DEBUG) std::cout << "\n" << std::flush;
-
-        std::vector<std::pair<size_t, size_t>> my_remote_seams; // pair (seam_idx, oi_local)
-        my_remote_seams.reserve(num_seams);
-        for (int s = 0; s < num_seams; ++s) {
-            const auto& si = seam_infos[s];
-            const int loi = si.oi - my_obs_start;
-            const int loj = si.oj - my_obs_start;
-            bool oi_local = (loi >= 0 && loi < my_obs_count);
-            size_t mine = oi_local + (loj >= 0 && loj < my_obs_count);
-            if (mine == 1) { //
-                my_remote_seams.emplace_back(s, oi_local);  // cross-PE seam
-                continue;
-            }
-            if (mine == 0)
-                continue;
-
-            int global_vb = K_vb * (int)graph.num_obs_patches + s;
-            Task* ri = group_root[loi];
-            Task* rj = group_root[loj];
-            // A partition this seam touches, on obs oi's own side: si.oi*K_p is oi's global partition
-            // base, si.vb_left+1 is the local partition offset within oi immediately right of the
-            // seam's own vb_left boundary. Verified this session: this is exactly the partition the
-            // old vb_solver_offset formula (-global_vb + si.oi*K_p + si.vb_left+1, combined with
-            // t->part == global_vb) resolved to -- also exactly send_solution_to_remote_pe's/
-            // get_solution_from_remote_pe's own independently-derived window-start formula for the
-            // oi side (p_start = vb_left+1+<oi's own p_offset>).
-            pm::Mwpm* seam_solver = solver_for(shot_id, si.oi * K_p + si.vb_left + 1);
-            if (ri == rj) {
-                tasks.emplace_back(global_vb, ri, ri, seam_solver);
-                // ri->only_child = true;
-            } else {
-                tasks.emplace_back(global_vb, ri, rj, seam_solver);
-            }
-            // Tag this local-seam fusion is_extraction_unit_connector so post_hoc_chunk_and_post's
-            // existing, fully generic walk divides the seam (via divide_vb) before recursing into
-            // each observable's own (already unit-tagged, see the per-observable construction above)
-            // subtree -- exactly the "seams are unilaterally divided first" requirement, with no
-            // changes needed to post_hoc_chunk_and_post/divide_vb themselves.
-            tasks.back().is_extraction_unit_connector = true;
-            // tasks.back().seam_vb_slot          = K_vb + s;
-#ifdef ENABLE_DRAW_FLAGS
-            tasks.back().left_obs_patch_id = si.oi;
-            tasks.back().right_obs_patch_id = si.oj;
-#endif
-
-            Task* new_root = &tasks.back();
-            for (int lo2 = 0; lo2 < my_obs_count; ++lo2)
-                if (group_root[lo2] == ri || group_root[lo2] == rj)
-                    group_root[lo2] = new_root;
-        }
-
-        // --- Cross-PE seam tasks ---
         auto& crt = shot_buffer->buffer[shot_id].cross_rank_tasks;
-        crt.reserve(my_remote_seams.size());
-        const int base_pe = (int)graph.num_obs_patches / n_pes;
-        const int rem_pe  = (int)graph.num_obs_patches % n_pes;
-        for (size_t seam_i = 0; seam_i < my_remote_seams.size(); ++seam_i) {
-            const int s = my_remote_seams[seam_i].first;
-            const bool oi_local = my_remote_seams[seam_i].second;
-            auto& si = seam_infos[s];
-            const int loi = si.oi - my_obs_start;
-            const int loj = si.oj - my_obs_start;
+        tasks.reserve(static_cast<size_t>(my_obs_count * (2*K_p - 1) + num_seams + 1));
+        crt.reserve((size_t)num_seams);
 
-            const int local_lo   = oi_local ? loi : loj;
-            Task* local_child    = group_root[local_lo];  // top of local computation (post-Union-Find)
-            const bool iamleft   = oi_local;              // oi < oj always (map sorted), so oi_local ↔ left
-            const int remote_obs = oi_local ? si.oj : si.oi;
+        if (!config_parallel::extract_preemptively) {
+            // ==================== Non-preemptive: unchanged behavior ====================
+            // Each observable becomes one full balanced tree; seams/CRTs fuse whole-observable roots
+            // together after the fact. post_hoc_chunk_and_post (unmodified) does all the actual
+            // unit-by-unit division+posting at extraction time, walking this static tree top-down.
+            std::vector<Task*> obs_roots(my_obs_count, nullptr);
+            for (int lo = 0; lo < my_obs_count; ++lo) {
+                const int o = my_obs_start + lo;
+                const int obs_p_offset = o * K_p;
+                const int obs_vb_offset = o * K_vb;
+                const int tree_start = lo * (2*K_p - 1);
+                const std::shared_ptr<pm::Mwpm>* solver_base =
+                    &solvers[num_solvers_per_buffer * shot_id + (obs_p_offset - my_partitions_start)];
+                for (int lp = 0; lp < K_p; ++lp) {
+                    if (shot_id == 0) my_partition_task_ids.push_back(tasks.size());
+                    tasks.emplace_back(obs_p_offset + lp, lp - 1, lp, solver_base[lp].get());
+                }
+                auto on_fusion = [&](Task* fusion, size_t vb_id) { fusion->vb_marker = (int)vb_id; };
+                std::vector<RangeInfo> unit_roots = build_extraction_units(
+                    tasks, obs_vb_offset, /*leaf_base_idx=*/tree_start, (size_t)K_p,
+                    config_parallel::L, solver_base, on_fusion);
+                RangeInfo obs_root = pair_up(tasks, obs_vb_offset, unit_roots, /*tag_connector=*/true,
+                                              solver_base, on_fusion);
+                obs_roots[lo] = obs_root.task;
+            }
 
-            // Determine which PE owns remote_obs
-            int other_pid;
-            if (remote_obs < rem_pe * (base_pe + 1))
-                other_pid = remote_obs / (base_pe + 1);
-            else
-                other_pid = rem_pe + (remote_obs - rem_pe * (base_pe + 1)) / base_pe;
+            std::vector<Task*> group_root(my_obs_count);
+            for (int lo = 0; lo < my_obs_count; ++lo) {
+                group_root[lo] = obs_roots[lo];
+                if (DEBUG) std::cout << "  " << group_root[lo];
+            }
+            if (DEBUG) std::cout << "\n" << std::flush;
 
-            const int global_vb = K_vb * (int)graph.num_obs_patches + s;
-            uint64_t*      sp = get_task_status_ptr_for_seam(shot_id, s);
-            FusionSummary* fp = get_fusion_summary_ptr_for_seam(shot_id, s);
-            // Same anchor pattern as the local-seam case above, generalized to whichever side is
-            // local -- a partition this CRT touches, in my own local observable.
-            pm::Mwpm* crt_solver = solver_for(shot_id, (oi_local ? si.oi : si.oj) * K_p + si.vb_left + 1);
+            for (int s = 0; s < num_seams; ++s) {
+                const auto& si = seam_infos[s];
+                const int loi = si.oi - my_obs_start, loj = si.oj - my_obs_start;
+                const bool oi_local = seam_ownership[s].oi_local, oj_local = seam_ownership[s].oj_local;
+                if (oi_local && oj_local) {
+                    int global_vb = K_vb * (int)graph.num_obs_patches + s;
+                    Task* ri = group_root[loi];
+                    Task* rj = group_root[loj];
+                    pm::Mwpm* seam_solver = solver_for(shot_id, si.oi * K_p + si.vb_left + 1);
+                    if (ri == rj) {
+                        tasks.emplace_back(global_vb, ri, ri, seam_solver);
+                    } else {
+                        tasks.emplace_back(global_vb, ri, rj, seam_solver);
+                    }
+                    tasks.back().is_extraction_unit_connector = true;
+#ifdef ENABLE_DRAW_FLAGS
+                    tasks.back().left_obs_patch_id = si.oi;
+                    tasks.back().right_obs_patch_id = si.oj;
+#endif
+                    Task* new_root = &tasks.back();
+                    for (int lo2 = 0; lo2 < my_obs_count; ++lo2)
+                        if (group_root[lo2] == ri || group_root[lo2] == rj)
+                            group_root[lo2] = new_root;
+                } else if (oi_local || oj_local) {
+                    const int local_lo = oi_local ? loi : loj;
+                    Task* local_child = group_root[local_lo];
+                    const bool iamleft = oi_local;
+                    const int remote_obs = oi_local ? si.oj : si.oi;
+                    int other_pid = other_pid_for(remote_obs);
+                    int global_vb = K_vb * (int)graph.num_obs_patches + s;
+                    uint64_t* sp = get_task_status_ptr_for_seam(shot_id, s);
+                    FusionSummary* fp = get_fusion_summary_ptr_for_seam(shot_id, s);
+                    pm::Mwpm* crt_solver = solver_for(shot_id, (oi_local ? si.oi : si.oj) * K_p + si.vb_left + 1);
+                    crt.emplace_back(global_vb, local_child, iamleft, si.vb_left, si.vb_right,
+                                      other_pid, sp, sp+1, sp+2, fp, crt_solver);
+                    crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
+                    crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
+                    if (DEBUG) {
+                        auto& t = crt.back();
+                        std::cout << "PE" << pid << " OBS cross-rank task s=" << s << ":\n"
+                                  << "    obs_a: " << si.oi << "  obs_b: " << si.oj << "\n"
+                                  << "    vb=" << t.part << " vb_left=" << t.vb_left << " vb_right=" << t.vb_right << "\n"
+                                  << "    iamleft=" << t.iamleft << " other_pid=" << t.other_pid << "\n"
+                                  << "    child: " << t.child << "  me: " << &t << "  child->parent: " << t.child->parent << "\n"
+                                  << std::flush;
+                    }
+                }
+            }
+        } else {
+            // ==================== Preemptive: deferred-chain worklist construction ====================
+            // See now-its-time-to-jazzy-turing.md. Each observable advances its own per-unit chain
+            // (mirroring build_tasks_for_round_partitioning's own extract_preemptively loop) until it
+            // hits a seam/CRT boundary; local seams pause the lower-index (oi) side until the
+            // higher-index (oj) side catches up, then both continuations are built (right/oj first, so
+            // right_obs_parent can be recorded before the ordinary left_child->parent assignment
+            // overwrites `parent` to the left/oi value); CRTs never wait (only one local side).
+            struct ChainState {
+                int next_unit;
+                RangeInfo tip;
+                bool tip_is_raw;   // tip is still the untouched unit_roots[0] -- no fusion/seam/CRT has
+                                   // touched it yet, so (unlike every other step) no vb_left restriction
+                                   // applies when it's next consumed.
+                std::vector<RangeInfo> unit_roots;
+                const std::shared_ptr<pm::Mwpm>* solver_base;
+                int obs_vb_offset;
+                bool done;
+            };
+            std::vector<ChainState> chain_state(my_obs_count);
+            std::vector<Task*> obs_roots(my_obs_count, nullptr);
 
-            crt.emplace_back(global_vb, local_child, iamleft,
-                             si.vb_left, si.vb_right,
-                             other_pid, sp, sp+1, sp+2, fp, crt_solver);
-            crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
-            crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
+            for (int lo = 0; lo < my_obs_count; ++lo) {
+                const int o = my_obs_start + lo;
+                const int obs_p_offset = o * K_p;
+                const int obs_vb_offset = o * K_vb;
+                const std::shared_ptr<pm::Mwpm>* solver_base =
+                    &solvers[num_solvers_per_buffer * shot_id + (obs_p_offset - my_partitions_start)];
+                for (int lp = 0; lp < K_p; ++lp) {
+                    if (shot_id == 0) my_partition_task_ids.push_back(tasks.size());
+                    tasks.emplace_back(obs_p_offset + lp, lp - 1, lp, solver_base[lp].get());
+                }
+                auto on_fusion = [&](Task* fusion, size_t vb_id) { fusion->vb_marker = (int)vb_id; };
+                size_t leaf_base_idx = tasks.size() - (size_t)K_p;
+                std::vector<RangeInfo> unit_roots = build_extraction_units(
+                    tasks, obs_vb_offset, leaf_base_idx, (size_t)K_p, config_parallel::L,
+                    solver_base, on_fusion);
+                bool single_unit = unit_roots.size() == 1;
+                RangeInfo first_tip = unit_roots[0];
+                chain_state[lo] = ChainState{ 1, first_tip, true, std::move(unit_roots),
+                                               solver_base, obs_vb_offset, single_unit };
+                if (single_unit) obs_roots[lo] = first_tip.task;
+            }
 
-            if (DEBUG) {
-                auto& t = crt.back();
-                std::cout << "PE" << pid << " OBS cross-rank task s=" << s << ":\n"
-                          << "    obs_a: " << si.oi << "  obs_b: " << si.oj << "\n"
-                          << "    vb=" << t.part << " vb_left=" << t.vb_left << " vb_right=" << t.vb_right << "\n"
-                          << "    iamleft=" << t.iamleft << " other_pid=" << t.other_pid << "\n"
-                          << "    child: " << t.child << "  me: " << &t << "  child->parent: " << t.child->parent << "\n"
-                          << std::flush;
+            std::set<int> resolved_seams;
+            std::map<int, RangeInfo> pending_seam_tip;  // seam idx -> first-arriving side's tip
+
+            // Advances chain_state[lo] by exactly one meaningful step: either records-and-pauses on a
+            // local seam (returns, no fusion built), resolves a seam/CRT it's ready for (builds it,
+            // plus both continuations for a local seam), or builds one ordinary (possibly deferred)
+            // chain-link fusion. No-op (returns false) once chain_state[lo] is done.
+            std::function<bool(int)> advance_one_step = [&](int lo) -> bool {
+                auto& cs = chain_state[lo];
+                if (cs.done) return false;
+                const int o = my_obs_start + lo;
+                const int cur_closed_unit = cs.next_unit - 1;
+
+                for (int s = 0; s < num_seams; ++s) {
+                    if (resolved_seams.count(s)) continue;
+                    const auto& si = seam_infos[s];
+                    if (si.unit_hi != cur_closed_unit) continue;
+                    const bool is_oi = (si.oi == o);
+                    const bool is_oj = (si.oj == o);
+                    if (!is_oi && !is_oj) continue;
+
+                    if (seam_ownership[s].oi_local && seam_ownership[s].oj_local) {
+                        auto it = pending_seam_tip.find(s);
+                        if (it == pending_seam_tip.end()) {
+                            pending_seam_tip[s] = cs.tip;  // I'm first (always the oi/lower side) -- pause
+                            return true;
+                        }
+                        RangeInfo other_tip = it->second;
+                        pending_seam_tip.erase(it);
+                        resolved_seams.insert(s);
+                        RangeInfo& oi_tip = is_oi ? cs.tip : other_tip;
+                        RangeInfo& oj_tip = is_oi ? other_tip : cs.tip;
+                        int global_vb = K_vb * (int)graph.num_obs_patches + s;
+                        pm::Mwpm* seam_solver = solver_for(shot_id, si.oi * K_p + si.vb_left + 1);
+                        Task* ri = oi_tip.task;
+                        Task* rj = oj_tip.task;
+                        if (ri == rj) tasks.emplace_back(global_vb, ri, ri, seam_solver);
+                        else tasks.emplace_back(global_vb, ri, rj, seam_solver);
+                        Task* seam_task = &tasks.back();
+                        seam_task->is_extraction_unit_connector = true;
+#ifdef ENABLE_DRAW_FLAGS
+                        seam_task->left_obs_patch_id = si.oi;
+                        seam_task->right_obs_patch_id = si.oj;
+#endif
+                        const int lo_oi = si.oi - my_obs_start;
+                        const int lo_oj = si.oj - my_obs_start;
+                        // .task -> seam, .leftmost/.rightmost unchanged (each side's own bookkeeping,
+                        // independent of the seam) -- keeps each side's own vb numbering continuous.
+                        chain_state[lo_oi].tip = { seam_task, chain_state[lo_oi].tip.leftmost, chain_state[lo_oi].tip.rightmost };
+                        chain_state[lo_oi].tip_is_raw = false;
+                        chain_state[lo_oj].tip = { seam_task, chain_state[lo_oj].tip.leftmost, chain_state[lo_oj].tip.rightmost };
+                        chain_state[lo_oj].tip_is_raw = false;
+                        // Right (oj) first: auto-sets seam_task->parent, captured into right_obs_parent
+                        // before left (oi)'s own construction overwrites parent to the left value.
+                        advance_one_step(lo_oj);
+                        // parent is TaskBase*; the continuation fusion just built by advance_one_step
+                        // above is always a plain Task (never a CrossRankTask), safe to downcast.
+                        seam_task->right_obs_parent = static_cast<Task*>(seam_task->parent);
+                        advance_one_step(lo_oi);
+                        return true;
+                    } else {
+                        // Remote seam (CRT) -- only my own side exists locally, never waits.
+                        const bool oi_local_b = seam_ownership[s].oi_local;
+                        Task* local_child = cs.tip.task;
+                        const bool iamleft = oi_local_b;
+                        const int remote_obs = oi_local_b ? si.oj : si.oi;
+                        const int other_pid = other_pid_for(remote_obs);
+                        const int global_vb = K_vb * (int)graph.num_obs_patches + s;
+                        uint64_t* sp = get_task_status_ptr_for_seam(shot_id, s);
+                        FusionSummary* fp = get_fusion_summary_ptr_for_seam(shot_id, s);
+                        pm::Mwpm* crt_solver = solver_for(shot_id, (oi_local_b ? si.oi : si.oj) * K_p + si.vb_left + 1);
+                        crt.emplace_back(global_vb, local_child, iamleft, si.vb_left, si.vb_right,
+                                          other_pid, sp, sp+1, sp+2, fp, crt_solver);
+                        crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
+                        crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
+                        CrossRankTask* crt_task = &crt.back();
+                        resolved_seams.insert(s);
+                        if (cs.next_unit < (int)cs.unit_roots.size()) {
+                            const RangeInfo& next_ru = cs.unit_roots[cs.next_unit];
+                            const int vb_id = (int)cs.tip.rightmost;
+                            pm::Mwpm* step_solver = cs.solver_base[vb_id].get();
+                            tasks.emplace_back(vb_id + cs.obs_vb_offset, crt_task, next_ru.task, step_solver);
+                            Task* fusion = &tasks.back();
+                            fusion->vb_marker = vb_id;
+                            fusion->is_extraction_unit_connector = true;
+                            // Never deferred (nothing past a CRT is inside its own span) and always
+                            // restricted (a CRT, like a seam, always represents now-closed territory,
+                            // regardless of tip_is_raw -- there is no "very first fusion" exception for
+                            // a CRT the way there is for a raw chain start).
+                            fusion->vb_left = crt_task->part;
+                            cs.tip = { fusion, cs.tip.leftmost, next_ru.rightmost };
+                            cs.tip_is_raw = false;
+                            cs.next_unit += 1;
+                        } else {
+                            cs.done = true;
+                            obs_roots[lo] = nullptr;  // this observable's own root is the CRT itself;
+                                                       // root-counting below already walks cross_rank_tasks
+                        }
+                        return true;
+                    }
+                }
+
+                if (cs.next_unit >= (int)cs.unit_roots.size()) {
+                    cs.done = true;
+                    obs_roots[lo] = cs.tip.task;
+                    return true;
+                }
+
+                // Ordinary chain-link step, possibly deferred.
+                const int next_unit = cs.next_unit;
+                bool is_deferred = false;
+                for (int s = 0; s < num_seams; ++s) {
+                    const auto& si = seam_infos[s];
+                    if ((si.oi == o || si.oj == o) && si.unit_lo < next_unit && next_unit <= si.unit_hi) {
+                        is_deferred = true;
+                        break;
+                    }
+                }
+                const RangeInfo& next_ru = cs.unit_roots[next_unit];
+                const int vb_id = (int)cs.tip.rightmost;
+                pm::Mwpm* step_solver = cs.solver_base[vb_id].get();
+                tasks.emplace_back(vb_id + cs.obs_vb_offset, cs.tip.task, next_ru.task, step_solver);
+                Task* fusion = &tasks.back();
+                fusion->vb_marker = vb_id;
+                fusion->is_extraction_unit_connector = true;
+                fusion->defer_division = is_deferred;
+                if (!is_deferred && !cs.tip_is_raw) fusion->vb_left = cs.tip.task->part;
+                cs.tip = { fusion, cs.tip.leftmost, next_ru.rightmost };
+                cs.tip_is_raw = false;
+                cs.next_unit += 1;
+                return true;
+            };
+
+            int remaining = 0;
+            for (int lo = 0; lo < my_obs_count; ++lo) if (!chain_state[lo].done) ++remaining;
+            while (remaining > 0) {
+                for (int lo = 0; lo < my_obs_count; ++lo) {
+                    if (!chain_state[lo].done) advance_one_step(lo);
+                }
+                remaining = 0;
+                for (int lo = 0; lo < my_obs_count; ++lo) if (!chain_state[lo].done) ++remaining;
             }
         }
+
         // Count chain tops (parent==nullptr) as independent roots for this PE.
         // CRT constructor chain-walk already linked CRTs above local roots.
         {
@@ -791,16 +972,39 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                        + "  vb_marker: " + std::to_string(t.vb_marker)
                        + "  solver: " + std::format("{:p}", static_cast<void*>(t.solver)) + "\n"
                        + "    is_extraction_unit_root: " + std::to_string(t.is_extraction_unit_root)
-                       + "  is_extraction_unit_connector: " + std::to_string(t.is_extraction_unit_connector) + "\n"
+                       + "  is_extraction_unit_connector: " + std::to_string(t.is_extraction_unit_connector)
+                       + "  defer_division: " + std::to_string(t.defer_division) + "\n"
                        + "    left_child: " + std::format("{:p}",static_cast<void*>(t.left_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.left_child->part) + ")" : "")
                        + "  me: " + std::format("{:p}", static_cast<void*>(&t))
                        + "  right_child: " + std::format("{:p}", static_cast<void*>(t.right_child)) + ((t.right_child) ? "(" + (std::string)(t.right_child->is_fusion ? "f" : "p") + std::to_string(t.right_child->part) + ")" : "") + "\n"
+                       + "    left_crt_child: " + std::format("{:p}", static_cast<void*>(t.left_crt_child))
+                       + "  right_obs_parent: " + std::format("{:p}", static_cast<void*>(t.right_obs_parent)) + ((t.right_obs_parent) ? "(f" + std::to_string(t.right_obs_parent->part) + ")" : "") + "\n"
                        + "    parent: f" + std::format("{:p}", static_cast<void*>(t.parent)) + (t.child_bit == 1 ? "  left" : "  right")
                     //    + "  only_child: " + std::to_string(t.only_child)
                        + "\n";
             }
         }
         std::cout << tasks << std::flush;
+
+        // Verification for now-its-time-to-jazzy-turing.md Verification step 3: every entry must be a
+        // valid, in-range leaf (never a fusion) index into buffer[0].tasks, covering each leaf exactly
+        // once. Only populated once (shot_id == 0), so only buffer 0 is meaningful here.
+        std::string pt = "PE" + std::to_string(pid) + " my_partition_task_ids (n="
+            + std::to_string(my_partition_task_ids.size()) + ", my_partition_count="
+            + std::to_string(my_partition_count) + "):\n";
+        auto& buf0 = shot_buffer->buffer[0];
+        std::set<size_t> seen;
+        bool all_leaves = true, all_unique = true, all_in_range = true;
+        for (size_t idx : my_partition_task_ids) {
+            pt += " " + std::to_string(idx);
+            if (idx >= buf0.tasks.size()) { all_in_range = false; continue; }
+            if (buf0.tasks[idx].is_fusion) all_leaves = false;
+            if (!seen.insert(idx).second) all_unique = false;
+        }
+        pt += "\n  all_leaves=" + std::to_string(all_leaves)
+            + " all_unique=" + std::to_string(all_unique)
+            + " all_in_range=" + std::to_string(all_in_range) + "\n";
+        std::cout << pt << std::flush;
     }
 }
 #endif

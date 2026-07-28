@@ -118,6 +118,11 @@ struct TaskBase {
     }
 };
 
+#ifdef USE_SHMEM
+struct CrossRankTask;  // forward declare: Task::left_crt_child needs the pointer type, CrossRankTask
+                        // is defined later in this file (and only under USE_SHMEM)
+#endif
+
 struct Task : public TaskBase {
    private:
     // for partition solves,
@@ -148,11 +153,35 @@ struct Task : public TaskBase {
     bool is_extraction_unit_connector{false};
     bool is_extraction_unit_root{false};
 
+    // Preemptive OBS extraction (deferred-chain-with-embedded-seams design, see
+    // now-its-time-to-jazzy-turing.md): true on an is_extraction_unit_connector chain-link whose
+    // newly-closed unit falls inside an active seam's [unit_lo, unit_hi) span -- tells the decode-loop
+    // phase to skip the immediate divide+post (and skip the usual vb_left restriction) until the seam
+    // itself resolves and walks back to divide+post every deferred unit at once. False (default) for
+    // every ROUND-partitioning fusion and every OBS chain-link outside a seam's span, unchanged from
+    // today's immediate-divide behavior.
+    bool defer_division{false};
+
     // bool only_child{ false };
 #ifdef USE_SHMEM
     // int seam_vb_slot{ -1 };             // virtual_boundaries slot index for this seam's VB nodes
     int left_obs_patch_id{-1};   // For OBS local seam tasks: left obs patch
     int right_obs_patch_id{-1};  // For OBS local seam tasks: right obs patch
+
+    // A seam fusion is the left child of two different downstream fusions (one continuing each
+    // observable's own chain past the seam) -- TaskBase::parent only holds one. By construction-order
+    // convention (build the right observable's continuation first, copy its auto-set parent here, then
+    // build the left observable's continuation, which overwrites parent to the left value), `parent`
+    // always ends up meaning "left observable's continuation" and this field the right's. Doubles as
+    // the universally-available "is this a seam fusion" tag (right_obs_parent != nullptr) -- left_obs_
+    // patch_id/right_obs_patch_id above only exist under ENABLE_DRAW_FLAGS, not general enough for this.
+    Task* right_obs_parent{nullptr};
+
+    // The CRT case needs a fusion whose left operand is a CrossRankTask*, but left_child/right_child
+    // above are strictly typed Task* (CrossRankTask is a sibling of Task, not a subclass -- both derive
+    // from TaskBase only). Only ever populated on the one fusion immediately following a CRT in a
+    // single-local-observable deferred chain (never on right_child's side).
+    CrossRankTask* left_crt_child{nullptr};
 #endif
 
     Task(int partition, pm::Mwpm* solver)
@@ -177,6 +206,15 @@ struct Task : public TaskBase {
         right_child->child_bit = 2;
     }
 
+#ifdef USE_SHMEM
+    // The one fusion immediately following a CRT in a single-local-observable deferred chain (see
+    // left_crt_child above): left operand is a CrossRankTask*, not a Task*. Declared here, defined out
+    // of line after CrossRankTask's own definition later in this file -- CrossRankTask is only
+    // forward-declared at this point, so its inherited TaskBase members (vb_left, parent) aren't
+    // accessible yet.
+    Task(int vb, CrossRankTask* left_crt_child, Task* right_child, pm::Mwpm* solver);
+#endif
+
     Task(const Task&) = delete;
     Task& operator=(const Task&) = delete;
     Task(Task&& other) noexcept
@@ -189,10 +227,13 @@ struct Task : public TaskBase {
         child_bit = other.child_bit;
         is_extraction_unit_connector = other.is_extraction_unit_connector;
         is_extraction_unit_root = other.is_extraction_unit_root;
+        defer_division = other.defer_division;
 #ifdef USE_SHMEM
         // seam_vb_slot = other.seam_vb_slot;
         left_obs_patch_id = other.left_obs_patch_id;
         right_obs_patch_id = other.right_obs_patch_id;
+        right_obs_parent = other.right_obs_parent;
+        left_crt_child = other.left_crt_child;
 #endif
     }
     Task& operator=(Task&& other) noexcept {
@@ -204,10 +245,13 @@ struct Task : public TaskBase {
         child_bit = other.child_bit;
         is_extraction_unit_connector = other.is_extraction_unit_connector;
         is_extraction_unit_root = other.is_extraction_unit_root;
+        defer_division = other.defer_division;
 #ifdef USE_SHMEM
         // seam_vb_slot = other.seam_vb_slot;
         left_obs_patch_id = other.left_obs_patch_id;
         right_obs_patch_id = other.right_obs_patch_id;
+        right_obs_parent = other.right_obs_parent;
+        left_crt_child = other.left_crt_child;
 #endif
         return *this;
     }
@@ -491,6 +535,18 @@ public:
     }
 
 };
+
+// Out-of-line: CrossRankTask must be a complete type for left_crt_child->vb_left/parent below (only
+// forward-declared at the point of Task's own in-class declaration, see left_crt_child's comment).
+inline Task::Task(int vb, CrossRankTask* left_crt_child, Task* right_child, pm::Mwpm* solver) :
+    TaskBase(vb, left_crt_child->vb_left, right_child->vb_right, true, false, solver),
+    left_crt_child(left_crt_child),
+    right_child(right_child)
+{
+    left_crt_child->parent = this;
+    right_child->parent = this;
+    right_child->child_bit = 2;
+}
 #endif
 
 #endif  // PYMATCHING2_DECODING_TASK_H
