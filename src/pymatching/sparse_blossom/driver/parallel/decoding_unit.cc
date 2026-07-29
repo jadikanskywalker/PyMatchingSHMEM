@@ -19,6 +19,7 @@
 #include <functional>
 #include <omp.h>
 #include <set>
+#include <unordered_map>
 #include <vector>
 #include <format>
 
@@ -631,31 +632,17 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
         si.unit_lo = (si.vb_left + 1) / L;
         si.unit_hi = si.vb_right / L;
     }
-    // Two seams sharing an observable must not claim the same extraction unit ("same-unit double
-    // seams" -- explicitly out of scope for this construction, see the plan). The existing window
-    // conflict resolution above only guarantees non-overlapping *partition* ranges, not unit ranges,
-    // so this needs its own check. Only meaningful for preemptive extraction -- non-preemptive never
-    // looks at unit_lo/unit_hi at all, so a "conflict" here is not actually a conflict for it.
-    // Fail loudly during construction rather than silently building a wrong graph.
-    for (int si_idx = 0; config_parallel::extract_preemptively && si_idx < num_seams; ++si_idx) {
-        auto& si = seam_infos[si_idx];
-        for (int sj_idx = si_idx + 1; sj_idx < num_seams; ++sj_idx) {
-            auto& sj = seam_infos[sj_idx];
-            if (si.oi != sj.oi && si.oi != sj.oj && si.oj != sj.oi && si.oj != sj.oj)
-                continue;
-            if (si.unit_lo <= sj.unit_hi && sj.unit_lo <= si.unit_hi) {
-                throw std::invalid_argument(
-                    "PE" + std::to_string(pid) + ": seams " + std::to_string(si_idx) + " and " +
-                    std::to_string(sj_idx) + " claim overlapping extraction units [" +
-                    std::to_string(si.unit_lo) + "," + std::to_string(si.unit_hi) + "] / [" +
-                    std::to_string(sj.unit_lo) + "," + std::to_string(sj.unit_hi) +
-                    "] -- same-unit double seams are not supported by preemptive extraction yet.");
-            }
+    if (DEBUG) {
+        for (size_t s = 0; s < seam_infos.size(); ++s) {
+            auto& si = seam_infos[s];
+            std::cout << "PE" << pid << " seam_infos[" << s << "]: oi=" << si.oi << " oj=" << si.oj
+                      << " vb_left=" << si.vb_left << " vb_right=" << si.vb_right
+                      << " unit_lo=" << si.unit_lo << " unit_hi=" << si.unit_hi << "\n" << std::flush;
         }
     }
-
     // Which observable(s) of each seam are local to this PE -- computed once, reused every shot_id
     // (identical graph structure every shot) and by both the preemptive and non-preemptive branches.
+    // Computed before the overlap assertion below (which needs it to narrow its scope).
     struct SeamOwnership { bool oi_local, oj_local; };
     std::vector<SeamOwnership> seam_ownership(num_seams);
     for (int s = 0; s < num_seams; ++s) {
@@ -663,6 +650,51 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
         const int loi = si.oi - my_obs_start, loj = si.oj - my_obs_start;
         seam_ownership[s] = { (loi >= 0 && loi < my_obs_count), (loj >= 0 && loj < my_obs_count) };
     }
+
+    // Two seams sharing an observable and ending on the exact same extraction unit ("same-unit_hi
+    // collision") are only unsafe when at least one is a CrossRankTask: CRT construction always commits
+    // immediately (advances cs.next_unit as part of building it), so it can't pause/defer for a sibling
+    // the way a local seam can -- processing the first of two same-unit_hi CRTs permanently hides the
+    // second (see now-its-time-to-jazzy-turing.md Phase 1.5 Design §6). Two local seams, or a local seam
+    // and a CRT, sharing a unit_hi are both fully supported (Design §§2-5); only two CRTs (from THIS
+    // PE's perspective) sharing a unit_hi remain unsafe. Only meaningful for preemptive extraction --
+    // non-preemptive never looks at unit_lo/unit_hi at all.
+    for (int si_idx = 0; config_parallel::extract_preemptively && si_idx < num_seams; ++si_idx) {
+        auto& si = seam_infos[si_idx];
+        for (int sj_idx = si_idx + 1; sj_idx < num_seams; ++sj_idx) {
+            auto& sj = seam_infos[sj_idx];
+            // si/sj may share an observable via any of oi-oi/oi-oj/oj-oi/oj-oj (all four are checked
+            // independently -- when si and sj are the exact same observable pair, e.g. two seams both
+            // between obs0/obs1, BOTH oi and oj are simultaneously shared, and either one alone being
+            // locally owned makes this collision relevant to this PE). Require THIS PE to own at least
+            // one such shared observable -- otherwise this collision is never reached by this PE's own
+            // advance_one_step calls (each PE only processes its own locally-owned observables' chains),
+            // regardless of where si/sj's other endpoints happen to live.
+            auto locally_owned = [&](int obs) {
+                const int lo = obs - my_obs_start;
+                return lo >= 0 && lo < my_obs_count;
+            };
+            int shared_obs = -1;
+            if (si.oi == sj.oi && locally_owned(si.oi)) shared_obs = si.oi;
+            else if (si.oi == sj.oj && locally_owned(si.oi)) shared_obs = si.oi;
+            else if (si.oj == sj.oi && locally_owned(si.oj)) shared_obs = si.oj;
+            else if (si.oj == sj.oj && locally_owned(si.oj)) shared_obs = si.oj;
+            if (shared_obs < 0) continue;
+            if (si.unit_hi != sj.unit_hi) continue;
+            const bool si_full_local = seam_ownership[si_idx].oi_local && seam_ownership[si_idx].oj_local;
+            const bool sj_full_local = seam_ownership[sj_idx].oi_local && seam_ownership[sj_idx].oj_local;
+            if (si_full_local || sj_full_local) continue;  // at least one is a local seam -- always safe
+            throw std::invalid_argument(
+                "PE" + std::to_string(pid) + ": seams " + std::to_string(si_idx) + " and " +
+                std::to_string(sj_idx) + " end on the same extraction unit (" +
+                std::to_string(si.unit_hi) +
+                ") for shared observable " + std::to_string(shared_obs) +
+                ", and both are cross-rank seams (CrossRankTask) from this PE's perspective -- CRT "
+                "construction cannot defer for a sibling ending on the same unit the way local seams "
+                "can; see now-its-time-to-jazzy-turing.md Phase 1.5.");
+        }
+    }
+
     const int base_pe = (int)graph.num_obs_patches / n_pes;
     const int rem_pe  = (int)graph.num_obs_patches % n_pes;
     auto other_pid_for = [&](int remote_obs) {
@@ -759,12 +791,15 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             }
         } else {
             // ==================== Preemptive: deferred-chain worklist construction ====================
-            // See now-its-time-to-jazzy-turing.md. Each observable advances its own per-unit chain
-            // (mirroring build_tasks_for_round_partitioning's own extract_preemptively loop) until it
-            // hits a seam/CRT boundary; local seams pause the lower-index (oi) side until the
-            // higher-index (oj) side catches up, then both continuations are built (right/oj first, so
-            // right_obs_parent can be recorded before the ordinary left_child->parent assignment
-            // overwrites `parent` to the left/oi value); CRTs never wait (only one local side).
+            // See now-its-time-to-jazzy-turing.md (Phase 1 + Phase 1.5). Each observable advances its
+            // own per-unit chain (mirroring build_tasks_for_round_partitioning's own extract_preemptively
+            // loop) until it hits a seam/CRT boundary. Local seams pause the lower-index (oi) side until
+            // the higher-index (oj) side catches up; CRTs never wait (only one local side). Unlike
+            // Phase 1, parent/right_obs_parent assignment for a seam's two continuations is fully
+            // order-independent (via seam_sides + fixup_seam_parent below) rather than relying on a
+            // fixed "build right first" construction order -- required so any number of seams/CRTs can
+            // cascade through the same extraction unit correctly, regardless of which side's chain
+            // happens to reach it first or how many outer-loop passes apart.
             struct ChainState {
                 int next_unit;
                 RangeInfo tip;
@@ -775,6 +810,10 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                 const std::shared_ptr<pm::Mwpm>* solver_base;
                 int obs_vb_offset;
                 bool done;
+                int paused_on_seam{-1};  // >=0: blocked on seam s, waiting for its other side to arrive.
+                                          // Only the resolving side may wake this (clears it explicitly);
+                                          // the outer driver loop must never call advance_one_step while
+                                          // set, or it can rediscover its own pending tip and self-fuse.
             };
             std::vector<ChainState> chain_state(my_obs_count);
             std::vector<Task*> obs_roots(my_obs_count, nullptr);
@@ -803,29 +842,59 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
 
             std::set<int> resolved_seams;
             std::map<int, RangeInfo> pending_seam_tip;  // seam idx -> first-arriving side's tip
+            std::unordered_map<Task*, std::pair<int,int>> seam_sides;  // local-seam Task* -> (oi, oj)
+
+            // After a construction call has (via its own ctor's side effect) just set node->parent =
+            // new_owner, correct it if node is a tracked dual-parent local seam and `owner` (the
+            // statically-known observable this construction belongs to) is that seam's oj/right side:
+            // relocate new_owner into right_obs_parent and restore parent to whatever legitimately held
+            // it before this call touched it (null if oi hasn't built yet, or oi's own continuation if
+            // it already had). If owner is the oi/left side, the ctor's default assignment is already
+            // the correct final value -- no-op. Order-independent: correctness never depends on whether
+            // the other side has already been built, paused, or hasn't been reached yet.
+            auto fixup_seam_parent = [&](Task* node, int owner, TaskBase* saved_parent, TaskBase* new_owner) {
+                auto it = seam_sides.find(node);
+                if (it == seam_sides.end()) return;
+                if (owner == it->second.second) {  // oj / right side
+                    node->right_obs_parent = new_owner;
+                    node->parent = saved_parent;
+                }
+            };
 
             // Advances chain_state[lo] by exactly one meaningful step: either records-and-pauses on a
-            // local seam (returns, no fusion built), resolves a seam/CRT it's ready for (builds it,
-            // plus both continuations for a local seam), or builds one ordinary (possibly deferred)
-            // chain-link fusion. No-op (returns false) once chain_state[lo] is done.
+            // local seam (returns, no fusion built), resolves every seam/CRT ready at the current closed
+            // unit (looping -- see Phase 1.5 Design §5, since a local-seam resolve doesn't change
+            // cs.next_unit and a CRT does, both need a chance to reveal a sibling seam sharing the same
+            // unit_hi), or builds one ordinary (possibly deferred) chain-link fusion. No-op (returns
+            // false) once chain_state[lo] is done or currently paused.
             std::function<bool(int)> advance_one_step = [&](int lo) -> bool {
                 auto& cs = chain_state[lo];
                 if (cs.done) return false;
+                if (cs.paused_on_seam >= 0) return false;
                 const int o = my_obs_start + lo;
-                const int cur_closed_unit = cs.next_unit - 1;
 
-                for (int s = 0; s < num_seams; ++s) {
-                    if (resolved_seams.count(s)) continue;
+                while (true) {
+                    const int cur_closed_unit = cs.next_unit - 1;
+                    int found_s = -1;
+                    for (int s = 0; s < num_seams; ++s) {
+                        if (resolved_seams.count(s)) continue;
+                        const auto& si = seam_infos[s];
+                        if (si.unit_hi != cur_closed_unit) continue;
+                        if (si.oi != o && si.oj != o) continue;
+                        found_s = s;
+                        break;
+                    }
+                    if (found_s < 0) break;  // no (more) seam triggers here -- fall through below
+
+                    const int s = found_s;
                     const auto& si = seam_infos[s];
-                    if (si.unit_hi != cur_closed_unit) continue;
                     const bool is_oi = (si.oi == o);
-                    const bool is_oj = (si.oj == o);
-                    if (!is_oi && !is_oj) continue;
 
                     if (seam_ownership[s].oi_local && seam_ownership[s].oj_local) {
                         auto it = pending_seam_tip.find(s);
                         if (it == pending_seam_tip.end()) {
-                            pending_seam_tip[s] = cs.tip;  // I'm first (always the oi/lower side) -- pause
+                            pending_seam_tip[s] = cs.tip;  // I'm first -- pause, genuinely blocked
+                            cs.paused_on_seam = s;
                             return true;
                         }
                         RangeInfo other_tip = it->second;
@@ -833,13 +902,23 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                         resolved_seams.insert(s);
                         RangeInfo& oi_tip = is_oi ? cs.tip : other_tip;
                         RangeInfo& oj_tip = is_oi ? other_tip : cs.tip;
-                        int global_vb = K_vb * (int)graph.num_obs_patches + s;
-                        pm::Mwpm* seam_solver = solver_for(shot_id, si.oi * K_p + si.vb_left + 1);
                         Task* ri = oi_tip.task;
                         Task* rj = oj_tip.task;
-                        if (ri == rj) tasks.emplace_back(global_vb, ri, ri, seam_solver);
-                        else tasks.emplace_back(global_vb, ri, rj, seam_solver);
+                        TaskBase* saved_ri_parent = ri->parent;
+                        TaskBase* saved_rj_parent = (rj != ri) ? rj->parent : nullptr;
+                        int global_vb = K_vb * (int)graph.num_obs_patches + s;
+                        pm::Mwpm* seam_solver = solver_for(shot_id, si.oi * K_p + si.vb_left + 1);
+                        tasks.emplace_back(global_vb, ri, (ri == rj) ? ri : rj, seam_solver);
                         Task* seam_task = &tasks.back();
+                        if (ri != rj) {
+                            fixup_seam_parent(ri, si.oi, saved_ri_parent, seam_task);
+                            fixup_seam_parent(rj, si.oj, saved_rj_parent, seam_task);
+                            seam_sides[seam_task] = { si.oi, si.oj };
+                        }
+                        // ri==rj: both sides' chains were already merged by an earlier seam (rare,
+                        // pre-existing topological case, not introduced by this change) -- not given
+                        // dual-parent treatment; seam_task keeps whatever single parent the ordinary
+                        // ctor assigned, matching prior behavior for this narrow case.
                         seam_task->is_extraction_unit_connector = true;
 #ifdef ENABLE_DRAW_FLAGS
                         seam_task->left_obs_patch_id = si.oi;
@@ -851,16 +930,17 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                         // independent of the seam) -- keeps each side's own vb numbering continuous.
                         chain_state[lo_oi].tip = { seam_task, chain_state[lo_oi].tip.leftmost, chain_state[lo_oi].tip.rightmost };
                         chain_state[lo_oi].tip_is_raw = false;
+                        chain_state[lo_oi].paused_on_seam = -1;
                         chain_state[lo_oj].tip = { seam_task, chain_state[lo_oj].tip.leftmost, chain_state[lo_oj].tip.rightmost };
                         chain_state[lo_oj].tip_is_raw = false;
-                        // Right (oj) first: auto-sets seam_task->parent, captured into right_obs_parent
-                        // before left (oi)'s own construction overwrites parent to the left value.
-                        advance_one_step(lo_oj);
-                        // parent is TaskBase*; the continuation fusion just built by advance_one_step
-                        // above is always a plain Task (never a CrossRankTask), safe to downcast.
-                        seam_task->right_obs_parent = static_cast<Task*>(seam_task->parent);
-                        advance_one_step(lo_oi);
-                        return true;
+                        chain_state[lo_oj].paused_on_seam = -1;
+                        // No manual recursion into the other side: fixup_seam_parent is order-
+                        // independent, so whichever side builds its own continuation next -- via this
+                        // same loop's next iteration (if lo == lo_oi/lo_oj) or via the outer driver
+                        // loop's later call for the other lo -- routes correctly regardless of order or
+                        // timing. Loop back: this side's tip just changed, may hit another seam sharing
+                        // the same cur_closed_unit, or fall through to the ordinary step.
+                        continue;
                     } else {
                         // Remote seam (CRT) -- only my own side exists locally, never waits.
                         const bool oi_local_b = seam_ownership[s].oi_local;
@@ -872,11 +952,31 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                         uint64_t* sp = get_task_status_ptr_for_seam(shot_id, s);
                         FusionSummary* fp = get_fusion_summary_ptr_for_seam(shot_id, s);
                         pm::Mwpm* crt_solver = solver_for(shot_id, (oi_local_b ? si.oi : si.oj) * K_p + si.vb_left + 1);
+
+                        // Detach-before-walk: if local_child is a tracked dual-parent local seam and I'm
+                        // its oj (right) side with parent already claimed by the oi side, temporarily
+                        // null parent so CrossRankTask's own "walk to top of parent chain" ctor logic
+                        // stops exactly at local_child instead of climbing into the oi side's unrelated
+                        // subtree.
+                        auto sit = seam_sides.find(local_child);
+                        const bool tracked = (sit != seam_sides.end());
+                        const bool is_oj_side = tracked && (o == sit->second.second);
+                        TaskBase* saved_parent = tracked ? local_child->parent : nullptr;
+                        if (is_oj_side && local_child->parent != nullptr) local_child->parent = nullptr;
+
                         crt.emplace_back(global_vb, local_child, iamleft, si.vb_left, si.vb_right,
                                           other_pid, sp, sp+1, sp+2, fp, crt_solver);
                         crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
                         crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
                         CrossRankTask* crt_task = &crt.back();
+                        if (tracked && is_oj_side) {
+                            local_child->right_obs_parent = crt_task;
+                            local_child->parent = saved_parent;
+                        }
+                        // is_oi_side: local_child->parent is always still null here (only the oi side's
+                        // own construction ever legitimately writes parent, and it hasn't happened yet
+                        // if we're here now) -- ctor's walk already lands correctly, no-op.
+
                         resolved_seams.insert(s);
                         if (cs.next_unit < (int)cs.unit_roots.size()) {
                             const RangeInfo& next_ru = cs.unit_roots[cs.next_unit];
@@ -898,8 +998,9 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                             cs.done = true;
                             obs_roots[lo] = nullptr;  // this observable's own root is the CRT itself;
                                                        // root-counting below already walks cross_rank_tasks
+                            return true;
                         }
-                        return true;
+                        continue;
                     }
                 }
 
@@ -922,12 +1023,15 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                 const RangeInfo& next_ru = cs.unit_roots[next_unit];
                 const int vb_id = (int)cs.tip.rightmost;
                 pm::Mwpm* step_solver = cs.solver_base[vb_id].get();
-                tasks.emplace_back(vb_id + cs.obs_vb_offset, cs.tip.task, next_ru.task, step_solver);
+                Task* prior_tip_task = cs.tip.task;
+                TaskBase* saved_parent = prior_tip_task->parent;
+                tasks.emplace_back(vb_id + cs.obs_vb_offset, prior_tip_task, next_ru.task, step_solver);
                 Task* fusion = &tasks.back();
+                fixup_seam_parent(prior_tip_task, o, saved_parent, fusion);
                 fusion->vb_marker = vb_id;
                 fusion->is_extraction_unit_connector = true;
                 fusion->defer_division = is_deferred;
-                if (!is_deferred && !cs.tip_is_raw) fusion->vb_left = cs.tip.task->part;
+                if (!is_deferred && !cs.tip_is_raw) fusion->vb_left = prior_tip_task->part;
                 cs.tip = { fusion, cs.tip.leftmost, next_ru.rightmost };
                 cs.tip_is_raw = false;
                 cs.next_unit += 1;
@@ -938,7 +1042,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             for (int lo = 0; lo < my_obs_count; ++lo) if (!chain_state[lo].done) ++remaining;
             while (remaining > 0) {
                 for (int lo = 0; lo < my_obs_count; ++lo) {
-                    if (!chain_state[lo].done) advance_one_step(lo);
+                    if (!chain_state[lo].done && chain_state[lo].paused_on_seam < 0) advance_one_step(lo);
                 }
                 remaining = 0;
                 for (int lo = 0; lo < my_obs_count; ++lo) if (!chain_state[lo].done) ++remaining;
@@ -978,7 +1082,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                        + "  me: " + std::format("{:p}", static_cast<void*>(&t))
                        + "  right_child: " + std::format("{:p}", static_cast<void*>(t.right_child)) + ((t.right_child) ? "(" + (std::string)(t.right_child->is_fusion ? "f" : "p") + std::to_string(t.right_child->part) + ")" : "") + "\n"
                        + "    left_crt_child: " + std::format("{:p}", static_cast<void*>(t.left_crt_child))
-                       + "  right_obs_parent: " + std::format("{:p}", static_cast<void*>(t.right_obs_parent)) + ((t.right_obs_parent) ? "(f" + std::to_string(t.right_obs_parent->part) + ")" : "") + "\n"
+                       + "  right_obs_parent: " + std::format("{:p}", static_cast<void*>(t.right_obs_parent)) + ((t.right_obs_parent) ? "(" + (std::string)(t.right_obs_parent->is_cross_rank_fusion ? "crt" : "f") + std::to_string(t.right_obs_parent->part) + ")" : "") + "\n"
                        + "    parent: f" + std::format("{:p}", static_cast<void*>(t.parent)) + (t.child_bit == 1 ? "  left" : "  right")
                     //    + "  only_child: " + std::to_string(t.only_child)
                        + "\n";

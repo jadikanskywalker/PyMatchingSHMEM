@@ -169,13 +169,15 @@ struct Task : public TaskBase {
     int right_obs_patch_id{-1};  // For OBS local seam tasks: right obs patch
 
     // A seam fusion is the left child of two different downstream fusions (one continuing each
-    // observable's own chain past the seam) -- TaskBase::parent only holds one. By construction-order
-    // convention (build the right observable's continuation first, copy its auto-set parent here, then
-    // build the left observable's continuation, which overwrites parent to the left value), `parent`
-    // always ends up meaning "left observable's continuation" and this field the right's. Doubles as
-    // the universally-available "is this a seam fusion" tag (right_obs_parent != nullptr) -- left_obs_
-    // patch_id/right_obs_patch_id above only exist under ENABLE_DRAW_FLAGS, not general enough for this.
-    Task* right_obs_parent{nullptr};
+    // observable's own chain past the seam) -- TaskBase::parent only holds one. `parent` always means
+    // "the oi (lower-indexed) observable's continuation", this field "the oj (higher-indexed) side's" --
+    // assigned order-independently by decoding_unit.cc's fixup_seam_parent (see now-its-time-to-jazzy-
+    // turing.md Phase 1.5), not by construction order. TaskBase*, not Task*: the oj side's continuation
+    // may itself be a CrossRankTask (a local seam and a CRT can now share the same extraction unit).
+    // Doubles as the universally-available "is this a seam fusion" tag together with construction's own
+    // seam_sides map -- left_obs_patch_id/right_obs_patch_id above only exist under ENABLE_DRAW_FLAGS,
+    // not general enough for this.
+    TaskBase* right_obs_parent{nullptr};
 
     // The CRT case needs a fusion whose left operand is a CrossRankTask*, but left_child/right_child
     // above are strictly typed Task* (CrossRankTask is a sibling of Task, not a subclass -- both derive
