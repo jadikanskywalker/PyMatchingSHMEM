@@ -131,7 +131,7 @@ $threads_build predict \
     --rounds_per_partition $M \
     --use_threads \
     --extract_preemptively \
-    --extraction_unit_size 1 \
+    --extraction_unit_size 4 \
     --draw_frames \
     > log_parallel.out
 end_parallel=$(date +%s)

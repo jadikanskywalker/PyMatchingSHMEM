@@ -118,11 +118,6 @@ struct TaskBase {
     }
 };
 
-#ifdef USE_SHMEM
-struct CrossRankTask;  // forward declare: Task::left_crt_child needs the pointer type, CrossRankTask
-                        // is defined later in this file (and only under USE_SHMEM)
-#endif
-
 struct Task : public TaskBase {
    private:
     // for partition solves,
@@ -139,8 +134,14 @@ struct Task : public TaskBase {
    public:
 
     size_t child_bit;
-    Task* left_child{nullptr};
-    Task* right_child{nullptr};
+    // TaskBase*, not Task*: a child may be a CrossRankTask (a local seam/chain-link and a CRT can share
+    // an extraction unit -- see now-its-time-to-jazzy-turing.md Phase 1.6). Whichever consumer reads
+    // these back out and needs Task-specific members must check ->is_cross_rank_fusion first; every
+    // non-preemptive/ROUND consumer today only ever holds a genuine Task* here at runtime (CRTs there
+    // attach above a subtree root via CrossRankTask's own automatic parent-chain walk, never as a
+    // left_child/right_child), so those sites just need a static_cast, not new logic.
+    TaskBase* left_child{nullptr};
+    TaskBase* right_child{nullptr};
 
     // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md). Only meaningful
     // when is_fusion == true. Two roles, mutually exclusive:
@@ -178,12 +179,6 @@ struct Task : public TaskBase {
     // seam_sides map -- left_obs_patch_id/right_obs_patch_id above only exist under ENABLE_DRAW_FLAGS,
     // not general enough for this.
     TaskBase* right_obs_parent{nullptr};
-
-    // The CRT case needs a fusion whose left operand is a CrossRankTask*, but left_child/right_child
-    // above are strictly typed Task* (CrossRankTask is a sibling of Task, not a subclass -- both derive
-    // from TaskBase only). Only ever populated on the one fusion immediately following a CRT in a
-    // single-local-observable deferred chain (never on right_child's side).
-    CrossRankTask* left_crt_child{nullptr};
 #endif
 
     Task(int partition, pm::Mwpm* solver)
@@ -197,25 +192,26 @@ struct Task : public TaskBase {
     {
         status.store(-1, std::memory_order_release);
     }
-    Task(int vb, Task* left_child, Task* right_child, pm::Mwpm* solver) :
-        TaskBase(vb, left_child->vb_left, right_child->vb_right, true, false, solver),
-        left_child(left_child),
-        right_child(right_child)
+    // Fusion of two operands, each either an ordinary Task or (under USE_SHMEM) a CrossRankTask -- see
+    // the left_child/right_child comment above. Only touches TaskBase members (vb_left/vb_right/parent/
+    // is_cross_rank_fusion) plus Task's own type via a self-referential cast, so -- unlike the CRT-
+    // specific constructor this replaced -- it needs no forward declaration or out-of-line definition;
+    // CrossRankTask's full type is never required here.
+    Task(int vb, TaskBase* left, TaskBase* right, pm::Mwpm* solver) :
+        TaskBase(vb, left->vb_left, right->vb_right, true, false, solver),
+        left_child(left),
+        right_child(right)
     {
-        left_child->parent  = this;
-        left_child->child_bit  = 1;
-        right_child->parent = this;
-        right_child->child_bit = 2;
-    }
-
+        left->parent = this;
+        right->parent = this;
 #ifdef USE_SHMEM
-    // The one fusion immediately following a CRT in a single-local-observable deferred chain (see
-    // left_crt_child above): left operand is a CrossRankTask*, not a Task*. Declared here, defined out
-    // of line after CrossRankTask's own definition later in this file -- CrossRankTask is only
-    // forward-declared at this point, so its inherited TaskBase members (vb_left, parent) aren't
-    // accessible yet.
-    Task(int vb, CrossRankTask* left_crt_child, Task* right_child, pm::Mwpm* solver);
+        if (!left->is_cross_rank_fusion) static_cast<Task*>(left)->child_bit = 1;
+        if (!right->is_cross_rank_fusion) static_cast<Task*>(right)->child_bit = 2;
+#else
+        static_cast<Task*>(left)->child_bit = 1;
+        static_cast<Task*>(right)->child_bit = 2;
 #endif
+    }
 
     Task(const Task&) = delete;
     Task& operator=(const Task&) = delete;
@@ -235,7 +231,6 @@ struct Task : public TaskBase {
         left_obs_patch_id = other.left_obs_patch_id;
         right_obs_patch_id = other.right_obs_patch_id;
         right_obs_parent = other.right_obs_parent;
-        left_crt_child = other.left_crt_child;
 #endif
     }
     Task& operator=(Task&& other) noexcept {
@@ -253,7 +248,6 @@ struct Task : public TaskBase {
         left_obs_patch_id = other.left_obs_patch_id;
         right_obs_patch_id = other.right_obs_patch_id;
         right_obs_parent = other.right_obs_parent;
-        left_crt_child = other.left_crt_child;
 #endif
         return *this;
     }
@@ -280,7 +274,7 @@ struct Task : public TaskBase {
         }
     };
 
-    /* Sychnorization Methods */
+    /* Sychronization Methods */
     void mark_solved(size_t my_pid = 0) override {
         (void)my_pid;
         if (is_fusion) {
@@ -537,18 +531,6 @@ public:
     }
 
 };
-
-// Out-of-line: CrossRankTask must be a complete type for left_crt_child->vb_left/parent below (only
-// forward-declared at the point of Task's own in-class declaration, see left_crt_child's comment).
-inline Task::Task(int vb, CrossRankTask* left_crt_child, Task* right_child, pm::Mwpm* solver) :
-    TaskBase(vb, left_crt_child->vb_left, right_child->vb_right, true, false, solver),
-    left_crt_child(left_crt_child),
-    right_child(right_child)
-{
-    left_crt_child->parent = this;
-    right_child->parent = this;
-    right_child->child_bit = 2;
-}
 #endif
 
 #endif  // PYMATCHING2_DECODING_TASK_H

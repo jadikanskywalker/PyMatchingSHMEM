@@ -4,9 +4,9 @@
 #SBATCH --error=run.err
 #SBATCH --partition=zen4
 #SBATCH --time=03:00:00
-#SBATCH --nodes=2
-#SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=128
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --cpus-per-task=4
 #SBATCH --mem=1000GB
 
 cd ~/PyMatchingSHMEM
@@ -187,7 +187,8 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --cross_rank_fusion_window_size $k \
     --task_division_strategy observable \
     --use_threads \
-    --extraction_unit_size 2 \
+    --extraction_unit_size 4 \
+    --extract_preemptively \
     --draw_frames \
     > log_shmem.out 2>log_shmem.err
 
