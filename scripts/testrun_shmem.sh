@@ -176,6 +176,7 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --map-by ppr:$ppn:package:PE=$nthreads_shmem \
     --bind-to core \
     --report-bindings \
+    ~/PyMatchingSHMEM/scripts/pe_output_wrapper.sh \
     ~/PyMatchingSHMEM/build_sos/pymatching predict \
     --dem error_model.dem \
     --in detection_events.b8 \

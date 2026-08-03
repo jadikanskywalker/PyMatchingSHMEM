@@ -23,14 +23,14 @@
 #include "pymatching/sparse_blossom/flooder_matcher_interop/varying.h"
 #include "pymatching/sparse_blossom/tracker/queued_event_tracker.h"
 
-#ifdef USE_THREADS
-#include <array>
 #include "pymatching/sparse_blossom/config_parallel.h"
+
+#ifdef ENABLE_SHOT_BUFFERS
+#include <array>
 #endif
 
 namespace pm {
 
-#ifdef USE_THREADS
 struct DetectorNodeEphemeralFields {
     GraphFillRegion* region_that_arrived = nullptr;
     GraphFillRegion* region_that_arrived_top = nullptr;
@@ -50,7 +50,6 @@ struct DetectorNodeEphemeralFields {
         node_event_tracker.clear();
     }
 };
-#endif
 
 /// A detector node is a location where a detection event might occur.
 ///
@@ -61,23 +60,11 @@ struct DetectorNodeEphemeralFields {
 /// graph and the DETECTOR annotations in a Stim circuit.
 class DetectorNode {
    public:
-#ifdef USE_SHMEM
     // when using shmem, each neighbors array is stored in shared memory
     DetectorNode() = default;
-#elif defined(USE_THREADS)
-    DetectorNode() = default;
-#else
-    DetectorNode()
-        : region_that_arrived(nullptr),
-          region_that_arrived_top(nullptr),
-          wrapped_radius_cached(0),
-          reached_from_source(nullptr),
-          observables_crossed_from_source(0),
-          radius_of_arrival(0) {
-    }
-#endif 
 
     /// == Ephemeral fields used to track algorithmic state during matching. ==
+#ifdef ENABLE_SHOT_BUFFERS
 #ifdef USE_SHMEM
     /// Pointers to shared-memory epmeheral_field structs
     std::array<DetectorNodeEphemeralFields*, NUM_BUFFERS_PER_UNIT> ephemeral_fields{};
@@ -87,7 +74,7 @@ class DetectorNode {
     inline const DetectorNodeEphemeralFields& state(int rotating_buffer_idx) const {
         return *(ephemeral_fields[rotating_buffer_idx]);
     }
-#elif defined(USE_THREADS)
+#else
     /// In-place array of NUM_BUFFERS_PER_UNIT epmeheral_field structs
     std::array<DetectorNodeEphemeralFields, NUM_BUFFERS_PER_UNIT> ephemeral_fields{};
     inline DetectorNodeEphemeralFields& state(int rotating_buffer_idx) {
@@ -96,87 +83,61 @@ class DetectorNode {
     inline const DetectorNodeEphemeralFields& state(int rotating_buffer_idx) const {
         return ephemeral_fields[rotating_buffer_idx];
     }
-// #else
-//     DetectorNodeEphemeralFields ephemeral_fields;
-//     inline DetectorNodeEphemeralFields& state(int rotating_buffer_idx) {
-//         return ephemeral_fields[];
-//     }
-//     inline const DetectorNodeEphemeralFields& state(int rotating_buffer_idx) const {
-//         return ephemeral_fields[];
-//     }
-// #endif
+#endif // USE_SHMEM
 #else
-    /// The region that reached and owns this node.
-    GraphFillRegion* region_that_arrived;
-    GraphFillRegion* region_that_arrived_top;
-    int32_t wrapped_radius_cached;
-    DetectorNode* reached_from_source;
-    obs_int observables_crossed_from_source;
-    cumulative_time_int radius_of_arrival;
-    QueuedEventTracker node_event_tracker;
+#ifdef USE_SHMEM
+    DetectorNodeEphemeralFields* ephemeral_fields=nullptr;
+    inline DetectorNodeEphemeralFields& state(int rotating_buffer_idx) {
+        return *ephemeral_fields;
+    }
+    inline const DetectorNodeEphemeralFields& state(int rotating_buffer_idx) const {
+        return *ephemeral_fields;
+    }
+#else
+    DetectorNodeEphemeralFields ephemeral_fields;
+    inline DetectorNodeEphemeralFields& state(int rotating_buffer_idx) {
+        return ephemeral_fields;
+    }
+    inline const DetectorNodeEphemeralFields& state(int rotating_buffer_idx) const {
+        return ephemeral_fields;
+    }
 #endif
+#endif // ENABLE_SHOT_BUFFERS
 
     /// == Permanent fields used to define the structure of the graph. ==
     std::vector<DetectorNode*> neighbors;       /// The node's neighbors.
     std::vector<weight_int> neighbor_weights;   /// Distance crossed by the edge to each neighbor.
     std::vector<obs_int> neighbor_observables;  /// Observables crossed by the edge to each neighbor.
 
-#ifdef USE_THREADS
 // ===============
     int vb = -1; // if node is cross partition, virtual boundary it belongs to
 // ===============
-#endif
 
     /// After it reached this node, how much further did the owning search region grow? Also is it currently growing?
-    inline VaryingCT local_radius(
-#ifdef USE_THREADS
-        int rotating_buffer_idx
-    ) const {
+    inline VaryingCT local_radius(int rotating_buffer_idx) const {
         const auto& s = state(rotating_buffer_idx);
         if (s.region_that_arrived_top == nullptr) {
             return VaryingCT{0};
         }
         return s.region_that_arrived_top->radius + s.wrapped_radius_cached;
     }
-#else
-    ) const {
-        if (region_that_arrived_top == nullptr) {
-            return VaryingCT{0};
-        }
-        return region_that_arrived_top->radius + wrapped_radius_cached;
-    }
-#endif
 
     /// Determines the region that owns this node which is a child of this node's top region.
-    GraphFillRegion* heir_region_on_shatter(
-#ifdef USE_THREADS
-        int rotating_buffer_idx
-#endif
-    ) const;
+    GraphFillRegion* heir_region_on_shatter(int rotating_buffer_idx) const;
 
     /// Check if this node is part the same top-level region as another.
     /// Note that they may have different lower level owners that still merge into the same top level owned.
     inline bool has_same_owner_as(
-        const DetectorNode& other
-#ifdef USE_THREADS
-        , int rotating_buffer_idx
+        const DetectorNode& other,
+        int rotating_buffer_idx
     ) const {
         return state(rotating_buffer_idx).region_that_arrived_top ==
                other.state(rotating_buffer_idx).region_that_arrived_top;
     }
-#else
-    ) const {
-        return region_that_arrived_top == other.region_that_arrived_top;
-    }
-#endif
 
     /// Zero all ephemeral fields.
     /// Doesn't free anything or propagate a signal to other objects. Just zeros the fields.
-    void reset(
-#ifdef USE_THREADS
-        int rotating_buffer_idx
-#endif
-    );
+    void reset(int rotating_buffer_idx);
 
     size_t index_of_neighbor(DetectorNode* neighbor) const;
 
@@ -185,11 +146,7 @@ class DetectorNode {
     /// sum of the radius of (always frozen) not-top-level regions containing this node. It is a
     /// useful intermediate value for quickly computing the local radius of the node, because it
     /// accounts for everything except the (potentially varying) top level region.
-    int32_t compute_wrapped_radius(
-#ifdef USE_THREADS
-        int rotating_buffer_idx
-#endif
-    ) const;
+    int32_t compute_wrapped_radius(int rotating_buffer_idx) const;
 
     /// It works out the local radius of the node, but bounds it to not go beyond the given bounding
     /// region. This is useful for understanding the internal structure of the blossoms.
@@ -197,10 +154,8 @@ class DetectorNode {
     /// This is a utility method used to help with drawing the internal state of the algorithm.
     cumulative_time_int compute_local_radius_at_time_bounded_by_region(
         cumulative_time_int time,
-        const GraphFillRegion& bounding_region
-#ifdef USE_THREADS
-        , int rotating_buffer_idx
-#endif
+        const GraphFillRegion& bounding_region,
+        int rotating_buffer_idx
     ) const;
 
     /// The 'stitch radius' is the place where ownership of an edge stops.
@@ -223,10 +178,8 @@ class DetectorNode {
     std::optional<float> compute_stitch_radius_at_time_bounded_by_region_towards_neighbor(
         cumulative_time_int time,
         const GraphFillRegion& bounding_region,
-        size_t neighbor_index
-#ifdef USE_THREADS
-        , int rotating_buffer_idx
-#endif
+        size_t neighbor_index,
+        int rotating_buffer_idx
     ) const;
 
     std::vector<std::vector<ImpliedWeight>> neighbor_implied_weights;

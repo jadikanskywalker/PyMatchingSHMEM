@@ -29,23 +29,18 @@
 #ifdef USE_SHMEM
 #include "pymatching/sparse_blossom/flooder/helpers/shmem_arena.h"
 #endif
-#ifdef USE_THREADS
+
 #include <memory>
 #include "pymatching/sparse_blossom/driver/parallel/decoding_task.h"
-#endif
+
 
 namespace pm {
 
 struct GraphFlooder {
-    /// The graph of detector nodes that is being flooded.
-#ifdef USE_THREADS
-    // ===============
+/// The graph of detector nodes that is being flooded.
     std::shared_ptr<MatchingGraph> graph_ptr;
     MatchingGraph& graph;
-// ===============
-#else
-    MatchingGraph graph;
-#endif
+
     /// Tracks the next thing that will occur as flooding proceeds.
     /// The events are "tentative" because processing an event may remove another,
     /// for example if a region stops growing due to colliding with another region
@@ -75,17 +70,15 @@ struct GraphFlooder {
     /// The sum of the edge weights of all edges with negative edge weights.
     pm::total_weight_int negative_weight_sum{0};
 
-#ifdef USE_THREADS
     const int rotating_buffer_idx{-1};
-    // int current_shot = -1;
     int vb_left, vb_right, vb;
     TaskBase *task;
     int current_shot;
+
 #ifdef ENABLE_DRAW_FLAGS
     const std::vector<int>* node_part_id_ptr = nullptr;
     std::vector<size_t> p_offsets  = {0};
     std::vector<size_t> vb_offsets = {0};
-#endif
 #endif
 
     GraphFlooder();
@@ -101,9 +94,11 @@ struct GraphFlooder {
         , const std::vector<int>* node_part_id = nullptr
 #endif
     );
-#elif defined(USE_THREADS)
+#else
     // Construct with a shared graph pointer (shared across solvers)
-    explicit GraphFlooder(std::shared_ptr<MatchingGraph> graph, int solver_set_idx
+    explicit GraphFlooder(
+        std::shared_ptr<MatchingGraph> graph,
+        int solver_set_idx
 #ifdef ENABLE_DRAW_FLAGS
         , const std::vector<int>* node_part_id = nullptr
 #endif
@@ -124,28 +119,20 @@ struct GraphFlooder {
     MwpmEvent do_region_shrinking(GraphFillRegion& shrinking_region);
     pm::MwpmEvent do_neighbor_interaction(DetectorNode& src, size_t src_to_dst_index, DetectorNode& dst);
     pm::MwpmEvent do_region_hit_boundary_interaction(DetectorNode& node);
-#ifdef USE_THREADS
     // Treat a specific neighbor edge as a boundary (used for virtual boundaries between partitions)
     pm::MwpmEvent do_region_hit_virtual_boundary_interaction(DetectorNode& node, size_t edge_index);
-#endif
     static MwpmEvent do_degenerate_implosion(const GraphFillRegion& region);
     static MwpmEvent do_blossom_shattering(GraphFillRegion& region);
     bool dequeue_decision(pm::FloodCheckEvent ev);
-#ifdef USE_THREADS
     std::pair<size_t, cumulative_time_int> find_next_event_at_node_not_occupied_by_growing_top_region(
         const DetectorNode& detector_node, VaryingCT rad1) const;
     std::pair<size_t, cumulative_time_int> find_next_event_at_node_occupied_by_growing_top_region(
         const DetectorNode& detector_node, const VaryingCT& rad1) const;
-#endif
     std::pair<size_t, pm::cumulative_time_int> find_next_event_at_node_returning_neighbor_index_and_time(
         const DetectorNode& detector_node) const;
     pm::MwpmEvent do_look_at_node_event(DetectorNode& node);
 
-#ifdef USE_THREADS
-    // ===============
     bool is_active(const DetectorNode* node) const;
-// ===============
-#endif
 
 #ifdef USE_SHMEM
     // Functions to support cross-PE fusion

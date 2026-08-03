@@ -28,9 +28,7 @@
 #include "pymatching/sparse_blossom/search/search_graph.h"
 #include "stim.h"
 
-#ifdef USE_THREADS
 #include "pymatching/sparse_blossom/driver/parallel/decoding_unit.h"
-#endif
 
 namespace pm {
 
@@ -56,12 +54,11 @@ class UserNode {
     size_t index_of_neighbor(size_t node) const;
     std::vector<UserNeighbor> neighbors;  /// The node's neighbors.
     bool is_boundary;
-#ifdef USE_THREADS
+    // topological coordinates for partitioning
     double x, y, round;
     int p = -1;
     int vb = -1;
     int observable_id = -1;  /// Observable ID: -1 for cross-observable, >= 0 for observable index
-#endif
 };
 
 const pm::weight_int MAX_USER_EDGE_WEIGHT = NUM_DISTINCT_WEIGHTS - 1;
@@ -75,17 +72,14 @@ class UserGraph {
     std::set<size_t> boundary_nodes;
     bool loaded_from_dem_without_correlations = false;
 
-#ifdef USE_THREADS
     std::vector<int> node_part_id;
     size_t num_partitions;
     size_t num_rounds{ 0 };
     size_t num_virtual_boundaries{ 0 };
     std::vector<std::vector<int>> virtual_boundaries;
-#ifdef USE_SHMEM
+
     size_t num_obs_patches{ 0 };
     size_t p_per_obs_patch, vb_per_obs_patch;
-#endif
-#endif
 
     UserGraph();
     explicit UserGraph(size_t num_nodes);
@@ -135,14 +129,12 @@ class UserGraph {
         pm::weight_int num_distinct_weights,
         const EdgeCallable& edge_func,
         const BoundaryEdgeCallable& boundary_edge_func);
-#ifdef USE_THREADS
     pm::SharedMatchingGraph to_shared_matching_graph(
         pm::weight_int num_distinct_weights
 #ifdef USE_SHMEM
         , DetectorNodeEphemeralFields *nodes_ephemeral_fields_ptr
 #endif
     );
-#endif
 
     pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);
 
@@ -158,12 +150,8 @@ class UserGraph {
     void populate_implied_edge_weights(
         std::map<std::pair<size_t, size_t>, std::map<std::pair<size_t, size_t>, double>>& joint_probabilites);
 
-#ifdef USE_THREADS
     void partition_nodes_by_round(const stim::DetectorErrorModel& dem);
-#ifdef USE_SHMEM
     void partition_nodes_by_obs_patch(const stim::DetectorErrorModel& dem);
-#endif
-#endif
 
    private:
     pm::Mwpm _mwpm;
@@ -243,16 +231,6 @@ UserGraph detector_error_model_to_user_graph(
     const stim::DetectorErrorModel& detector_error_model,
     bool enable_correlations,
     pm::weight_int num_distinct_weights);
-
-#ifdef USE_THREADS
-// ===============
-/// Annotates UserGraph nodes with coordinates from the DEM, if available.
-// std::set<long> annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g);
-
-// Partitions 2d UserGraph by splitting vertically
-// void partition_nodes_2d_vertical_split(pm::UserGraph& g, std::set<long> rounds);
-// ===============
-#endif
 
 /// Computes the weight of an edge resulting from merging edges with weight `a' and weight `b', assuming each edge
 /// weight is a log-likelihood ratio log((1-p)/p) associated with the probability p of an error occurring on the

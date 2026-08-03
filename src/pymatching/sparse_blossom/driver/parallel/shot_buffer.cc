@@ -26,14 +26,10 @@
 namespace pm {
 
 ShotContainer::ShotContainer(
-// #ifdef USE_SHMEM
-//     uint64_t* current_buffer_round_ptr,
-// #endif
     int num_partitions, int num_virtual_boundaries, int num_observables_in)
     : partition_hits(num_partitions),
       virtual_boundary_hits(num_virtual_boundaries),
       num_observables(num_observables_in),
-    //   current_buffer_round_shm(current_buffer_round_ptr),
       res(num_observables_in)
 {
     // Reservation must be a genuine worst-case upper bound, not a heuristic: the claim side reads
@@ -157,8 +153,13 @@ ShotBuffer::ShotBuffer(
     int num_observables)
     : reader(std::move(reader_in)), writer(std::move(writer_in))
 {
-    buffer.reserve(static_cast<size_t>(NUM_BUFFERS_PER_UNIT));
-    for (size_t i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
+#ifdef ENABLE_SHOT_BUFFERS
+    const int num_containers = NUM_BUFFERS_PER_UNIT;
+#else
+    const int num_containers = 1;
+#endif
+    buffer.reserve(static_cast<size_t>(num_containers));
+    for (size_t i = 0; i < num_containers; ++i) {
         buffer.emplace_back(
             num_partitions, num_virtual_boundaries, num_observables);
     }
@@ -190,7 +191,7 @@ void ShotBuffer::write_result_and_get_next_shot(
     }
 #endif
     read_shot(shot_container_id, node_part_id);
-#if NUM_BUFFERS_PER_UNIT > 1
+#ifdef ENABLE_SHOT_BUFFERS
     if (++next_shot_container_id >= NUM_BUFFERS_PER_UNIT) {
         next_shot_container_id = 0;
     }
@@ -204,7 +205,7 @@ void ShotBuffer::write_result_and_get_next_shot(
 void ShotBuffer::read_shot(int shot_container_id, std::vector<int>& node_part_id) {
     auto& shot = buffer[shot_container_id];
     shot.clear();
-#if NUM_BUFFERS_PER_UNIT > 1
+#ifdef ENABLE_SHOT_BUFFERS
     if (last_shot_container_id < 0) {
 #endif
         bool shot_read = pm::start_and_read_entire_record_buffered(*reader, shot.sparse_shot);
@@ -220,7 +221,7 @@ void ShotBuffer::read_shot(int shot_container_id, std::vector<int>& node_part_id
             shot.current_buffer_round++;
             shot.current_buffer_round.notify_all();
         } else {
-#if NUM_BUFFERS_PER_UNIT > 1
+#ifdef ENABLE_SHOT_BUFFERS
             last_shot_container_id = shot_container_id - 1;
             if (last_shot_container_id < 0) {
                 last_shot_container_id = NUM_BUFFERS_PER_UNIT - 1;
@@ -230,7 +231,7 @@ void ShotBuffer::read_shot(int shot_container_id, std::vector<int>& node_part_id
             shot.current_buffer_round.notify_all();
 #endif
         }
-#if NUM_BUFFERS_PER_UNIT > 1
+#ifdef ENABLE_SHOT_BUFFERS
     } else if (last_shot_container_id == shot_container_id) {
         for (int i = 0; i < NUM_BUFFERS_PER_UNIT; ++i) {
             buffer[i].current_buffer_round.store(-1);

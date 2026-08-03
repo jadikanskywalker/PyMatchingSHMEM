@@ -39,9 +39,7 @@ enum Status { BUSY, FREE };
 
 struct TaskBase {
     int part;
-// #ifdef USE_SHMEM
     int vb_marker; // not always equal to part
-// #endif
     int vb_left;
     int vb_right;
     bool is_fusion;
@@ -133,7 +131,6 @@ struct Task : public TaskBase {
 
    public:
 
-    size_t child_bit;
     // TaskBase*, not Task*: a child may be a CrossRankTask (a local seam/chain-link and a CRT can share
     // an extraction unit -- see now-its-time-to-jazzy-turing.md Phase 1.6). Whichever consumer reads
     // these back out and needs Task-specific members must check ->is_cross_rank_fusion first; every
@@ -175,10 +172,24 @@ struct Task : public TaskBase {
     // assigned order-independently by decoding_unit.cc's fixup_seam_parent (see now-its-time-to-jazzy-
     // turing.md Phase 1.5), not by construction order. TaskBase*, not Task*: the oj side's continuation
     // may itself be a CrossRankTask (a local seam and a CRT can now share the same extraction unit).
-    // Doubles as the universally-available "is this a seam fusion" tag together with construction's own
-    // seam_sides map -- left_obs_patch_id/right_obs_patch_id above only exist under ENABLE_DRAW_FLAGS,
-    // not general enough for this.
+    // NOTE: this field's own claim below of doubling as a universal "is this a seam" tag is superseded
+    // by is_seam (next field) -- a seam whose two sides both fit in a single extraction unit resolves
+    // before either side ever builds a further continuation, so right_obs_parent (and parent) can both
+    // stay null forever even though the node genuinely is a seam ("seam-as-root", see now-its-time-to-
+    // jazzy-turing.md Phase 2 Design §6).
     TaskBase* right_obs_parent{nullptr};
+
+    // Always-reliable "is this Task a seam fusion" tag, set unconditionally true at both places a seam
+    // Task is constructed (decoding_unit.cc's non-preemptive fully-local branch and the preemptive
+    // local-seam-resolve branch). Needed because right_obs_parent != nullptr is not a reliable universal
+    // seam tag at decode time -- see the seam-as-root case in the comment above.
+    bool is_seam{false};
+
+    // Busy-spin signal for a seam's losing side to wait on. Reset to false in mark_solved() (alongside
+    // status's own reset -- harmless no-op for non-seam fusions, re-arms a seam for its next shot/round).
+    // Set true (release) by whichever thread wins this seam's own try_to_steal race, immediately after
+    // that seam's own mark_solved(). Only meaningful when is_seam == true.
+    std::atomic<bool> seam_ready{false};
 #endif
 
     Task(int partition, pm::Mwpm* solver)
@@ -204,13 +215,6 @@ struct Task : public TaskBase {
     {
         left->parent = this;
         right->parent = this;
-#ifdef USE_SHMEM
-        if (!left->is_cross_rank_fusion) static_cast<Task*>(left)->child_bit = 1;
-        if (!right->is_cross_rank_fusion) static_cast<Task*>(right)->child_bit = 2;
-#else
-        static_cast<Task*>(left)->child_bit = 1;
-        static_cast<Task*>(right)->child_bit = 2;
-#endif
     }
 
     Task(const Task&) = delete;
@@ -222,7 +226,6 @@ struct Task : public TaskBase {
         left_child = other.left_child;
         right_child = other.right_child;
         // parent is in TaskBase and moved by TaskBase(std::move(other))
-        child_bit = other.child_bit;
         is_extraction_unit_connector = other.is_extraction_unit_connector;
         is_extraction_unit_root = other.is_extraction_unit_root;
         defer_division = other.defer_division;
@@ -231,6 +234,8 @@ struct Task : public TaskBase {
         left_obs_patch_id = other.left_obs_patch_id;
         right_obs_patch_id = other.right_obs_patch_id;
         right_obs_parent = other.right_obs_parent;
+        is_seam = other.is_seam;
+        seam_ready.store(other.seam_ready.load());
 #endif
     }
     Task& operator=(Task&& other) noexcept {
@@ -239,7 +244,6 @@ struct Task : public TaskBase {
         left_child = other.left_child;
         right_child = other.right_child;
         // parent is in TaskBase and moved by TaskBase::operator=(std::move(other))
-        child_bit = other.child_bit;
         is_extraction_unit_connector = other.is_extraction_unit_connector;
         is_extraction_unit_root = other.is_extraction_unit_root;
         defer_division = other.defer_division;
@@ -248,6 +252,8 @@ struct Task : public TaskBase {
         left_obs_patch_id = other.left_obs_patch_id;
         right_obs_patch_id = other.right_obs_patch_id;
         right_obs_parent = other.right_obs_parent;
+        is_seam = other.is_seam;
+        seam_ready.store(other.seam_ready.load());
 #endif
         return *this;
     }
@@ -279,6 +285,9 @@ struct Task : public TaskBase {
         (void)my_pid;
         if (is_fusion) {
             status.store(0, std::memory_order_release);
+#ifdef USE_SHMEM
+            seam_ready.store(false, std::memory_order_release);
+#endif
         }
     }
 
@@ -293,11 +302,9 @@ struct Task : public TaskBase {
             int64_t expected = static_cast<int64_t>(val) - 1;
             return status.compare_exchange_strong(expected, static_cast<int64_t>(val), std::memory_order_acq_rel);
         } else { // fusion
-#ifdef USE_SHMEM
             if (left_child == right_child) { // one child
                 return true;
             }
-#endif
             (void)val;
             constexpr int64_t N = 2; // ordinary binary fusion; generalizes to N>2 with no other change
             int64_t old = status.fetch_add(1, std::memory_order_acq_rel);
@@ -305,61 +312,9 @@ struct Task : public TaskBase {
         }
     }
 
-    // inline bool try_to_steal_leaf(int next) {
-    //     return try_to_steal(static_cast<size_t>(next));
-    // }
-
-//     inline bool try_to_steal_parent() {
-// #ifdef USE_SHMEM
-//         if (only_child) {
-//             return true;
-//         }
-// #endif
-//         // parent is guaranteed to be a local Task (caller checks !parent->is_cross_rank_fusion)
-//         int old = static_cast<Task*>(parent)->status.fetch_or(child_bit, std::memory_order_acq_rel);
-//         if ((old | child_bit) == 3) {
-//             return old != 3;
-//         } else {
-//             return false;
-//         }
-//     }
-
     void reset() override {
         status.store((is_fusion) ? 0 : -1, std::memory_order_release);
     }
-
-    // inline Task* try_to_steal_parent_or_descendent(int next) {
-    //     int old = parent->status.fetch_or(child_bit, std::memory_order_acq_rel);
-    //     if ((old | child_bit) == 3) {
-    //         if (old == 3) {  // got beat
-    //             return nullptr;
-    //         } else {  // got parent
-    //             return parent;
-    //         }
-    //     }
-    //     // I am first to try to steal parent, try sibling
-    //     Task* sibling = (child_bit == 1) ? parent->right_child : parent->left_child;
-    //     return sibling->try_to_steal_descendent(next);
-    // }
-
-    // inline Task* try_to_steal_descendent(int next) {
-    //     Task* t = nullptr;
-    //     if (!is_fusion) {  // I am leaf
-    //         bool stolen = try_to_steal_leaf(next);
-    //         if (stolen) {
-    //             t = this;
-    //         }
-    //     } else {                                               // Try to steal descendent
-    //         if (status.load(std::memory_order_acquire) > 0) {  // Let other thread have it
-    //             return nullptr;
-    //         }
-    //         t = left_child->try_to_steal_descendent(next);
-    //         if (t == nullptr) {
-    //             t = right_child->try_to_steal_descendent(next);
-    //         }
-    //     }
-    //     return t;
-    // }
 };
 
 #ifdef USE_SHMEM
@@ -502,11 +457,9 @@ public:
 #endif
         uint64_t old, news;
         if (iamleft) {
-            // if (t_out && DEBUG) *t_out << "  performing fetch_or on " << status_shm << " my_pid=" << my_pid << " with child_bit=" << 1 << std::endl << std::flush;
             old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 1, my_pid);
             news = old | 1;
         } else {
-            // if (t_out && DEBUG) *t_out << "  performing fetch_or on " << status_shm << " other_pid=" << other_pid << " with child_bit=" << 2 << std::endl << std::flush;
             old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 2, other_pid);
             news = old | 2;
         }

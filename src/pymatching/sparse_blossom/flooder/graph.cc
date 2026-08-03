@@ -22,10 +22,8 @@
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
 #include "pymatching/sparse_blossom/flooder_matcher_interop/mwpm_event.h"
 
-#ifdef USE_THREADS
 #include <iostream>
 #include "../config_parallel.h"
-#endif
 
 namespace pm {
 
@@ -237,7 +235,6 @@ void MatchingGraph::undo_reweights() {
     previous_weights.clear();
 }
 
-#ifdef USE_THREADS
 pm::SharedMatchingGraph::SharedMatchingGraph() = default;
 
 pm::SharedMatchingGraph::SharedMatchingGraph(
@@ -245,23 +242,19 @@ pm::SharedMatchingGraph::SharedMatchingGraph(
     std::vector<int> node_part_id_,
     size_t num_partitions_,
     size_t num_virtual_boundaries_,
-    size_t num_rounds_
-#ifdef USE_SHMEM
-    , size_t num_obs_patches_,
+    size_t num_rounds_,
+    size_t num_obs_patches_,
     size_t p_per_obs_patch_,
     size_t vb_per_obs_patch_
-#endif
 )
 : graph_ptr(graph_ptr_),
     node_part_id(node_part_id_),
     num_partitions(num_partitions_),
     num_virtual_boundaries(num_virtual_boundaries_),
-    num_rounds(num_rounds_)
-#ifdef USE_SHMEM
-    , num_obs_patches(num_obs_patches_),
+    num_rounds(num_rounds_),
+    num_obs_patches(num_obs_patches_),
     p_per_obs_patch(p_per_obs_patch_),
     vb_per_obs_patch(vb_per_obs_patch_)
-#endif
 {
     construct_partition_vb_bounds();
 }
@@ -324,6 +317,5 @@ void pm::SharedMatchingGraph::construct_partition_vb_bounds() {
         std::cout << "\n" << std::flush;
     }
 }
-#endif
 
 }  // namespace pm

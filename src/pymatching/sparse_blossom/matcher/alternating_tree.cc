@@ -206,9 +206,6 @@ AltTreePruneResult AltTreeNode::prune_upward_path_stopping_before(
         });
         current_node->outer_region->alt_tree_node = nullptr;
         current_node->inner_region->alt_tree_node = nullptr;
-        // #ifdef USE_THREADS
-        // current_node->destroyed_by_prune = true;
-        // #endif
         auto to_remove = current_node;
         current_node = current_node->parent.alt_tree_node;
         arena.del(to_remove);

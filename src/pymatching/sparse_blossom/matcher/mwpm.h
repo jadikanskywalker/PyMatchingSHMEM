@@ -19,9 +19,7 @@
 #include "pymatching/sparse_blossom/matcher/alternating_tree.h"
 #include "pymatching/sparse_blossom/search/search_flooder.h"
 
-#ifdef USE_THREADS
 #include "pymatching/sparse_blossom/driver/parallel/decoding_task.h"
-#endif
 
 namespace pm {
 
@@ -47,11 +45,9 @@ struct Mwpm {
     Arena<AltTreeNode> node_arena;
     SearchFlooder search_flooder;
 
-#ifdef USE_THREADS
     std::pair<std::vector<std::pair<float, float>>, std::vector<std::pair<float, float>>> coords;
     TaskBase* task{ nullptr };
     int current_shot{ -1 };
-#endif
 
     Mwpm();
     explicit Mwpm(GraphFlooder flooder);
@@ -69,9 +65,7 @@ struct Mwpm {
     void handle_blossom_shattering(const BlossomShatterEventData& event);
     void shatter_descendants_into_matches_and_freeze(AltTreeNode& alt_tree_node);
     void handle_tree_hitting_boundary(const RegionHitBoundaryEventData& event);
-#ifdef USE_THREADS
     void handle_tree_hitting_virtual_boundary(const RegionHitVirtualBoundaryEventData& event);
-#endif
     void handle_region_hit_region(const MwpmEvent event);
     void handle_tree_hitting_match(
         GraphFillRegion* unmatched_region,
@@ -81,19 +75,15 @@ struct Mwpm {
         GraphFillRegion* unmatched_region,
         GraphFillRegion* matched_region,
         const CompressedEdge& unmatched_to_matched_edge);
-#ifdef USE_THREADS
     void handle_tree_hitting_virtual_boundary_match(
         GraphFillRegion* unmatched_region,
         GraphFillRegion* matched_region,
         const CompressedEdge& unmatched_to_matched_edge);
-#endif
     void handle_tree_hitting_self(const RegionHitRegionEventData& event, AltTreeNode* common_ancestor);
     void handle_tree_hitting_other_tree(const RegionHitRegionEventData& event);
-#ifdef USE_THREADS
     // Removes matchings to virtual boundaries, turning matched regions into alternating trees
     void unmatch_virtual_boundaries_between_partitions();
     void prepare_for_task(TaskBase* task, int shot_id);
-#endif
     // destroyed, when non-null, receives every GraphFillRegion* freed during the call (not just the
     // one passed in -- a single shatter can free the passed-in region, its match.region, and every
     // paired sub-blossom recursively). Used by DecodingUnit::divide_vb (see

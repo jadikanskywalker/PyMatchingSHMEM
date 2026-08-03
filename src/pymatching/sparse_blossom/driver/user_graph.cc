@@ -17,9 +17,7 @@
 #include "pymatching/rand/rand_gen.h"
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
 
-#ifdef USE_THREADS
 #include "../config_parallel.h"
-#endif
 
 namespace {
 
@@ -40,8 +38,7 @@ double pm::merge_weights(double a, double b) {
     return signed_min + std::log(1 + std::exp(-std::abs(a + b))) - std::log(1 + std::exp(-std::abs(a - b)));
 }
 
-pm::UserNode::UserNode() : is_boundary(false) {
-}
+pm::UserNode::UserNode() : is_boundary(false) {}
 
 size_t pm::UserNode::index_of_neighbor(size_t node) const {
     auto it = std::find_if(neighbors.begin(), neighbors.end(), [&](const UserNeighbor& neighbor) {
@@ -269,7 +266,6 @@ double pm::UserGraph::max_abs_weight() {
     return max_abs_weight;
 }
 
-#ifdef USE_THREADS
 pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
     pm::weight_int num_distinct_weights
 #ifdef USE_SHMEM
@@ -281,11 +277,15 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
 #ifdef USE_SHMEM
     const int num_nodes = nodes.size();
     for (int i=0; i < num_nodes; ++i) {
+#ifdef ENABLE_SHOT_BUFFERS
         for (int j=0; j < NUM_BUFFERS_PER_UNIT; ++j) {
             matching_graph.nodes[i].ephemeral_fields[j] = node_ephemeral_fields_ptr + i + j*num_nodes;
         }
+#else
+        matching_graph.nodes[i].ephemeral_fields = node_ephemeral_fields_ptr + i;
+#endif // ENABLE_SHOT_BUFFERS
     }
-#endif
+#endif // USE_SHMEM
     double normalising_constant = to_matching_or_search_graph_helper(
         num_distinct_weights,
         [&](size_t u,
@@ -312,7 +312,6 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
     matching_graph.convert_implied_weights(normalising_constant);
 
     size_t num_regular_vb_masks = virtual_boundaries.size();
-#ifdef USE_SHMEM
     if (DEBUG) std::cout << "virtual_boundaries.size(): " << virtual_boundaries.size() << "\n" << std::flush;
     if (config_parallel::division_strategy == config_parallel::OBS) {
         num_regular_vb_masks = vb_per_obs_patch;
@@ -325,20 +324,15 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
             }
         }
     }
-#endif
+
     for (int vb=0; vb < num_regular_vb_masks; ++vb) {
         for (int index : virtual_boundaries[vb]) {
             matching_graph.nodes[index].vb = vb;
         }
     }
 
-    return SharedMatchingGraph(matching_graph_ptr, node_part_id, num_partitions, num_virtual_boundaries, num_rounds
-#ifdef USE_SHMEM
-        , num_obs_patches, p_per_obs_patch, vb_per_obs_patch
-#endif
-    );
+    return SharedMatchingGraph(matching_graph_ptr, node_part_id, num_partitions, num_virtual_boundaries, num_rounds, num_obs_patches, p_per_obs_patch, vb_per_obs_patch);
 }
-#endif
 
 pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_weights) {
     pm::MatchingGraph matching_graph(nodes.size(), _num_observables);
@@ -368,7 +362,6 @@ pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_w
     }
 
     matching_graph.convert_implied_weights(normalising_constant);
-
     return matching_graph;
 }
 
@@ -393,18 +386,6 @@ pm::SearchGraph pm::UserGraph::to_search_graph(pm::weight_int num_distinct_weigh
         });
 
     search_graph.convert_implied_weights(normalizing_constant);
-
-// #ifdef USE_THREADS
-// // ===============
-//     // Propagate partition and virtual metadata
-//     search_graph.num_partitions = num_partitions;
-//     for (size_t i = 0; i < nodes.size(); ++i) {
-//         search_graph.nodes[i].partition = nodes[i].partition;
-//         search_graph.nodes[i].is_virtual = nodes[i].is_virtual;
-//     }
-// // ===============
-// #endif
-
     return search_graph;
 }
 
@@ -602,19 +583,13 @@ pm::UserGraph pm::detector_error_model_to_user_graph(
             });
         user_graph.loaded_from_dem_without_correlations = true;
     }
-#ifdef USE_THREADS
-#ifdef USE_SHMEM
-    if (config_parallel::division_strategy == config_parallel::OBS) {
-        user_graph.partition_nodes_by_obs_patch(detector_error_model);
-    } else {
-        user_graph.partition_nodes_by_round(detector_error_model);
+    if (config_parallel::use_threads) {
+        if (config_parallel::division_strategy == config_parallel::OBS) {
+            user_graph.partition_nodes_by_obs_patch(detector_error_model);
+        } else {
+            user_graph.partition_nodes_by_round(detector_error_model);
+        }
     }
-#else
-    user_graph.partition_nodes_by_round(detector_error_model);
-#endif
-#endif
-// reorder_nodes_by_observable() removed: DEM is now generated in observable-major
-// order by gen_multi_obs.py so no post-hoc reorder is needed.
     return user_graph;
 }
 
@@ -647,7 +622,6 @@ void pm::UserGraph::populate_implied_edge_weights(
     }
 }
 
-#ifdef USE_THREADS
 void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem) {
     // Query coordinates from stim. Map: det_id -> vector<double> of coords.
     std::set<uint64_t> all_dets;
@@ -712,8 +686,7 @@ void pm::UserGraph::partition_nodes_by_round(const stim::DetectorErrorModel& dem
     num_virtual_boundaries = virtual_boundaries.size();
     num_partitions = p+1;
 }
-#endif
-#ifdef USE_SHMEM
+
 // Assumes nodes are sorted in observable-major order: [obs0 by round][obs1 by round][seam nodes].
 // Coords format per detector: [x, [y,] round, obs_id]  where obs_id < 0 encodes seam nodes.
 //
@@ -941,55 +914,3 @@ void pm::UserGraph::partition_nodes_by_obs_patch(const stim::DetectorErrorModel&
 //         node_part_id = std::move(reordered_part_id);
 //     }
 // }
-#endif
-// ===============
-// std::set<long> pm::annotate_nodes_with_dem_coordinates(const stim::DetectorErrorModel& dem, pm::UserGraph& g) {
-//     // Query coordinates from stim. Map: det_id -> vector<double> of coords.
-//     std::set<uint64_t> all_dets;
-//     size_t num_nodes = g.nodes.size();
-//     for (uint64_t k = 0; k < num_nodes; ++k)
-//         all_dets.emplace_hint(all_dets.end(), k);
-//     std::map<uint64_t, std::vector<double>> coords_map = dem.get_detector_coordinates(all_dets);
-//     // Annotate UserNodes
-//     std::set<long> rounds;
-//     std::set<long> x;
-//     std::set<long> y;
-//     for (size_t k = 0; k < g.nodes.size(); ++k) {
-//         auto it = coords_map.find(k);
-//         if (it == coords_map.end()) {
-//             // No coordinates available; leave defaults.
-//             continue;
-//         }
-//         const auto& coors = it->second;
-//         if (coors.empty()) {
-//             // No coordinate data; skip annotation.
-//             throw std::invalid_argument("Detector node " + std::to_string(it->first) + " has no coords");
-//         }
-//         pm::UserNode& node = g.nodes[k];
-//         node.has_coords = true;
-//         // Store coordinates if available
-//         if (coors.size() >= 2) {
-//             node.pos_x = coors[0];
-//             node.pos_y = coors[1];
-//         } else {
-//             // Only one coordinate present; leave x/y defaults
-//             node.pos_x = coors[0];
-//         }
-//         // Use the last value as the round index
-//         node.round = (long)lround(coors.back());
-//         rounds.insert(node.round);
-//         x.insert(node.pos_x);
-//         y.insert(node.pos_y);
-//     }
-//     if (DEBUG)
-//         std::cout << "X: " << *x.begin() << " to " << *x.rbegin() << std::endl
-//                   << "Y: " << *y.begin() << " to " << *y.rbegin() << std::endl
-//                   << "Z: " << *rounds.begin() << " to " << *rounds.rbegin() << std::endl;
-//     return rounds;
-// }
-
-// void pm::partition_nodes_2d_vertical_split(pm::UserGraph& g, std::set<long> rounds) {
-//     throw std::invalid_argument("partition_nodes_2d_vertical_split: not yet implemented");
-// }
-
-// ===============

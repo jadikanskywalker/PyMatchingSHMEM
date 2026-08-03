@@ -31,14 +31,12 @@ std::ostream &pm::operator<<(std::ostream &out, const RegionHitBoundaryEventData
     return out;
 }
 
-#ifdef USE_THREADS
 std::ostream &pm::operator<<(std::ostream &out, const RegionHitVirtualBoundaryEventData &ev) {
     out << "{.region=" << ev.region;
     out << ", .edge=" << ev.edge;
     out << "}";
     return out;
 }
-#endif
 
 std::ostream &pm::operator<<(std::ostream &out, const BlossomShatterEventData &dat) {
     out << "{.blossom=" << dat.blossom_region;
@@ -63,11 +61,9 @@ std::ostream &pm::operator<<(std::ostream &out, const MwpmEvent &ev) {
         case REGION_HIT_BOUNDARY:
             out << "REGION_HIT_BOUNDARY, .dat=" << ev.region_hit_boundary_event_data;
             break;
-#ifdef USE_THREADS
         case REGION_HIT_VIRTUAL_BOUNDARY:
             out << "REGION_HIT_VIRTUAL_BOUNDARY, .dat=" << ev.region_hit_virtual_boundary_event_data;
             break;
-#endif
         default:
             throw std::invalid_argument("Unrecognized event type");
     }
@@ -93,13 +89,11 @@ std::string RegionHitBoundaryEventData::str() const {
     return out.str();
 }
 
-#ifdef USE_THREADS
 std::string RegionHitVirtualBoundaryEventData::str() const {
     std::stringstream out;
     out << *this;
     return out.str();
 }
-#endif
 
 std::string MwpmEvent::str() const {
     std::stringstream out;
@@ -128,7 +122,6 @@ bool RegionHitBoundaryEventData::operator!=(const RegionHitBoundaryEventData &rh
     return !(rhs == *this);
 }
 
-#ifdef USE_THREADS
 bool RegionHitVirtualBoundaryEventData::operator==(const RegionHitVirtualBoundaryEventData &rhs) const {
     return region == rhs.region && edge == rhs.edge;
 }
@@ -136,7 +129,6 @@ bool RegionHitVirtualBoundaryEventData::operator==(const RegionHitVirtualBoundar
 bool RegionHitVirtualBoundaryEventData::operator!=(const RegionHitVirtualBoundaryEventData &rhs) const {
     return !(rhs == *this);
 }
-#endif
 
 bool BlossomShatterEventData::operator==(const BlossomShatterEventData &rhs) const {
     return blossom_region == rhs.blossom_region && in_parent_region == rhs.in_parent_region &&
@@ -153,11 +145,9 @@ MwpmEvent::MwpmEvent(RegionHitRegionEventData region_hit_region_event_data)
 MwpmEvent::MwpmEvent(RegionHitBoundaryEventData region_hit_region_event_data)
     : region_hit_boundary_event_data(region_hit_region_event_data), event_type(REGION_HIT_BOUNDARY) {
 }
-#ifdef USE_THREADS
 MwpmEvent::MwpmEvent(RegionHitVirtualBoundaryEventData region_hit_region_event_data)
     : region_hit_virtual_boundary_event_data(region_hit_region_event_data), event_type(REGION_HIT_VIRTUAL_BOUNDARY) {
 }
-#endif
 MwpmEvent::MwpmEvent(BlossomShatterEventData region_hit_region_event_data)
     : blossom_shatter_event_data(region_hit_region_event_data), event_type(BLOSSOM_SHATTER) {
 }
@@ -174,10 +164,8 @@ bool MwpmEvent::operator==(const MwpmEvent &rhs) const {
             return region_hit_region_event_data == rhs.region_hit_region_event_data;
         case REGION_HIT_BOUNDARY:
             return region_hit_boundary_event_data == rhs.region_hit_boundary_event_data;
-#ifdef USE_THREADS
         case REGION_HIT_VIRTUAL_BOUNDARY:
             return region_hit_virtual_boundary_event_data == rhs.region_hit_virtual_boundary_event_data;
-#endif
         case BLOSSOM_SHATTER:
             return blossom_shatter_event_data == rhs.blossom_shatter_event_data;
         default:

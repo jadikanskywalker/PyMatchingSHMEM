@@ -20,9 +20,7 @@
 #include <unordered_map>
 #include <vector>
 
-#ifdef USE_THREADS
 #include <memory>
-#endif
 
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
 #include "pymatching/sparse_blossom/flooder/detector_node.h"
@@ -118,7 +116,6 @@ inline void MatchingGraph::reweight(std::vector<ImpliedWeight>& implied_weights)
     apply_reweights(implied_weights, previous_weights);
 }
 
-#ifdef USE_THREADS
 struct SharedMatchingGraph {
     std::shared_ptr<pm::MatchingGraph> graph_ptr;
     std::vector<int> node_part_id;
@@ -126,18 +123,13 @@ struct SharedMatchingGraph {
     size_t num_virtual_boundaries;
     size_t num_rounds;
 
-    // Per-partition/per-vb node index ranges (inclusive), scanned once from node_part_id. Purely a
-    // function of node_part_id/num_partitions/num_virtual_boundaries -- nothing SHMEM-specific about
-    // the logic itself (see construct_partition_vb_bounds's implementation) -- needed under plain
-    // USE_THREADS too now that unit-checkpointed extraction's divide_vb needs a vb's node range.
+    // Per-partition/per-vb node index ranges (inclusive)
     std::vector<std::pair<size_t, size_t>> partition_bounds;
     std::vector<std::pair<size_t, size_t>> vb_bounds;
 
-#ifdef USE_SHMEM
     size_t num_obs_patches{ 0 };
     size_t p_per_obs_patch, vb_per_obs_patch;
-#endif
-
+    
     SharedMatchingGraph();
     SharedMatchingGraph(
         std::shared_ptr<pm::MatchingGraph> graph_ptr_,
@@ -154,7 +146,6 @@ struct SharedMatchingGraph {
 
     void construct_partition_vb_bounds();
 };
-#endif
 
 };  // namespace pm
 

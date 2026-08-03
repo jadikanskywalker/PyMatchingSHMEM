@@ -25,9 +25,9 @@
 #ifdef USE_SHMEM
 #include "pymatching/sparse_blossom/flooder/helpers/shmem_arena.h"
 #endif
-#ifdef USE_THREADS
+
 #include "pymatching/sparse_blossom/arena.h"
-#endif
+
 
 namespace pm {
 
@@ -66,13 +66,11 @@ struct GraphFillRegion {
 
 #ifdef USE_SHMEM
     SHMEMArena<GraphFillRegion>* owner_arena;
-#elif defined(USE_THREADS)
+#else
     Arena<GraphFillRegion>* owner_arena;
 #endif
 
-#ifdef USE_THREADS
     int rotating_buffer_idx = 0;
-#endif
 
     GraphFillRegion();
     GraphFillRegion(GraphFillRegion&&);

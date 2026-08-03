@@ -52,7 +52,6 @@ struct RegionHitBoundaryEventData {
 };
 std::ostream &operator<<(std::ostream &out, const RegionHitBoundaryEventData &ev);
 
-#ifdef USE_THREADS
 struct RegionHitVirtualBoundaryEventData {
     /// The growing region that hit the virtual boundary.
     GraphFillRegion *region;
@@ -64,7 +63,6 @@ struct RegionHitVirtualBoundaryEventData {
     std::string str() const;
 };
 std::ostream &operator<<(std::ostream &out, const RegionHitVirtualBoundaryEventData &ev);
-#endif
 
 struct BlossomShatterEventData {
     /// The shrinking blossom region that has become empty and needs to be destroyed.
@@ -81,10 +79,7 @@ struct BlossomShatterEventData {
 std::ostream &operator<<(std::ostream &out, const BlossomShatterEventData &ev);
 
 enum MwpmEventType : uint8_t { NO_EVENT, REGION_HIT_REGION, REGION_HIT_BOUNDARY,
-#ifdef USE_THREADS
-    REGION_HIT_VIRTUAL_BOUNDARY,
-#endif
-    BLOSSOM_SHATTER };
+    REGION_HIT_VIRTUAL_BOUNDARY, BLOSSOM_SHATTER };
 
 /// A MwpmEvent is an interaction that the min-weight-perform-matching algorithm must react to.
 ///
@@ -99,9 +94,7 @@ struct MwpmEvent {
     union {
         RegionHitRegionEventData region_hit_region_event_data;
         RegionHitBoundaryEventData region_hit_boundary_event_data;
-#ifdef USE_THREADS
         RegionHitVirtualBoundaryEventData region_hit_virtual_boundary_event_data;
-#endif
         BlossomShatterEventData blossom_shatter_event_data;
     };
     /// Indicates the type of notification being sent to the mwpm algorithm.
@@ -110,9 +103,7 @@ struct MwpmEvent {
     MwpmEvent();
     MwpmEvent(RegionHitRegionEventData region_hit_region_event_data);      // NOLINT(google-explicit-constructor)
     MwpmEvent(RegionHitBoundaryEventData region_hit_boundary_event_data);  // NOLINT(google-explicit-constructor)
-#ifdef USE_THREADS
     MwpmEvent(RegionHitVirtualBoundaryEventData region_hit_virtual_boundary_event_data);  // NOLINT(google-explicit-constructor)
-#endif
     MwpmEvent(BlossomShatterEventData blossom_shatter_event_data);         // NOLINT(google-explicit-constructor)
     inline static MwpmEvent no_event() {
         return {};
