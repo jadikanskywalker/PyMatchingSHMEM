@@ -37,6 +37,13 @@ struct Mwpm;
 
 enum Status { BUSY, FREE };
 
+// Task graph model (see now-its-time-to-jazzy-turing.md Phase 2 (REVISED)): the binary tree
+// (Task::parent/left_child/right_child) is *always* a plain, ordinary tree -- seams and cross-rank
+// fusions never sit in it. Instead, each Task carries a vector (special_tasks) of LocalSeamTask
+// and/or CrossRankTask instances that trigger when that Task's own newly-closed unit is reached.
+// Decode logic processes a solved Task's own special_tasks (in order), then continues the ordinary
+// climb via Task::parent -- seam/CRT handling is a self-contained detour, not a structural rewiring
+// of the tree.
 struct TaskBase {
     int part;
     int vb_marker; // not always equal to part
@@ -44,15 +51,13 @@ struct TaskBase {
     int vb_right;
     bool is_fusion;
 
-#ifdef USE_SHMEM
-    // SHMEM-only: whether this node's parent in the chain is a CrossRankTask. Meaningless without
-    // cross-rank fusion, so not worth carrying under plain USE_THREADS.
-    bool is_cross_rank_fusion;
-#endif
-
-    // Parent in the task chain: local Task fusion or CrossRankTask above this node.
-    // nullptr means this node is the chain top (a task graph root).
-    TaskBase* parent{nullptr};
+    // Which concrete kind this task is. Replaces the old is_cross_rank_fusion bool with a 3-way tag --
+    // scoped (enum class) so the enumerator names can mirror the actual class names (TaskType::Task,
+    // TaskType::LocalSeamTask, TaskType::CrossRankTask) without colliding with those class names in
+    // the enclosing namespace. Not USE_SHMEM-gated: LocalSeamTask needs it in every build, not just
+    // SHMEM ones (only the CrossRankTask value ever goes unused outside USE_SHMEM).
+    enum class TaskType { Task, LocalSeamTask, CrossRankTask };
+    TaskType type;
 
     // The solver this task uses when it resolves, chosen once at construction time (see
     // decoding_unit.cc's task-building functions) rather than recomputed from part/vb_solver_offset
@@ -64,14 +69,9 @@ struct TaskBase {
     std::vector<pm::GraphFillRegion*> regions_to_unmatch;
     std::vector<pm::GraphFillRegion*> regions_matched_to_virtual_boundary;
 
-    TaskBase(int part, int vb_left, int vb_right, bool is_fusion, bool is_cross_rank_fusion, pm::Mwpm* solver)
-        : part(part), vb_left(vb_left), vb_right(vb_right), is_fusion(is_fusion)
-#ifdef USE_SHMEM
-        , is_cross_rank_fusion(is_cross_rank_fusion)
-#endif
-        , solver(solver)
+    TaskBase(int part, int vb_left, int vb_right, bool is_fusion, TaskType type, pm::Mwpm* solver)
+        : part(part), vb_left(vb_left), vb_right(vb_right), is_fusion(is_fusion), type(type), solver(solver)
     {
-        (void)is_cross_rank_fusion;
         if (is_fusion)
             vb_marker = part;
         else
@@ -85,18 +85,20 @@ struct TaskBase {
     virtual bool try_to_steal(size_t val) = 0;
     virtual void reset() = 0;
 
+    // Convenience accessors replacing the old stored is_cross_rank_fusion field -- method calls now,
+    // not field reads, so every existing call site needs the added parens (mechanical, task-building/
+    // decode-logic pass concern, not this one).
+    inline bool is_cross_rank_fusion() const { return type == TaskType::CrossRankTask; }
+    inline bool is_local_seam_fusion() const { return type == TaskType::LocalSeamTask; }
+
     TaskBase(TaskBase&& other) noexcept
         : part(other.part), vb_marker(other.vb_marker),
           vb_left(other.vb_left), vb_right(other.vb_right),
-          is_fusion(other.is_fusion),
-#ifdef USE_SHMEM
-          is_cross_rank_fusion(other.is_cross_rank_fusion),
-#endif
-          parent(other.parent),
+          is_fusion(other.is_fusion), type(other.type),
           solver(other.solver),
           regions_to_unmatch(std::move(other.regions_to_unmatch)),
           regions_matched_to_virtual_boundary(std::move(other.regions_matched_to_virtual_boundary))
-    { other.parent = nullptr; }
+    {}
 
     TaskBase& operator=(TaskBase&& other) noexcept {
         part = other.part;
@@ -104,17 +106,28 @@ struct TaskBase {
         vb_left = other.vb_left;
         vb_right = other.vb_right;
         is_fusion = other.is_fusion;
-#ifdef USE_SHMEM
-        is_cross_rank_fusion = other.is_cross_rank_fusion;
-#endif
-        parent = other.parent;
-        other.parent = nullptr;
+        type = other.type;
         solver = other.solver;
         regions_to_unmatch = std::move(other.regions_to_unmatch);
         regions_matched_to_virtual_boundary = std::move(other.regions_matched_to_virtual_boundary);
         return *this;
     }
 };
+
+// Intermediate base shared by LocalSeamTask and CrossRankTask -- both attach to a triggering Task's
+// own special_tasks vector rather than participating in the binary tree. Task::special_tasks' own
+// element type is SpecialTask*, not TaskBase*, precisely because it can only ever point at one of
+// these two kinds, never a plain Task.
+struct SpecialTask : public TaskBase {
+    using TaskBase::TaskBase;
+};
+
+// Forward declarations so Task::add_special_task can be declared here and defined below, once
+// LocalSeamTask/CrossRankTask are complete types it needs to reach into (.children / .child).
+struct LocalSeamTask;
+#ifdef USE_SHMEM
+struct CrossRankTask;
+#endif
 
 struct Task : public TaskBase {
    private:
@@ -131,14 +144,17 @@ struct Task : public TaskBase {
 
    public:
 
-    // TaskBase*, not Task*: a child may be a CrossRankTask (a local seam/chain-link and a CRT can share
-    // an extraction unit -- see now-its-time-to-jazzy-turing.md Phase 1.6). Whichever consumer reads
-    // these back out and needs Task-specific members must check ->is_cross_rank_fusion first; every
-    // non-preemptive/ROUND consumer today only ever holds a genuine Task* here at runtime (CRTs there
-    // attach above a subtree root via CrossRankTask's own automatic parent-chain walk, never as a
-    // left_child/right_child), so those sites just need a static_cast, not new logic.
-    TaskBase* left_child{nullptr};
-    TaskBase* right_child{nullptr};
+    // The binary tree is always a plain, ordinary tree of Task nodes -- seams/CRTs never appear here
+    // (see special_tasks below). Task*, not TaskBase*: undoes the earlier TaskBase* widening that
+    // let a CrossRankTask sit directly as a fusion's own child -- that's no longer how CRTs attach.
+    Task* parent{nullptr};
+    Task* left_child{nullptr};
+    Task* right_child{nullptr};
+
+    // This task's own attached seam(s)/CRT(s), if any -- populated via add_special_task, processed in
+    // insertion order by decode logic once this Task is solved, before continuing the ordinary climb
+    // via `parent`.
+    std::vector<SpecialTask*> special_tasks;
 
     // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md). Only meaningful
     // when is_fusion == true. Two roles, mutually exclusive:
@@ -151,65 +167,30 @@ struct Task : public TaskBase {
     bool is_extraction_unit_connector{false};
     bool is_extraction_unit_root{false};
 
-    // Preemptive OBS extraction (deferred-chain-with-embedded-seams design, see
-    // now-its-time-to-jazzy-turing.md): true on an is_extraction_unit_connector chain-link whose
-    // newly-closed unit falls inside an active seam's [unit_lo, unit_hi) span -- tells the decode-loop
-    // phase to skip the immediate divide+post (and skip the usual vb_left restriction) until the seam
-    // itself resolves and walks back to divide+post every deferred unit at once. False (default) for
-    // every ROUND-partitioning fusion and every OBS chain-link outside a seam's span, unchanged from
-    // today's immediate-divide behavior.
+    // Preemptive OBS extraction: true on an is_extraction_unit_connector chain-link whose newly-closed
+    // unit falls inside an active seam's span -- tells the decode-loop phase to skip the immediate
+    // divide+post (and skip the usual vb_left restriction) until the seam itself resolves. False
+    // (default) for every ROUND-partitioning fusion and every OBS chain-link outside a seam's span,
+    // unchanged from today's immediate-divide behavior. Whether this is still needed in its current
+    // shape under the new special_tasks attachment model is an open question for the task-building
+    // pass (see now-its-time-to-jazzy-turing.md Phase 2 (REVISED)) -- left as-is here.
     bool defer_division{false};
 
-    // bool only_child{ false };
-#ifdef USE_SHMEM
-    // int seam_vb_slot{ -1 };             // virtual_boundaries slot index for this seam's VB nodes
-    int left_obs_patch_id{-1};   // For OBS local seam tasks: left obs patch
-    int right_obs_patch_id{-1};  // For OBS local seam tasks: right obs patch
-
-    // A seam fusion is the left child of two different downstream fusions (one continuing each
-    // observable's own chain past the seam) -- TaskBase::parent only holds one. `parent` always means
-    // "the oi (lower-indexed) observable's continuation", this field "the oj (higher-indexed) side's" --
-    // assigned order-independently by decoding_unit.cc's fixup_seam_parent (see now-its-time-to-jazzy-
-    // turing.md Phase 1.5), not by construction order. TaskBase*, not Task*: the oj side's continuation
-    // may itself be a CrossRankTask (a local seam and a CRT can now share the same extraction unit).
-    // NOTE: this field's own claim below of doubling as a universal "is this a seam" tag is superseded
-    // by is_seam (next field) -- a seam whose two sides both fit in a single extraction unit resolves
-    // before either side ever builds a further continuation, so right_obs_parent (and parent) can both
-    // stay null forever even though the node genuinely is a seam ("seam-as-root", see now-its-time-to-
-    // jazzy-turing.md Phase 2 Design §6).
-    TaskBase* right_obs_parent{nullptr};
-
-    // Always-reliable "is this Task a seam fusion" tag, set unconditionally true at both places a seam
-    // Task is constructed (decoding_unit.cc's non-preemptive fully-local branch and the preemptive
-    // local-seam-resolve branch). Needed because right_obs_parent != nullptr is not a reliable universal
-    // seam tag at decode time -- see the seam-as-root case in the comment above.
-    bool is_seam{false};
-
-    // Busy-spin signal for a seam's losing side to wait on. Reset to false in mark_solved() (alongside
-    // status's own reset -- harmless no-op for non-seam fusions, re-arms a seam for its next shot/round).
-    // Set true (release) by whichever thread wins this seam's own try_to_steal race, immediately after
-    // that seam's own mark_solved(). Only meaningful when is_seam == true.
-    std::atomic<bool> seam_ready{false};
-#endif
-
     Task(int partition, pm::Mwpm* solver)
-        : TaskBase(partition, partition - 1, partition, false, false, solver)
+        : TaskBase(partition, partition - 1, partition, false, TaskType::Task, solver)
     {
         status.store(-1, std::memory_order_release);
     }
     // Partition leaf with explicit local vb bounds (needed for OBS partitioning)
     Task(int part, int vb_l, int vb_r, pm::Mwpm* solver)
-        : TaskBase(part, vb_l, vb_r, false, false, solver)
+        : TaskBase(part, vb_l, vb_r, false, TaskType::Task, solver)
     {
         status.store(-1, std::memory_order_release);
     }
-    // Fusion of two operands, each either an ordinary Task or (under USE_SHMEM) a CrossRankTask -- see
-    // the left_child/right_child comment above. Only touches TaskBase members (vb_left/vb_right/parent/
-    // is_cross_rank_fusion) plus Task's own type via a self-referential cast, so -- unlike the CRT-
-    // specific constructor this replaced -- it needs no forward declaration or out-of-line definition;
-    // CrossRankTask's full type is never required here.
-    Task(int vb, TaskBase* left, TaskBase* right, pm::Mwpm* solver) :
-        TaskBase(vb, left->vb_left, right->vb_right, true, false, solver),
+    // Fusion of two ordinary Task operands -- always Task*, never a CrossRankTask (that no longer sits
+    // in the tree as a fusion's own child; see special_tasks above).
+    Task(int vb, Task* left, Task* right, pm::Mwpm* solver) :
+        TaskBase(vb, left->vb_left, right->vb_right, true, TaskType::Task, solver),
         left_child(left),
         right_child(right)
     {
@@ -221,40 +202,26 @@ struct Task : public TaskBase {
     Task& operator=(const Task&) = delete;
     Task(Task&& other) noexcept
         : TaskBase(std::move(other))
-           {
+    {
         status.store(other.status.load());
+        parent = other.parent;
         left_child = other.left_child;
         right_child = other.right_child;
-        // parent is in TaskBase and moved by TaskBase(std::move(other))
+        special_tasks = std::move(other.special_tasks);
         is_extraction_unit_connector = other.is_extraction_unit_connector;
         is_extraction_unit_root = other.is_extraction_unit_root;
         defer_division = other.defer_division;
-#ifdef USE_SHMEM
-        // seam_vb_slot = other.seam_vb_slot;
-        left_obs_patch_id = other.left_obs_patch_id;
-        right_obs_patch_id = other.right_obs_patch_id;
-        right_obs_parent = other.right_obs_parent;
-        is_seam = other.is_seam;
-        seam_ready.store(other.seam_ready.load());
-#endif
     }
     Task& operator=(Task&& other) noexcept {
         TaskBase::operator=(std::move(other));
         status.store(other.status.load());
+        parent = other.parent;
         left_child = other.left_child;
         right_child = other.right_child;
-        // parent is in TaskBase and moved by TaskBase::operator=(std::move(other))
+        special_tasks = std::move(other.special_tasks);
         is_extraction_unit_connector = other.is_extraction_unit_connector;
         is_extraction_unit_root = other.is_extraction_unit_root;
         defer_division = other.defer_division;
-#ifdef USE_SHMEM
-        // seam_vb_slot = other.seam_vb_slot;
-        left_obs_patch_id = other.left_obs_patch_id;
-        right_obs_patch_id = other.right_obs_patch_id;
-        right_obs_parent = other.right_obs_parent;
-        is_seam = other.is_seam;
-        seam_ready.store(other.seam_ready.load());
-#endif
         return *this;
     }
 
@@ -280,23 +247,37 @@ struct Task : public TaskBase {
         }
     };
 
+    // Attaches a LocalSeamTask/CrossRankTask to this task: records it on this task's own
+    // special_tasks (so decode logic finds it when this task is solved) and, symmetrically, records
+    // this task on the special task's own child-holding field (LocalSeamTask::children gets this
+    // appended; CrossRankTask::child gets set to this). Defined below, after LocalSeamTask/
+    // CrossRankTask are complete types.
+
+    inline void Task::add_special_task(SpecialTask* st) {
+        special_tasks.push_back(st);
+        if (st->is_local_seam_fusion()) {
+            static_cast<LocalSeamTask*>(st)->children.push_back(this);
+        }
+#ifdef USE_SHMEM
+        else if (st->is_cross_rank_fusion()) {
+            static_cast<CrossRankTask*>(st)->child = this;
+        }
+#endif
+    }
+
     /* Sychronization Methods */
     void mark_solved(size_t my_pid = 0) override {
         (void)my_pid;
         if (is_fusion) {
             status.store(0, std::memory_order_release);
-#ifdef USE_SHMEM
-            seam_ready.store(false, std::memory_order_release);
-#endif
         }
     }
 
     // for partition leaf, val is the shot id
     // for fusion parent, val is unused -- kept only for interface uniformity with the leaf-claim/
-    // CrossRankTask overloads of try_to_steal (see decoding_task.h Design §3 note on Task::status
-    // above). The fetch_add-based race needs no per-caller value the way the old fetch_or/child_bit
-    // scheme did: every child does the identical fetch_add(1), and whoever's fetch_add returns N-1
-    // (last of N arrivals) is the winner.
+    // LocalSeamTask/CrossRankTask overloads of try_to_steal. The fetch_add-based race needs no
+    // per-caller value the way the old fetch_or/child_bit scheme did: every child does the identical
+    // fetch_add(1), and whoever's fetch_add returns N-1 (last of N arrivals) is the winner.
     bool try_to_steal(size_t val) override {
         if (!is_fusion) { // partition
             int64_t expected = static_cast<int64_t>(val) - 1;
@@ -317,10 +298,102 @@ struct Task : public TaskBase {
     }
 };
 
+// N-ary local convergence -- generalizes the old binary local-seam Task to any number of converging
+// observables sharing one boundary, so a 3+-way convergence is one LocalSeamTask, not a cascade of
+// nested binary seams (which was the actual source of the child_bit-reliability problems worked
+// through earlier -- see now-its-time-to-jazzy-turing.md Phase 2 (REVISED) Context). children starts
+// empty and is populated by each converging Task's own Task::add_special_task(this) call (task-
+// building pass concern, not this file's) rather than being passed in at construction.
+struct LocalSeamTask : public SpecialTask {
+   private:
+    // Arrival counter, same fetch_add race as Task::status's own fusion branch, generalized from a
+    // hardcoded N=2 to children.size(): every converging observable's own thread does the identical
+    // fetch_add(1); whoever's fetch_add returns (int64_t)children.size()-1 (last arrival) wins.
+    alignas(64) std::atomic<int64_t> status{0};
+
+   public:
+    // One triggering Task per converging observable -- always a plain Task* (never another
+    // LocalSeamTask or CrossRankTask; avoiding exactly that nesting is the point of this design).
+    // Populated via Task::add_special_task, one push_back per converging Task.
+    std::vector<Task*> children;
+
+#ifdef ENABLE_DRAW_FLAGS
+    // Generalizes the old Task::left_obs_patch_id/right_obs_patch_id -- one entry per children[i].
+    std::vector<int> obs_patch_ids;
+#endif
+
+    // Busy-spin signal for the children.size()-1 losing threads to wait on. Reset to false in
+    // mark_solved() (re-arms for the next shot/round). Set true (release) by whichever thread wins
+    // this seam's own try_to_steal race, immediately after that seam's own mark_solved().
+    std::atomic<bool> ready{false};
+
+    LocalSeamTask(int vb, int vb_left, int vb_right, pm::Mwpm* solver)
+        : SpecialTask(vb, vb_left, vb_right, true, TaskType::LocalSeamTask, solver)
+    {}
+
+    LocalSeamTask(const LocalSeamTask&) = delete;
+    LocalSeamTask& operator=(const LocalSeamTask&) = delete;
+    LocalSeamTask(LocalSeamTask&& other) noexcept
+        : SpecialTask(std::move(other))
+    {
+        status.store(other.status.load());
+        children = std::move(other.children);
+#ifdef ENABLE_DRAW_FLAGS
+        obs_patch_ids = std::move(other.obs_patch_ids);
+#endif
+        ready.store(other.ready.load());
+    }
+    LocalSeamTask& operator=(LocalSeamTask&& other) noexcept {
+        SpecialTask::operator=(std::move(other));
+        status.store(other.status.load());
+        children = std::move(other.children);
+#ifdef ENABLE_DRAW_FLAGS
+        obs_patch_ids = std::move(other.obs_patch_ids);
+#endif
+        ready.store(other.ready.load());
+        return *this;
+    }
+
+    // Combines regions from every child -- same shape as Task::setup(), just looping children instead
+    // of two fixed fields (left_child/right_child).
+    void setup() override {
+        regions_to_unmatch.clear();
+        regions_matched_to_virtual_boundary.clear();
+        for (Task* c : children) {
+            for (auto& region : c->regions_matched_to_virtual_boundary) {
+                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker)
+                    regions_to_unmatch.push_back(region);
+                else
+                    regions_matched_to_virtual_boundary.push_back(region);
+            }
+        }
+    }
+
+    void mark_solved(size_t my_pid = 0) override {
+        (void)my_pid;
+        status.store(0, std::memory_order_release);
+        ready.store(false, std::memory_order_release);
+    }
+
+    bool try_to_steal(size_t val) override {
+        (void)val;
+        int64_t N = (int64_t)children.size();
+        int64_t old = status.fetch_add(1, std::memory_order_acq_rel);
+        return old == N - 1;
+    }
+
+    void reset() override {
+        status.store(0, std::memory_order_release);
+        ready.store(false, std::memory_order_release);
+    }
+};
+
 #ifdef USE_SHMEM
-struct CrossRankTask : public TaskBase {
+struct CrossRankTask : public SpecialTask {
 public:
-    Task* child; // Want to change this?
+    // Cross-rank tasks only ever have one local child -- no N-ary generalization needed here the way
+    // LocalSeamTask needed one. Populated via Task::add_special_task(this), not the constructor.
+    Task* child{nullptr};
     bool iamleft;
 
     size_t other_pid{ 0 };
@@ -340,7 +413,6 @@ public:
 
     CrossRankTask(
         int vb,
-        Task* child,
         bool iamleft,
         int vb_left,
         int vb_right,
@@ -350,8 +422,7 @@ public:
         uint64_t* done_ptr,
         pm::FusionSummary* fusion_summary_ptr,
         pm::Mwpm* solver
-    ) : TaskBase(vb, vb_left, vb_right, true, true, solver),
-        child(child),
+    ) : SpecialTask(vb, vb_left, vb_right, true, TaskType::CrossRankTask, solver),
         iamleft(iamleft),
         other_pid(other_pid),
         status_shm(status_ptr),
@@ -367,18 +438,16 @@ public:
             std::cout << "PE" << shmem_my_pe() << " DecodingTask: Cross PE fusion task failed to create context\n" << std::flush;
             context_shm = SHMEM_CTX_DEFAULT;
         }
-        // context_shm = SHMEM_CTX_DEFAULT;
         *status_shm = 0;
         *signal_shm = 0;
         *done_shm = 0;
-        // Insert this CRT above the current chain top of child's parent chain.
-        // This correctly handles multiple CRTs for the same obs group (they chain sequentially).
-        TaskBase* top = child;
-        while (top->parent != nullptr) top = top->parent;
-        top->parent = this;
+        // No more "walk to top of child's own parent chain and attach there" -- CrossRankTasks no
+        // longer sit in the tree at all, and no longer take `child` as a constructor argument: the
+        // task-building pass sets it via the triggering Task's own add_special_task(this) call
+        // instead (mirroring however LocalSeamTask attaches).
     }
 
-    CrossRankTask(CrossRankTask&& other) noexcept : TaskBase(std::move(other)) {
+    CrossRankTask(CrossRankTask&& other) noexcept : SpecialTask(std::move(other)) {
         if (DEBUG) std::cout << "PE" << shmem_n_pes() << " CrossRankTask move constructor was called" << std::endl << std::flush;
         child = other.child;
         iamleft = other.iamleft;
@@ -391,8 +460,7 @@ public:
         owns_context = other.owns_context;
         left_global_offset  = other.left_global_offset;
         right_global_offset = other.right_global_offset;
-        // seam_vb_slot        = other.seam_vb_slot;
-        
+
         // Nullify other's ownership so destructor skips it
         other.owns_context = false;
     }
@@ -463,7 +531,6 @@ public:
             old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 2, other_pid);
             news = old | 2;
         }
-        // if (t_out && DEBUG) *t_out << "  done with fetch_or" << std::endl << std::flush;
         if (news == 3) {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_END();

@@ -528,11 +528,16 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
     const int num_seams = (int)graph.num_virtual_boundaries - K_vb * (int)graph.num_obs_patches;
 
     // Determine my obs patch range (same formula as constructor)
+#ifdef USE_SHMEM
     const int base         = (int)graph.num_obs_patches / n_pes;
     const int rem          = (int)graph.num_obs_patches % n_pes;
     const int my_obs_start = base * pid + std::min(pid, rem);
     const int my_obs_count = base + (pid < rem ? 1 : 0);
-    if (DEBUG) std::cout << "PE" << pid << " my_obs_start: " << my_obs_start << ", n=" << my_obs_count << "\n" << std::flush;
+#else
+    const int my_obs_start = 0;
+    const int my_obs_count = graph.num_obs_patches;
+#endif
+    if (DEBUG) std::cout << "my_obs_start: " << my_obs_start << ", n=" << my_obs_count << "\n" << std::flush;
 
     // For each seam: determine the two obs patches it connects and the local partition
     // range it touches (used for vb_left/vb_right on cross-PE fusion tasks).

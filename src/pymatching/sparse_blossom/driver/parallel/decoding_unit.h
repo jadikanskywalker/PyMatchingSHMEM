@@ -191,9 +191,7 @@ struct DecodingUnit {
     ~DecodingUnit();
 
     void build_tasks_for_round_partitioning();
-#ifdef USE_SHMEM
     void build_tasks_for_obs_patch_partitioning();
-#endif
 
     void build_solvers();
 
