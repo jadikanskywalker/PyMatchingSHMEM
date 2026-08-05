@@ -21,26 +21,18 @@ struct GraphCacheMismatchError : public std::runtime_error {
 void write_user_graph_cache(
     pm::UserGraph& user_graph,
     const std::string& path,
-    bool enable_correlations
-#ifdef USE_THREADS
-    , int64_t rounds_per_partition
-#ifdef USE_SHMEM
-    , int division_strategy
-#endif
-#endif
+    bool enable_correlations,
+    int64_t rounds_per_partition,
+    int division_strategy
 );
 
 // Throws GraphCacheMismatchError if the cache's stored parameters don't match the
 // expected_* arguments, or std::runtime_error on I/O or file-format errors.
 pm::UserGraph read_user_graph_cache(
     const std::string& path,
-    bool expected_enable_correlations
-#ifdef USE_THREADS
-    , int64_t expected_rounds_per_partition
-#ifdef USE_SHMEM
-    , int expected_division_strategy
-#endif
-#endif
+    bool expected_enable_correlations,
+    int64_t expected_rounds_per_partition,
+    int expected_division_strategy
 );
 
 }  // namespace pm

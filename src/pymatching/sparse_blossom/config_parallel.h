@@ -30,7 +30,6 @@ namespace config_parallel {
     inline bool use_threads = true;
     
     inline int M = std::numeric_limits<int>::max(); // rounds per partition
-    inline bool obs_coors_included = false;
     
     enum div_strgy { ROUND, OBS };
     inline int k = 1;

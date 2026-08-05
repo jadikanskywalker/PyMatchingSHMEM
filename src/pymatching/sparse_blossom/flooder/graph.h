@@ -136,12 +136,10 @@ struct SharedMatchingGraph {
         std::vector<int> node_part_id_,
         size_t num_partitions_,
         size_t num_virtual_boundaries_,
-        size_t num_rounds_
-#ifdef USE_SHMEM
-        , size_t num_obs_patches_ = 0,
+        size_t num_rounds_,
+        size_t num_obs_patches_ = 0,
         size_t p_per_obs_patch_ = 0,
         size_t vb_per_obs_patch = 0
-#endif
     );
 
     void construct_partition_vb_bounds();

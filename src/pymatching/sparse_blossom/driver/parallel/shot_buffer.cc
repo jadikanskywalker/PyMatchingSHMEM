@@ -51,7 +51,8 @@ ShotContainer::ShotContainer(ShotContainer&& other) noexcept
       num_task_roots(other.num_task_roots),
       thread_results(std::move(other.thread_results)),
       extraction_jobs(std::move(other.extraction_jobs)),
-      tasks(std::move(other.tasks))
+      tasks(std::move(other.tasks)),
+      local_seam_tasks(std::move(other.local_seam_tasks))
 {
     num_roots_done.store(other.num_roots_done.load());
     extraction_posted_count.store(other.extraction_posted_count.load());
@@ -70,6 +71,7 @@ ShotContainer& ShotContainer::operator=(ShotContainer&& other) noexcept {
         num_observables = other.num_observables;
         res = std::move(other.res);
         tasks = std::move(other.tasks);
+        local_seam_tasks = std::move(other.local_seam_tasks);
         num_task_roots = other.num_task_roots;
         num_roots_done.store(other.num_roots_done.load());
         thread_results = std::move(other.thread_results);
@@ -136,6 +138,9 @@ void ShotContainer::reset() {
     current_buffer_round.store(-1, std::memory_order_release);
     for (auto& task : tasks) {
         task.reset();
+    }
+    for (auto& seam : local_seam_tasks) {
+        seam.reset();
     }
 #ifdef USE_SHMEM
     // status_shm and signal_shm are reset at end of each shot; only done_shm needs resetting

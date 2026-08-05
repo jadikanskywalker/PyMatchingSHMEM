@@ -41,7 +41,7 @@ pm::pick_coords_for_drawing_from_dem(const stim::DetectorErrorModel &dem, float 
         // The last coordinate may encode the observable axis.
         // Cross-observable (seam) nodes are encoded as -seam_idx
         // Decode to the visual midpoint (obs_a+obs_b)/2
-        if (config_parallel::division_strategy == config_parallel::OBS || config_parallel::obs_coors_included) {
+        if (config_parallel::division_strategy == config_parallel::OBS) {
             if (cs.size() > 2) {
                 size_t nc = cs.size();
                 auto tmp = cs[nc-1];

@@ -42,13 +42,9 @@ std::vector<uint64_t> read_u64_vector(FILE* f) {
 void pm::write_user_graph_cache(
     pm::UserGraph& user_graph,
     const std::string& path,
-    bool enable_correlations
-#ifdef USE_THREADS
-    , int64_t rounds_per_partition
-#ifdef USE_SHMEM
-    , int division_strategy
-#endif
-#endif
+    bool enable_correlations,
+    int64_t rounds_per_partition,
+    int division_strategy
 ) {
     FILE* f = fopen(path.c_str(), "wb");
     if (!f)
@@ -60,12 +56,9 @@ void pm::write_user_graph_cache(
         write_pod(f, GRAPH_CACHE_VERSION);
 
         uint8_t build_mode = 0;
-#ifdef USE_THREADS
-        build_mode = 1;
-#ifdef USE_SHMEM
+        // build_mode = 1;
         build_mode = 2;
-#endif
-#endif
+
         write_pod(f, build_mode);
 
         uint8_t enable_corr_u8 = enable_correlations ? 1 : 0;
@@ -83,7 +76,6 @@ void pm::write_user_graph_cache(
         write_pod(f, num_observables);
         write_pod(f, num_boundary_nodes);
 
-#ifdef USE_THREADS
         write_pod(f, rounds_per_partition);
         uint64_t cache_num_partitions = user_graph.num_partitions;
         uint64_t cache_num_rounds = user_graph.num_rounds;
@@ -91,7 +83,7 @@ void pm::write_user_graph_cache(
         write_pod(f, cache_num_partitions);
         write_pod(f, cache_num_rounds);
         write_pod(f, cache_num_virtual_boundaries);
-#ifdef USE_SHMEM
+
         int32_t cache_division_strategy = division_strategy;
         write_pod(f, cache_division_strategy);
         uint64_t cache_num_obs_patches = user_graph.num_obs_patches;
@@ -100,8 +92,7 @@ void pm::write_user_graph_cache(
         write_pod(f, cache_num_obs_patches);
         write_pod(f, cache_p_per_obs_patch);
         write_pod(f, cache_vb_per_obs_patch);
-#endif
-#endif
+
 
         // --- Nodes ---
         for (auto& node : user_graph.nodes) {
@@ -109,7 +100,6 @@ void pm::write_user_graph_cache(
             write_pod(f, is_boundary_u8);
             uint32_t num_neighbors = (uint32_t)node.neighbors.size();
             write_pod(f, num_neighbors);
-#ifdef USE_THREADS
             write_pod(f, node.x);
             write_pod(f, node.y);
             write_pod(f, node.round);
@@ -117,7 +107,6 @@ void pm::write_user_graph_cache(
             int32_t observable_id = node.observable_id;
             write_pod(f, vb);
             write_pod(f, observable_id);
-#endif
         }
 
         // --- Edges (flatten list to stable indices in list order) ---
@@ -151,7 +140,6 @@ void pm::write_user_graph_cache(
         std::vector<uint64_t> boundary_vec(user_graph.boundary_nodes.begin(), user_graph.boundary_nodes.end());
         write_u64_vector(f, boundary_vec);
 
-#ifdef USE_THREADS
         // --- node_part_id ---
         write_pod(f, (uint64_t)user_graph.node_part_id.size());
         for (int part_id : user_graph.node_part_id) {
@@ -170,7 +158,6 @@ void pm::write_user_graph_cache(
                 write_pod(f, node_idx_32);
             }
         }
-#endif
 
         fclose(f);
     } catch (...) {
@@ -181,13 +168,9 @@ void pm::write_user_graph_cache(
 
 pm::UserGraph pm::read_user_graph_cache(
     const std::string& path,
-    bool expected_enable_correlations
-#ifdef USE_THREADS
-    , int64_t expected_rounds_per_partition
-#ifdef USE_SHMEM
-    , int expected_division_strategy
-#endif
-#endif
+    bool expected_enable_correlations,
+    int64_t expected_rounds_per_partition,
+    int expected_division_strategy
 ) {
     FILE* f = fopen(path.c_str(), "rb");
     if (!f)
@@ -211,12 +194,9 @@ pm::UserGraph pm::read_user_graph_cache(
         uint8_t build_mode;
         read_pod(f, build_mode);
         uint8_t expected_build_mode = 0;
-#ifdef USE_THREADS
-        expected_build_mode = 1;
-#ifdef USE_SHMEM
+        // expected_build_mode = 1;
         expected_build_mode = 2;
-#endif
-#endif
+
         if (build_mode != expected_build_mode) {
             throw pm::GraphCacheMismatchError(
                 "graph_cache: build mode mismatch (file has " + std::to_string(build_mode) +
@@ -238,7 +218,6 @@ pm::UserGraph pm::read_user_graph_cache(
         read_pod(f, num_observables);
         read_pod(f, num_boundary_nodes);
 
-#ifdef USE_THREADS
         int64_t cache_rounds_per_partition;
         read_pod(f, cache_rounds_per_partition);
         if (cache_rounds_per_partition != expected_rounds_per_partition) {
@@ -251,7 +230,7 @@ pm::UserGraph pm::read_user_graph_cache(
         read_pod(f, cache_num_partitions);
         read_pod(f, cache_num_rounds);
         read_pod(f, cache_num_virtual_boundaries);
-#ifdef USE_SHMEM
+
         int32_t cache_division_strategy;
         read_pod(f, cache_division_strategy);
         if (cache_division_strategy != expected_division_strategy) {
@@ -264,22 +243,16 @@ pm::UserGraph pm::read_user_graph_cache(
         read_pod(f, cache_num_obs_patches);
         read_pod(f, cache_p_per_obs_patch);
         read_pod(f, cache_vb_per_obs_patch);
-#endif
-#endif
 
         pm::UserGraph user_graph(num_nodes, num_observables);
         user_graph.loaded_from_dem_without_correlations = (bool)loaded_wo_corr_u8;
 
-#ifdef USE_THREADS
         user_graph.num_partitions = cache_num_partitions;
         user_graph.num_rounds = cache_num_rounds;
         user_graph.num_virtual_boundaries = cache_num_virtual_boundaries;
-#ifdef USE_SHMEM
         user_graph.num_obs_patches = cache_num_obs_patches;
         user_graph.p_per_obs_patch = cache_p_per_obs_patch;
         user_graph.vb_per_obs_patch = cache_vb_per_obs_patch;
-#endif
-#endif
 
         // --- Nodes ---
         // node.neighbors is intentionally left empty here; it is rebuilt below from
@@ -294,7 +267,6 @@ pm::UserGraph pm::read_user_graph_cache(
             uint32_t num_neighbors;
             read_pod(f, num_neighbors);
             expected_num_neighbors[i] = num_neighbors;
-#ifdef USE_THREADS
             read_pod(f, node.x);
             read_pod(f, node.y);
             read_pod(f, node.round);
@@ -303,7 +275,6 @@ pm::UserGraph pm::read_user_graph_cache(
             read_pod(f, observable_id);
             node.vb = vb;
             node.observable_id = observable_id;
-#endif
         }
 
         // --- Edges ---
@@ -366,7 +337,6 @@ pm::UserGraph pm::read_user_graph_cache(
             user_graph.boundary_nodes.insert((size_t)b);
         }
 
-#ifdef USE_THREADS
         // --- node_part_id ---
         uint64_t node_part_id_len;
         read_pod(f, node_part_id_len);
@@ -391,7 +361,6 @@ pm::UserGraph pm::read_user_graph_cache(
                 user_graph.virtual_boundaries[i][j] = node_idx_32;
             }
         }
-#endif
 
         fclose(f);
         return user_graph;

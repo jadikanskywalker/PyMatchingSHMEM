@@ -61,7 +61,7 @@ int main_predict(int argc, const char** argv) {
             "--extraction_unit_size",
             "--extract_preemptively",
             "--seam_buffer_size", // extra partitions to include for solution extraction / cross-rank fusion windows
-            // Generate or pre-load DEM and/or shot sampling
+            // Generate or pre-load DEM / shot samples
             "--graph_cache_path",
             "--gen_code",
             "--gen_task",
@@ -142,7 +142,6 @@ int main_predict(int argc, const char** argv) {
     }
     config_parallel::extract_preemptively = stim::find_bool_argument("--extract_preemptively", argc, argv);
     config_parallel::L = (int)stim::find_int64_argument("--extraction_unit_size", 1, 1, INT64_MAX, argc, argv);
-    // config_parallel::obs_coors_included = stim::find_bool_argument("--obs_coors_included", argc, argv);
     config_parallel::k = stim::find_int64_argument("--seam_buffer_size", 1, 0, INT64_MAX, argc, argv);
 #ifdef ENABLE_DRAW_FLAGS
     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);

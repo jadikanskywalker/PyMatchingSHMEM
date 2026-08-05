@@ -92,6 +92,10 @@ struct ShotContainer {
 #ifdef USE_SHMEM
     std::vector<CrossRankTask> cross_rank_tasks;
 #endif
+    // Local-observable-boundary seams (OBS partitioning only) -- never SHMEM-specific, unlike
+    // cross_rank_tasks, so unconditional even though only build_tasks_for_obs_patch_partitioning
+    // populates it today.
+    std::vector<LocalSeamTask> local_seam_tasks;
 
     ShotContainer(int num_partitions, int num_virtual_boundaries, int num_observables);
 

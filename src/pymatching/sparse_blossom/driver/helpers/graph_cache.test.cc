@@ -20,11 +20,8 @@
 #include <tuple>
 #include <vector>
 
-#include "pymatching/sparse_blossom/driver/user_graph.h"
-
-#ifdef USE_THREADS
 #include "pymatching/sparse_blossom/config_parallel.h"
-#endif
+#include "pymatching/sparse_blossom/driver/user_graph.h"
 
 namespace {
 
@@ -72,35 +69,19 @@ pm::UserGraph make_test_graph() {
 }  // namespace
 
 TEST(GraphCache, RoundTripPreservesNodesEdgesAndBoundary) {
-#ifdef USE_THREADS
     config_parallel::M = 10;
-#ifdef USE_SHMEM
     config_parallel::division_strategy = config_parallel::ROUND;
-#endif
-#endif
 
     pm::UserGraph original = make_test_graph();
     RaiiTempNamedFile tmp;
 
     pm::write_user_graph_cache(
-        original, tmp.path, /*enable_correlations=*/false
-#ifdef USE_THREADS
-        , config_parallel::M
-#ifdef USE_SHMEM
-        , (int)config_parallel::division_strategy
-#endif
-#endif
-    );
+        original, tmp.path, /*enable_correlations=*/false, config_parallel::M,
+        (int)config_parallel::division_strategy);
 
     pm::UserGraph loaded = pm::read_user_graph_cache(
-        tmp.path, /*expected_enable_correlations=*/false
-#ifdef USE_THREADS
-        , config_parallel::M
-#ifdef USE_SHMEM
-        , (int)config_parallel::division_strategy
-#endif
-#endif
-    );
+        tmp.path, /*expected_enable_correlations=*/false, config_parallel::M,
+        (int)config_parallel::division_strategy);
 
     ASSERT_EQ(original.get_num_nodes(), loaded.get_num_nodes());
     ASSERT_EQ(original.get_num_observables(), loaded.get_num_observables());
@@ -120,77 +101,49 @@ TEST(GraphCache, RoundTripPreservesNodesEdgesAndBoundary) {
     for (size_t i = 0; i < loaded.get_num_nodes(); i++) {
         for (auto& neighbor : loaded.nodes[i].neighbors) {
             size_t other = (neighbor.pos == 0) ? neighbor.edge_it->node2 : neighbor.edge_it->node1;
-            EXPECT_NE(loaded.index_of_neighbor(other), SIZE_MAX);
+            EXPECT_NE(loaded.nodes[i].index_of_neighbor(other), SIZE_MAX);
         }
     }
 
-#ifdef USE_THREADS
     ASSERT_EQ(original.node_part_id, loaded.node_part_id);
     ASSERT_EQ(original.num_partitions, loaded.num_partitions);
     ASSERT_EQ(original.num_rounds, loaded.num_rounds);
     ASSERT_EQ(original.num_virtual_boundaries, loaded.num_virtual_boundaries);
     ASSERT_EQ(original.virtual_boundaries, loaded.virtual_boundaries);
-#endif
 }
 
 TEST(GraphCache, MismatchedEnableCorrelationsThrows) {
-#ifdef USE_THREADS
     config_parallel::M = 10;
-#ifdef USE_SHMEM
     config_parallel::division_strategy = config_parallel::ROUND;
-#endif
-#endif
 
     pm::UserGraph original = make_test_graph();
     RaiiTempNamedFile tmp;
 
     pm::write_user_graph_cache(
-        original, tmp.path, /*enable_correlations=*/false
-#ifdef USE_THREADS
-        , config_parallel::M
-#ifdef USE_SHMEM
-        , (int)config_parallel::division_strategy
-#endif
-#endif
-    );
+        original, tmp.path, /*enable_correlations=*/false, config_parallel::M,
+        (int)config_parallel::division_strategy);
 
     ASSERT_THROW(
         pm::read_user_graph_cache(
-            tmp.path, /*expected_enable_correlations=*/true
-#ifdef USE_THREADS
-            , config_parallel::M
-#ifdef USE_SHMEM
-            , (int)config_parallel::division_strategy
-#endif
-#endif
-        ),
+            tmp.path, /*expected_enable_correlations=*/true, config_parallel::M,
+            (int)config_parallel::division_strategy),
         pm::GraphCacheMismatchError);
 }
 
-#ifdef USE_THREADS
 TEST(GraphCache, MismatchedRoundsPerPartitionThrows) {
     config_parallel::M = 10;
-#ifdef USE_SHMEM
     config_parallel::division_strategy = config_parallel::ROUND;
-#endif
 
     pm::UserGraph original = make_test_graph();
     RaiiTempNamedFile tmp;
 
     pm::write_user_graph_cache(
-        original, tmp.path, /*enable_correlations=*/false, config_parallel::M
-#ifdef USE_SHMEM
-        , (int)config_parallel::division_strategy
-#endif
-    );
+        original, tmp.path, /*enable_correlations=*/false, config_parallel::M,
+        (int)config_parallel::division_strategy);
 
     ASSERT_THROW(
         pm::read_user_graph_cache(
-            tmp.path, /*expected_enable_correlations=*/false, /*expected_rounds_per_partition=*/11
-#ifdef USE_SHMEM
-            , (int)config_parallel::division_strategy
-#endif
-        ),
+            tmp.path, /*expected_enable_correlations=*/false, /*expected_rounds_per_partition=*/11,
+            (int)config_parallel::division_strategy),
         pm::GraphCacheMismatchError);
 }
-#endif

@@ -246,15 +246,15 @@ pm::DecodingUnit::DecodingUnit(
 #endif
 }
 
-#ifdef USE_SHMEM
 pm::DecodingUnit::~DecodingUnit() {
+#ifdef USE_SHMEM
     shmem_free(node_ephemeral_fields_ptr);
     shmem_free(regions_ptr);
     shmem_free(child_edges_ptr);
     shmem_free(task_status_ptr);
     shmem_free(task_fusion_summary_ptr);
-}
 #endif
+}
 
 namespace {
 // Shared by build_tasks_for_round_partitioning() and build_tasks_for_obs_patch_partitioning() --
@@ -458,7 +458,6 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
             // this CRT touches, on my own local side" pattern as OBS's CRT anchor.
             shot_buffer->buffer[i].cross_rank_tasks.emplace_back(
                 vb,
-                &shot_buffer->buffer[i].tasks.back(),
                 false,
                 (vb-config_parallel::k < -1) ? -1 : vb-config_parallel::k,
                 (vb+config_parallel::k < (int)graph.num_virtual_boundaries) ? vb+config_parallel::k : (int)graph.num_virtual_boundaries,
@@ -469,6 +468,7 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                 fusion_summary_p,
                 solver_for(i, my_partitions_start)
             );
+            shot_buffer->buffer[i].tasks.back().add_special_task(&shot_buffer->buffer[i].cross_rank_tasks.back());
             if (DEBUG) {
                 auto& t = shot_buffer->buffer[i].cross_rank_tasks.back();
                 std::cout << "PE" << pid << " Left cross task:" << std::endl
@@ -490,7 +490,6 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
             // Anchor on my own last local partition, right at this boundary.
             shot_buffer->buffer[i].cross_rank_tasks.emplace_back(
                 vb,
-                &shot_buffer->buffer[i].tasks.back(),
                 true,
                 (vb-config_parallel::k < -1) ? -1 : vb-config_parallel::k,
                 (vb+config_parallel::k < (int)graph.num_virtual_boundaries) ? vb+config_parallel::k : (int)graph.num_virtual_boundaries,
@@ -501,6 +500,7 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                 fusion_summary_p,
                 solver_for(i, my_partitions_end - 1)
             );
+            shot_buffer->buffer[i].tasks.back().add_special_task(&shot_buffer->buffer[i].cross_rank_tasks.back());
             if (DEBUG) {
                 auto& t = shot_buffer->buffer[i].cross_rank_tasks.back();
                 std::cout << "PE" << pid << "  Right cross task:" << std::endl
@@ -536,6 +536,10 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
 #else
     const int my_obs_start = 0;
     const int my_obs_count = graph.num_obs_patches;
+    // Every existing "PE" << pid DEBUG print (both here and in the CRT-only branches below) compiles
+    // unchanged in a non-SHMEM build with this shadow -- there's only ever one implicit "PE" (0), which
+    // owns every observable.
+    const int pid = 0;
 #endif
     if (DEBUG) std::cout << "my_obs_start: " << my_obs_start << ", n=" << my_obs_count << "\n" << std::flush;
 
@@ -660,12 +664,14 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
     // narrower same-unit_hi-both-CRT assertion Phase 1.5 needed (CRT construction no longer commits
     // immediately, so it can stack/defer exactly like a local seam).
 
+#ifdef USE_SHMEM
     const int base_pe = (int)graph.num_obs_patches / n_pes;
     const int rem_pe  = (int)graph.num_obs_patches % n_pes;
     auto other_pid_for = [&](int remote_obs) {
         if (remote_obs < rem_pe * (base_pe + 1)) return remote_obs / (base_pe + 1);
         return rem_pe + (remote_obs - rem_pe * (base_pe + 1)) / base_pe;
     };
+#endif
 
 #ifdef ENABLE_SHOT_BUFFERS
     const int num_shot_containers = NUM_BUFFERS_PER_UNIT;
@@ -674,15 +680,20 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
 #endif
     for (int shot_id = 0; shot_id < num_shot_containers; ++shot_id) {
         auto& tasks = shot_buffer->buffer[shot_id].tasks;
-        auto& crt = shot_buffer->buffer[shot_id].cross_rank_tasks;
+        auto& local_seams = shot_buffer->buffer[shot_id].local_seam_tasks;
         tasks.reserve(static_cast<size_t>(my_obs_count * (2*K_p - 1) + num_seams + 1));
+        local_seams.reserve((size_t)num_seams);
+#ifdef USE_SHMEM
+        auto& crt = shot_buffer->buffer[shot_id].cross_rank_tasks;
         crt.reserve((size_t)num_seams);
+#endif
 
         if (!config_parallel::extract_preemptively) {
-            // ==================== Non-preemptive: unchanged behavior ====================
-            // Each observable becomes one full balanced tree; seams/CRTs fuse whole-observable roots
-            // together after the fact. post_hoc_chunk_and_post (unmodified) does all the actual
-            // unit-by-unit division+posting at extraction time, walking this static tree top-down.
+            // ==================== Non-preemptive ====================
+            // Each observable becomes one full balanced tree; local seams/CRTs attach to whole-
+            // observable roots via add_special_task instead of fusing them into the tree.
+            // post_hoc_chunk_and_post (unmodified) does all the actual unit-by-unit division+posting
+            // at extraction time, walking this static tree top-down.
             std::vector<Task*> obs_roots(my_obs_count, nullptr);
             for (int lo = 0; lo < my_obs_count; ++lo) {
                 const int o = my_obs_start + lo;
@@ -703,40 +714,32 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                                               solver_base, on_fusion);
                 obs_roots[lo] = obs_root.task;
             }
-
-            std::vector<Task*> group_root(my_obs_count);
-            for (int lo = 0; lo < my_obs_count; ++lo) {
-                group_root[lo] = obs_roots[lo];
-                if (DEBUG) std::cout << "  " << group_root[lo];
+            if (DEBUG) {
+                for (int lo = 0; lo < my_obs_count; ++lo) std::cout << "  " << obs_roots[lo];
+                std::cout << "\n" << std::flush;
             }
-            if (DEBUG) std::cout << "\n" << std::flush;
 
+            // Roots never merge under the special-tasks-attach model -- obs_roots[lo] stays this
+            // observable's own tree root for the whole function's lifetime, so seams/CRTs attach
+            // directly against it (no union-find over a group_root[] indirection needed anymore).
             for (int s = 0; s < num_seams; ++s) {
                 const auto& si = seam_infos[s];
                 const int loi = si.oi - my_obs_start, loj = si.oj - my_obs_start;
                 const bool oi_local = seam_ownership[s].oi_local, oj_local = seam_ownership[s].oj_local;
                 if (oi_local && oj_local) {
                     int global_vb = K_vb * (int)graph.num_obs_patches + s;
-                    Task* ri = group_root[loi];
-                    Task* rj = group_root[loj];
                     pm::Mwpm* seam_solver = solver_for(shot_id, si.oi * K_p + si.vb_left + 1);
-                    if (ri == rj) {
-                        tasks.emplace_back(global_vb, ri, ri, seam_solver);
-                    } else {
-                        tasks.emplace_back(global_vb, ri, rj, seam_solver);
-                    }
-                    tasks.back().is_extraction_unit_connector = true;
+                    auto& seam = local_seams.emplace_back(global_vb, si.vb_left, si.vb_right, seam_solver);
 #ifdef ENABLE_DRAW_FLAGS
-                    tasks.back().left_obs_patch_id = si.oi;
-                    tasks.back().right_obs_patch_id = si.oj;
+                    seam.obs_patch_ids = { si.oi, si.oj };
 #endif
-                    Task* new_root = &tasks.back();
-                    for (int lo2 = 0; lo2 < my_obs_count; ++lo2)
-                        if (group_root[lo2] == ri || group_root[lo2] == rj)
-                            group_root[lo2] = new_root;
-                } else if (oi_local || oj_local) {
+                    obs_roots[loi]->add_special_task(&seam);
+                    obs_roots[loj]->add_special_task(&seam);
+                }
+#ifdef USE_SHMEM
+                else if (oi_local || oj_local) {
                     const int local_lo = oi_local ? loi : loj;
-                    Task* local_child = group_root[local_lo];
+                    Task* local_root = obs_roots[local_lo];
                     const bool iamleft = oi_local;
                     const int remote_obs = oi_local ? si.oj : si.oi;
                     int other_pid = other_pid_for(remote_obs);
@@ -744,10 +747,11 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                     uint64_t* sp = get_task_status_ptr_for_seam(shot_id, s);
                     FusionSummary* fp = get_fusion_summary_ptr_for_seam(shot_id, s);
                     pm::Mwpm* crt_solver = solver_for(shot_id, (oi_local ? si.oi : si.oj) * K_p + si.vb_left + 1);
-                    crt.emplace_back(global_vb, local_child, iamleft, si.vb_left, si.vb_right,
+                    crt.emplace_back(global_vb, iamleft, si.vb_left, si.vb_right,
                                       other_pid, sp, sp+1, sp+2, fp, crt_solver);
                     crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
                     crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
+                    local_root->add_special_task(&crt.back());
                     if (DEBUG) {
                         auto& t = crt.back();
                         std::cout << "PE" << pid << " OBS cross-rank task s=" << s << ":\n"
@@ -758,38 +762,22 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                                   << std::flush;
                     }
                 }
+#endif
             }
+            shot_buffer->buffer[shot_id].num_task_roots = my_obs_count;
         } else {
-            // ==================== Preemptive: deferred-chain worklist construction ====================
-            // See now-its-time-to-jazzy-turing.md (Phase 1 + 1.5 + 1.6). Each observable advances its own
-            // per-unit chain (mirroring build_tasks_for_round_partitioning's own extract_preemptively
-            // loop) until it hits a seam/CRT boundary. Local seams pause the lower-index (oi) side until
-            // the higher-index (oj) side catches up; CRTs never wait (only one local side). parent/
-            // right_obs_parent assignment for a seam's two continuations is fully order-independent (via
-            // seam_sides + fixup_seam_parent below), and a chain's own "current tip" is TaskBase*-typed
-            // (via ChainTip, below) so it can hold either an ordinary Task or a CrossRankTask uniformly --
-            // together these let any number of seams/CRTs, in any combination, cascade through the same
-            // extraction unit correctly, regardless of which side's chain reaches it first or how many
-            // outer-loop passes apart.
-            struct ChainTip { TaskBase* node; size_t leftmost, rightmost; };
-            struct ChainState {
-                int next_unit;
-                ChainTip tip;
-                bool tip_is_raw;   // tip is still the untouched unit_roots[0] -- no fusion/seam/CRT has
-                                   // touched it yet, so (unlike every other step) no vb_left restriction
-                                   // applies when it's next consumed.
-                std::vector<RangeInfo> unit_roots;
-                const std::shared_ptr<pm::Mwpm>* solver_base;
-                int obs_vb_offset;
-                bool done;
-                int paused_on_seam{-1};  // >=0: blocked on seam s, waiting for its other side to arrive.
-                                          // Only the resolving side may wake this (clears it explicitly);
-                                          // the outer driver loop must never call advance_one_step while
-                                          // set, or it can rediscover its own pending tip and self-fuse.
-            };
-            std::vector<ChainState> chain_state(my_obs_count);
+            // ==================== Preemptive: build first, attach second ====================
+            // See now-its-time-to-jazzy-turing.md's task-building plan. Each observable's own chain is
+            // built completely, independently, with no seam awareness at all (Step 1) -- there is no
+            // longer any reason one observable's chain construction needs to know about another's, since
+            // seams/CRTs attach via add_special_task after the fact rather than being woven into the
+            // tree's own pointers as they're built. Step 2a then marks which chain-links fall inside an
+            // active seam's span, Step 2b narrows vb_left accordingly, and Step 2c builds and attaches
+            // each seam/CRT.
+            std::vector<std::vector<Task*>> chain_link_at_unit(my_obs_count);
             std::vector<Task*> obs_roots(my_obs_count, nullptr);
 
+            // ---- Step 1: build every observable's own chain, independently ----
             for (int lo = 0; lo < my_obs_count; ++lo) {
                 const int o = my_obs_start + lo;
                 const int obs_p_offset = o * K_p;
@@ -805,252 +793,119 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                 std::vector<RangeInfo> unit_roots = build_extraction_units(
                     tasks, obs_vb_offset, leaf_base_idx, (size_t)K_p, config_parallel::L,
                     solver_base, on_fusion);
-                // done always starts false, even when unit_roots.size()==1 (K_p <= L, the whole
-                // observable fits in one extraction unit) -- a seam can still trigger on this single
-                // unit's own unit_hi==0, so advance_one_step must get the chance to check for one before
-                // this chain is considered finished. Its own "no more units" branch (cs.next_unit >=
-                // unit_roots.size()) correctly sets both done and obs_roots[lo] once that check has
-                // actually run, whether or not any seam ends up touching this observable.
-                RangeInfo first_tip = unit_roots[0];
-                chain_state[lo] = ChainState{ 1, ChainTip{first_tip.task, first_tip.leftmost, first_tip.rightmost},
-                                               true, std::move(unit_roots), solver_base, obs_vb_offset, false };
+
+                auto& links = chain_link_at_unit[lo];
+                links.resize(unit_roots.size());
+                links[0] = unit_roots[0].task;
+                RangeInfo chain = unit_roots[0];
+                for (size_t k = 1; k < unit_roots.size(); ++k) {
+                    const RangeInfo& next_unit = unit_roots[k];
+                    size_t vb_id = chain.rightmost;
+                    tasks.emplace_back((int)vb_id + obs_vb_offset, chain.task, next_unit.task, solver_base[vb_id].get());
+                    Task* fusion = &tasks.back();
+                    fusion->is_extraction_unit_connector = true;
+                    fusion->vb_marker = (int)vb_id;
+                    // vb_left narrowing is NOT applied here -- deferred to step 2b, which needs every
+                    // seam's defer_division marks in place first (step 2a).
+                    links[k] = fusion;
+                    chain = {fusion, chain.leftmost, next_unit.rightmost};
+                }
+                obs_roots[lo] = chain.task;
             }
 
-            std::set<int> resolved_seams;
-            std::map<int, TaskBase*> pending_seam_tip;  // seam idx -> first-arriving side's current tip
-            std::unordered_map<Task*, std::pair<int,int>> seam_sides;  // local-seam Task* -> (oi, oj)
-
-            // After a construction call has (via its own ctor's side effect) just set node->parent =
-            // new_owner, correct it if node is a tracked dual-parent local seam and `owner` (the
-            // statically-known observable this construction belongs to) is that seam's oj/right side:
-            // relocate new_owner into right_obs_parent and restore parent to whatever legitimately held
-            // it before this call touched it (null if oi hasn't built yet, or oi's own continuation if
-            // it already had). If owner is the oi/left side, the ctor's default assignment is already
-            // the correct final value -- no-op. Order-independent: correctness never depends on whether
-            // the other side has already been built, paused, or hasn't been reached yet. Never called on
-            // a CrossRankTask operand -- a CRT is owned by exactly one ChainState, so it never needs
-            // dual-parent tracking (see the call sites below).
-            auto fixup_seam_parent = [&](Task* node, int owner, TaskBase* saved_parent, TaskBase* new_owner) {
-                auto it = seam_sides.find(node);
-                if (it == seam_sides.end()) return;
-                if (owner == it->second.second) {  // oj / right side
-                    node->right_obs_parent = new_owner;
-                    node->parent = saved_parent;
-                }
+            // ---- Step 2a: mark defer_division strictly between unit_lo and unit_hi (both excluded) ----
+            // Neither the connector closing unit_lo nor the one closing unit_hi is deferred: both
+            // divide normally when solved -- unit_hi's own divide just happens after its special_tasks
+            // (attached in step 2c) are processed first, a decode-time (phase three) ordering concern,
+            // not something this flag itself needs to encode.
+            auto mark_deferred = [&](int lo, int unit_lo, int unit_hi) {
+                auto& links = chain_link_at_unit[lo];
+                for (int u = unit_lo + 1; u <= unit_hi - 1 && u < (int)links.size(); ++u)
+                    links[u]->defer_division = true;
             };
+            for (int s = 0; s < num_seams; ++s) {
+                const auto& si = seam_infos[s];
+                if (seam_ownership[s].oi_local) mark_deferred(si.oi - my_obs_start, si.unit_lo, si.unit_hi);
+                if (seam_ownership[s].oj_local) mark_deferred(si.oj - my_obs_start, si.unit_lo, si.unit_hi);
+            }
 
-            // Advances chain_state[lo] by exactly one meaningful step: either records-and-pauses on a
-            // local seam (returns, no fusion built), resolves every seam/CRT ready at the current closed
-            // unit (looping -- a local-seam resolve and a CRT attach both leave cs.next_unit unchanged,
-            // so a re-scan can always find a sibling sharing the same unit_hi, no matter the mix or
-            // count), or builds one ordinary/wrap chain-link fusion. No-op (returns false) once
-            // chain_state[lo] is done or currently paused.
-            std::function<bool(int)> advance_one_step = [&](int lo) -> bool {
-                auto& cs = chain_state[lo];
-                if (cs.done) return false;
-                if (cs.paused_on_seam >= 0) return false;
-                const int o = my_obs_start + lo;
-
-                while (true) {
-                    const int cur_closed_unit = cs.next_unit - 1;
-                    int found_s = -1;
-                    for (int s = 0; s < num_seams; ++s) {
-                        if (resolved_seams.count(s)) continue;
-                        const auto& si = seam_infos[s];
-                        if (si.unit_hi != cur_closed_unit) continue;
-                        if (si.oi != o && si.oj != o) continue;
-                        found_s = s;
-                        break;
+            // ---- Step 2b: vb_left narrowing via a running "last-divided anchor" per observable ----
+            // Plain "narrow to my immediate predecessor's .part" is only correct between two connectors
+            // that both actually divide. Inside (and at the far end of) a deferred span, nothing has
+            // actually been divided since the connector that closed unit_lo, so every connector from
+            // unit_lo+1 through unit_hi inclusive -- deferred or not -- anchors back to that same .part,
+            // not to whichever connector immediately precedes it. This single forward pass reproduces
+            // ordinary one-step-back narrowing exactly wherever there's no deferred span, and handles a
+            // deferred span (and the unit_lo==0 edge case, where no anchor is ever established) with no
+            // extra case-work.
+            for (int lo = 0; lo < my_obs_count; ++lo) {
+                auto& links = chain_link_at_unit[lo];
+                int anchor = 0;
+                bool have_anchor = false;
+                for (size_t u = 1; u < links.size(); ++u) {
+                    if (have_anchor) links[u]->vb_left = anchor;
+                    if (!links[u]->defer_division) {
+                        anchor = links[u]->part;
+                        have_anchor = true;
                     }
-                    if (found_s < 0) break;  // no (more) seam triggers here -- fall through below
+                }
+            }
 
-                    const int s = found_s;
-                    const auto& si = seam_infos[s];
-                    const bool is_oi = (si.oi == o);
-
-                    if (seam_ownership[s].oi_local && seam_ownership[s].oj_local) {
-                        auto it = pending_seam_tip.find(s);
-                        if (it == pending_seam_tip.end()) {
-                            pending_seam_tip[s] = cs.tip.node;  // I'm first -- pause, genuinely blocked
-                            cs.paused_on_seam = s;
-                            return true;
-                        }
-                        TaskBase* other_node = it->second;
-                        pending_seam_tip.erase(it);
-                        resolved_seams.insert(s);
-                        TaskBase* oi_node = is_oi ? cs.tip.node : other_node;
-                        TaskBase* oj_node = is_oi ? other_node : cs.tip.node;
-                        TaskBase* saved_oi_parent = oi_node->parent;
-                        TaskBase* saved_oj_parent = (oj_node != oi_node) ? oj_node->parent : nullptr;
-                        int global_vb = K_vb * (int)graph.num_obs_patches + s;
-                        pm::Mwpm* seam_solver = solver_for(shot_id, si.oi * K_p + si.vb_left + 1);
-                        tasks.emplace_back(global_vb, oi_node, (oi_node == oj_node) ? oi_node : oj_node, seam_solver);
-                        Task* seam_task = &tasks.back();
-                        if (oi_node != oj_node) {
-                            // A CrossRankTask operand never needs fixup_seam_parent (never dual-parent
-                            // tracked -- see the lambda's own comment).
-                            if (!oi_node->is_cross_rank_fusion)
-                                fixup_seam_parent(static_cast<Task*>(oi_node), si.oi, saved_oi_parent, seam_task);
-                            if (!oj_node->is_cross_rank_fusion)
-                                fixup_seam_parent(static_cast<Task*>(oj_node), si.oj, saved_oj_parent, seam_task);
-                            seam_sides[seam_task] = { si.oi, si.oj };
-                        }
-                        // oi_node==oj_node (only possible when both are plain Tasks -- a CrossRankTask is
-                        // owned by exactly one ChainState, never aliasing across two different
-                        // observables' recorded tips): both sides' chains were already merged by an
-                        // earlier seam (rare, pre-existing topological case, not introduced by this
-                        // change) -- not given dual-parent treatment; seam_task keeps whatever single
-                        // parent the ordinary ctor assigned, matching prior behavior for this narrow case.
-                        seam_task->is_extraction_unit_connector = true;
+            // ---- Step 2c: build and attach, now that defer_division and vb_left are both final ----
+            // The special task's own vb_left/vb_right are read straight off the connector it attaches
+            // to (chain_link_at_unit[...][unit_hi]) -- that connector's own (now-final) vb_left is
+            // exactly the anchor value step 2b computed, and its vb_right was never touched by
+            // narrowing in the first place. Both sides' own chain_link_at_unit arrays hold identical
+            // values at the same unit index for a local-local seam (same L/K_p/leaf numbering and
+            // identical defer_division patterns on both sides, per Phase 1 Design §1's symmetry), so
+            // either side can be read -- use oi's.
+            for (int s = 0; s < num_seams; ++s) {
+                const auto& si = seam_infos[s];
+                const bool oi_local = seam_ownership[s].oi_local, oj_local = seam_ownership[s].oj_local;
+                if (oi_local && oj_local) {
+                    const int loi = si.oi - my_obs_start, loj = si.oj - my_obs_start;
+                    Task* attach_i = chain_link_at_unit[loi][si.unit_hi];
+                    Task* attach_j = chain_link_at_unit[loj][si.unit_hi];
+                    int global_vb = K_vb * (int)graph.num_obs_patches + s;
+                    pm::Mwpm* seam_solver = solver_for(shot_id, si.oi * K_p + si.vb_left + 1);
+                    auto& seam = local_seams.emplace_back(
+                        global_vb, attach_i->vb_left, attach_i->vb_right, seam_solver);
 #ifdef ENABLE_DRAW_FLAGS
-                        seam_task->left_obs_patch_id = si.oi;
-                        seam_task->right_obs_patch_id = si.oj;
+                    seam.obs_patch_ids = { si.oi, si.oj };
 #endif
-                        const int lo_oi = si.oi - my_obs_start;
-                        const int lo_oj = si.oj - my_obs_start;
-                        // .node -> seam, .leftmost/.rightmost unchanged (each side's own bookkeeping,
-                        // independent of the seam) -- keeps each side's own vb numbering continuous.
-                        chain_state[lo_oi].tip = { seam_task, chain_state[lo_oi].tip.leftmost, chain_state[lo_oi].tip.rightmost };
-                        chain_state[lo_oi].tip_is_raw = false;
-                        chain_state[lo_oi].paused_on_seam = -1;
-                        chain_state[lo_oj].tip = { seam_task, chain_state[lo_oj].tip.leftmost, chain_state[lo_oj].tip.rightmost };
-                        chain_state[lo_oj].tip_is_raw = false;
-                        chain_state[lo_oj].paused_on_seam = -1;
-                        // No manual recursion into the other side: fixup_seam_parent is order-
-                        // independent, so whichever side builds its own continuation next -- via this
-                        // same loop's next iteration (if lo == lo_oi/lo_oj) or via the outer driver
-                        // loop's later call for the other lo -- routes correctly regardless of order or
-                        // timing. Loop back: this side's tip just changed, may hit another seam sharing
-                        // the same cur_closed_unit, or fall through to the ordinary step.
-                        continue;
-                    } else {
-                        // Remote seam (CRT) -- only my own side exists locally, never waits, never
-                        // blocks. Builds eagerly, exactly like local-seam resolution: doesn't consume a
-                        // unit or advance cs.next_unit, so any number of CRTs (or a mix with local seams)
-                        // can stack at the same closed unit via repeated while-loop iterations. Deciding
-                        // whether to wrap now or terminate happens once, uniformly, below the while-loop
-                        // -- not here.
-                        const bool oi_local_b = seam_ownership[s].oi_local;
-                        const bool tip_is_crt = cs.tip.node->is_cross_rank_fusion;
-                        // CrossRankTask::child is strictly Task* -- when stacking (tip already a CRT),
-                        // reuse its own stable .child (the original local Task*, unaffected by stacking
-                        // depth), never the current tip itself. CrossRankTask's own "walk to top of
-                        // parent chain" ctor logic (unmodified) finds the previously-attached CRT and
-                        // attaches above it automatically.
-                        Task* local_child = tip_is_crt
-                            ? static_cast<CrossRankTask*>(cs.tip.node)->child
-                            : static_cast<Task*>(cs.tip.node);
-                        const bool iamleft = oi_local_b;
-                        const int remote_obs = oi_local_b ? si.oj : si.oi;
-                        const int other_pid = other_pid_for(remote_obs);
-                        const int global_vb = K_vb * (int)graph.num_obs_patches + s;
-                        uint64_t* sp = get_task_status_ptr_for_seam(shot_id, s);
-                        FusionSummary* fp = get_fusion_summary_ptr_for_seam(shot_id, s);
-                        pm::Mwpm* crt_solver = solver_for(shot_id, (oi_local_b ? si.oi : si.oj) * K_p + si.vb_left + 1);
-
-                        // Detach-before-walk: only meaningful the first time (tip still a plain Task,
-                        // which might be a tracked dual-parent local seam whose oj side already claimed
-                        // parent) -- a CrossRankTask is never itself dual-parent-tracked, so stacking a
-                        // 2nd/3rd/... CRT here needs no such protection.
-                        bool tracked = false, is_oj_side = false;
-                        TaskBase* saved_parent = nullptr;
-                        if (!tip_is_crt) {
-                            auto sit = seam_sides.find(local_child);
-                            tracked = (sit != seam_sides.end());
-                            is_oj_side = tracked && (o == sit->second.second);
-                            saved_parent = tracked ? local_child->parent : nullptr;
-                            if (is_oj_side && local_child->parent != nullptr) local_child->parent = nullptr;
-                        }
-
-                        crt.emplace_back(global_vb, local_child, iamleft, si.vb_left, si.vb_right,
-                                          other_pid, sp, sp+1, sp+2, fp, crt_solver);
-                        crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
-                        crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
-                        CrossRankTask* crt_task = &crt.back();
-                        if (tracked && is_oj_side) {
-                            local_child->right_obs_parent = crt_task;
-                            local_child->parent = saved_parent;
-                        }
-                        // is_oi_side (or tip_is_crt, or untracked): ctor's own walk already lands
-                        // correctly, no-op.
-
-                        resolved_seams.insert(s);
-                        cs.tip = { crt_task, cs.tip.leftmost, cs.tip.rightmost };  // rightmost unchanged
-                        cs.tip_is_raw = false;
-                        continue;
-                    }
+                    attach_i->add_special_task(&seam);
+                    attach_j->add_special_task(&seam);
                 }
-
-                if (cs.next_unit >= (int)cs.unit_roots.size()) {
-                    cs.done = true;
-                    // obs_roots is write-only after construction (root-counting walks sc.tasks/
-                    // sc.cross_rank_tasks directly) -- null when ending on a still-open CRT stack rather
-                    // than risk a misleading Task* alias.
-                    obs_roots[lo] = cs.tip.node->is_cross_rank_fusion ? nullptr : static_cast<Task*>(cs.tip.node);
-                    return true;
+#ifdef USE_SHMEM
+                else if (oi_local || oj_local) {
+                    const int local_lo = oi_local ? (si.oi - my_obs_start) : (si.oj - my_obs_start);
+                    Task* attach = chain_link_at_unit[local_lo][si.unit_hi];
+                    const bool iamleft = oi_local;
+                    const int remote_obs = oi_local ? si.oj : si.oi;
+                    const int other_pid = other_pid_for(remote_obs);
+                    const int global_vb = K_vb * (int)graph.num_obs_patches + s;
+                    uint64_t* sp = get_task_status_ptr_for_seam(shot_id, s);
+                    FusionSummary* fp = get_fusion_summary_ptr_for_seam(shot_id, s);
+                    pm::Mwpm* crt_solver = solver_for(shot_id, (oi_local ? si.oi : si.oj) * K_p + si.vb_left + 1);
+                    crt.emplace_back(global_vb, iamleft, attach->vb_left, attach->vb_right,
+                                      other_pid, sp, sp+1, sp+2, fp, crt_solver);
+                    crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
+                    crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
+                    attach->add_special_task(&crt.back());
                 }
-
-                // Ordinary/wrap chain-link step -- unified across a plain-Task tip (possibly deferred)
-                // and a pending-CRT-stack tip (the deferred wrap, covering however many CRTs stacked
-                // above: never deferred, always vb_left-restricted, no "first fusion" exception) via the
-                // single TaskBase*-accepting Task constructor; cs.tip.node's own type selects which
-                // semantics apply.
-                const int next_unit = cs.next_unit;
-                const RangeInfo& next_ru = cs.unit_roots[next_unit];
-                const int vb_id = (int)cs.tip.rightmost;
-                pm::Mwpm* step_solver = cs.solver_base[vb_id].get();
-                TaskBase* prior_tip_node = cs.tip.node;
-                TaskBase* saved_parent = prior_tip_node->parent;
-                tasks.emplace_back(vb_id + cs.obs_vb_offset, prior_tip_node, next_ru.task, step_solver);
-                Task* fusion = &tasks.back();
-                if (prior_tip_node->is_cross_rank_fusion) {
-                    fusion->vb_left = prior_tip_node->part;
-                } else {
-                    Task* prior_tip_task = static_cast<Task*>(prior_tip_node);
-                    bool is_deferred = false;
-                    for (int s = 0; s < num_seams; ++s) {
-                        const auto& si = seam_infos[s];
-                        if ((si.oi == o || si.oj == o) && si.unit_lo < next_unit && next_unit <= si.unit_hi) {
-                            is_deferred = true;
-                            break;
-                        }
-                    }
-                    fixup_seam_parent(prior_tip_task, o, saved_parent, fusion);
-                    fusion->defer_division = is_deferred;
-                    if (!is_deferred && !cs.tip_is_raw) fusion->vb_left = prior_tip_task->part;
-                }
-                fusion->vb_marker = vb_id;
-                fusion->is_extraction_unit_connector = true;
-                cs.tip = { fusion, cs.tip.leftmost, next_ru.rightmost };
-                cs.tip_is_raw = false;
-                cs.next_unit += 1;
-                return true;
-            };
-
-            int remaining = 0;
-            for (int lo = 0; lo < my_obs_count; ++lo) if (!chain_state[lo].done) ++remaining;
-            while (remaining > 0) {
-                for (int lo = 0; lo < my_obs_count; ++lo) {
-                    if (!chain_state[lo].done && chain_state[lo].paused_on_seam < 0) advance_one_step(lo);
-                }
-                remaining = 0;
-                for (int lo = 0; lo < my_obs_count; ++lo) if (!chain_state[lo].done) ++remaining;
+#endif
             }
+            shot_buffer->buffer[shot_id].num_task_roots = my_obs_count;
         }
 
-        // Count chain tops (parent==nullptr) as independent roots for this PE.
-        // CRT constructor chain-walk already linked CRTs above local roots.
+        // Every locally-owned observable's own tree/chain has exactly one top under the special-tasks-
+        // attach model (seams/CRTs attach beside the tree, never replacing a root), so num_task_roots is
+        // set directly (my_obs_count, both branches above) -- no scan needed.
         {
             auto& sc = shot_buffer->buffer[shot_id];
             sc.thread_results.assign(num_threads, pm::MatchingResult{});
             sc.num_roots_done.store(0, std::memory_order_relaxed);
-            int roots = 0;
-            for (const auto& task : sc.tasks)
-                if (task.parent == nullptr) ++roots;
-            for (const auto& crt_t : sc.cross_rank_tasks)
-                if (crt_t.parent == nullptr) ++roots;
-            sc.num_task_roots = roots;
-            if (DEBUG) std::cout << "PE" << pid << " num_task_roots=" << roots << "\n" << std::flush;
+            if (DEBUG) std::cout << "PE" << pid << " num_task_roots=" << sc.num_task_roots << "\n" << std::flush;
         }
     }
 
@@ -1067,13 +922,20 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                        + "    is_extraction_unit_root: " + std::to_string(t.is_extraction_unit_root)
                        + "  is_extraction_unit_connector: " + std::to_string(t.is_extraction_unit_connector)
                        + "  defer_division: " + std::to_string(t.defer_division) + "\n"
-                       + "    left_child: " + std::format("{:p}",static_cast<void*>(t.left_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_cross_rank_fusion ? "crt" : (t.left_child->is_fusion ? "f" : "p")) + std::to_string(t.left_child->part) + ")" : "")
+                       + "    left_child: " + std::format("{:p}",static_cast<void*>(t.left_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.left_child->part) + ")" : "")
                        + "  me: " + std::format("{:p}", static_cast<void*>(&t))
-                       + "  right_child: " + std::format("{:p}", static_cast<void*>(t.right_child)) + ((t.right_child) ? "(" + (std::string)(t.right_child->is_cross_rank_fusion ? "crt" : (t.right_child->is_fusion ? "f" : "p")) + std::to_string(t.right_child->part) + ")" : "") + "\n"
-                       + "    right_obs_parent: " + std::format("{:p}", static_cast<void*>(t.right_obs_parent)) + ((t.right_obs_parent) ? "(" + (std::string)(t.right_obs_parent->is_cross_rank_fusion ? "crt" : "f") + std::to_string(t.right_obs_parent->part) + ")" : "") + "\n"
+                       + "  right_child: " + std::format("{:p}", static_cast<void*>(t.right_child)) + ((t.right_child) ? "(" + (std::string)(t.right_child->is_fusion ? "f" : "p") + std::to_string(t.right_child->part) + ")" : "") + "\n"
                        + "    parent: f" + std::format("{:p}", static_cast<void*>(t.parent))
-                    //    + "  only_child: " + std::to_string(t.only_child)
                        + "\n";
+                tasks += "    special_tasks (" + std::to_string(t.special_tasks.size()) + "):";
+                for (SpecialTask* st : t.special_tasks) {
+                    tasks += "  " + std::format("{:p}", static_cast<void*>(st))
+                           + "(" + (std::string)(st->is_local_seam_fusion() ? "seam" : "crt")
+                           + " vb=" + std::to_string(st->part)
+                           + " vb_left=" + std::to_string(st->vb_left)
+                           + " vb_right=" + std::to_string(st->vb_right) + ")";
+                }
+                tasks += "\n";
             }
         }
         std::cout << tasks << std::flush;

@@ -250,20 +250,9 @@ struct Task : public TaskBase {
     // Attaches a LocalSeamTask/CrossRankTask to this task: records it on this task's own
     // special_tasks (so decode logic finds it when this task is solved) and, symmetrically, records
     // this task on the special task's own child-holding field (LocalSeamTask::children gets this
-    // appended; CrossRankTask::child gets set to this). Defined below, after LocalSeamTask/
-    // CrossRankTask are complete types.
-
-    inline void Task::add_special_task(SpecialTask* st) {
-        special_tasks.push_back(st);
-        if (st->is_local_seam_fusion()) {
-            static_cast<LocalSeamTask*>(st)->children.push_back(this);
-        }
-#ifdef USE_SHMEM
-        else if (st->is_cross_rank_fusion()) {
-            static_cast<CrossRankTask*>(st)->child = this;
-        }
-#endif
-    }
+    // appended; CrossRankTask::child gets set to this). Defined out-of-line, below, once
+    // LocalSeamTask/CrossRankTask are complete types it needs to reach into.
+    void add_special_task(SpecialTask* st);
 
     /* Sychronization Methods */
     void mark_solved(size_t my_pid = 0) override {
@@ -552,5 +541,17 @@ public:
 
 };
 #endif
+
+inline void Task::add_special_task(SpecialTask* st) {
+    special_tasks.push_back(st);
+    if (st->is_local_seam_fusion()) {
+        static_cast<LocalSeamTask*>(st)->children.push_back(this);
+    }
+#ifdef USE_SHMEM
+    else if (st->is_cross_rank_fusion()) {
+        static_cast<CrossRankTask*>(st)->child = this;
+    }
+#endif
+}
 
 #endif  // PYMATCHING2_DECODING_TASK_H
