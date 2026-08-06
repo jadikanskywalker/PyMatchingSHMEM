@@ -823,10 +823,32 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                 for (int u = unit_lo + 1; u <= unit_hi - 1 && u < (int)links.size(); ++u)
                     links[u]->defer_division = true;
             };
+            // A CRT's own window (unlike a local seam's) gets *sent to, and destroyed on the sender's
+            // own side after sending by, the remote PE* -- so unlike a local seam, it also needs a
+            // buffer partition between its own window and its attachment connector's own right edge
+            // (that connector's own vb_right, never narrowed, always equals its own unit's natural
+            // right edge). Without one, the connector's own right-edge partition (needed intact by the
+            // *next* connector, which hasn't resolved yet) is exactly what the CRT would send/destroy.
+            // The left edge needs no equivalent check: whatever a connector's own vb_left anchors to
+            // was already safely divided by an earlier, already-resolved connector (see step 2b) --
+            // only the right edge is still "live," shared with what comes after.
+            std::vector<int> crt_attach_unit(num_seams, -1);
             for (int s = 0; s < num_seams; ++s) {
                 const auto& si = seam_infos[s];
                 if (seam_ownership[s].oi_local) mark_deferred(si.oi - my_obs_start, si.unit_lo, si.unit_hi);
                 if (seam_ownership[s].oj_local) mark_deferred(si.oj - my_obs_start, si.unit_lo, si.unit_hi);
+#ifdef USE_SHMEM
+                if (seam_ownership[s].oi_local != seam_ownership[s].oj_local) {  // exactly one side local
+                    const int local_lo = seam_ownership[s].oi_local ? (si.oi - my_obs_start) : (si.oj - my_obs_start);
+                    auto& links = chain_link_at_unit[local_lo];
+                    int u = si.unit_hi;
+                    while (u + 1 < (int)links.size() && links[u]->vb_right <= si.vb_right) {
+                        links[u]->defer_division = true;
+                        ++u;
+                    }
+                    crt_attach_unit[s] = u;
+                }
+#endif
             }
 
             // ---- Step 2b: vb_left narrowing via a running "last-divided anchor" per observable ----
@@ -879,7 +901,9 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
 #ifdef USE_SHMEM
                 else if (oi_local || oj_local) {
                     const int local_lo = oi_local ? (si.oi - my_obs_start) : (si.oj - my_obs_start);
-                    Task* attach = chain_link_at_unit[local_lo][si.unit_hi];
+                    // Not necessarily si.unit_hi -- may have been pushed forward in step 2a to keep a
+                    // buffer partition between the CRT's own window and its attachment's right edge.
+                    Task* attach = chain_link_at_unit[local_lo][crt_attach_unit[s]];
                     const bool iamleft = oi_local;
                     const int remote_obs = oi_local ? si.oj : si.oi;
                     const int other_pid = other_pid_for(remote_obs);
@@ -887,7 +911,16 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                     uint64_t* sp = get_task_status_ptr_for_seam(shot_id, s);
                     FusionSummary* fp = get_fusion_summary_ptr_for_seam(shot_id, s);
                     pm::Mwpm* crt_solver = solver_for(shot_id, (oi_local ? si.oi : si.oj) * K_p + si.vb_left + 1);
-                    crt.emplace_back(global_vb, iamleft, attach->vb_left, attach->vb_right,
+                    // Unlike a local seam (which inherits its attachment connector's own vb_left/
+                    // vb_right -- the maximum range of already-accumulated, undivided graph it's safe
+                    // to use), a CRT must stay narrowly windowed to si.vb_left/si.vb_right: this is
+                    // what actually gets sent to (and, on the sender's own side, destroyed after
+                    // sending by) the remote PE. Inheriting the connector's own broader span would
+                    // send/destroy far more than the seam's own boundary window -- fatally so when two
+                    // CRTs share the same attachment connector (a coarser --extraction_unit_size than
+                    // the seam spacing): the first one to send would destroy the *other* CRT's own
+                    // still-needed region too, leaving it nothing to send.
+                    crt.emplace_back(global_vb, iamleft, si.vb_left, si.vb_right,
                                       other_pid, sp, sp+1, sp+2, fp, crt_solver);
                     crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
                     crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
@@ -1213,11 +1246,10 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                                                << std::flush;
 
                     // Also check match partner if present.
-                    if (valid && blossom_root->match.region) {
+                    if (valid && blossom_root->match.region) { // check matched region
                         if (ptr_in_range(blossom_root->match.region, region_range)) {
                             size_t match_idx = (size_t)(blossom_root->match.region - region_range.first);
                             bitmap_base[match_idx / 64] &= ~(1ULL << (match_idx % 64));
-                            if (DEBUG) t_out << "      checking matched region: " << blossom_root->match.region << std::endl << std::flush;
 
                             valid = check_pointers_for_self_and_all_descendents(
                                 blossom_root->match.region,
@@ -1225,9 +1257,12 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, pm::
                                 p_node_range,
                                 vb_node_range,
                                 &discovered_child_edges);
-                        } else
+                        } else {
                             valid = false;
-                        if (DEBUG && !valid) t_out << "      blossom_root's match (" << blossom_root->match.region << ") not valid" << std::endl << std::flush; 
+                        }
+                        if (DEBUG && !valid) t_out << "      blossom_root.match.region (" << blossom_root->match.region << ") not valid" << std::endl << std::flush; 
+                    } else if (valid && blossom_root->match.edge.loc_to != nullptr) { // region matched to vb
+                        valid = false;
                     }
                 }
                 if (!valid) {
@@ -1804,6 +1839,30 @@ void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, int
     }
 }
 
+// Walks start's own left_child chain backward, collecting every deferred connector (is_extraction_
+// unit_connector && defer_division) until hitting the first non-deferred boundary -- the connector
+// whose own vb was already divided normally, marking the true edge of "already settled" territory (or
+// a raw leaf/unit root if the deferred span reaches all the way back to the observable's own start).
+// Collected in right-to-left (nearest-to-start-first) order, then divided+posted in reverse (left-to-
+// right) order, since each one's own vb divide only needs its own immediate left/right sides to be
+// independently addressable, not any relative ordering between different deferred links.
+void pm::DecodingUnit::back_divide_walk(
+    Task* start, ShotContainer& shot, int shot_container_id, int tid, std::ofstream* t_out) {
+    std::vector<Task*> deferred;
+    Task* cur = start->left_child;
+    while (cur != nullptr && cur->is_extraction_unit_connector && cur->defer_division) {
+        deferred.push_back(cur);
+        cur = cur->left_child;
+    }
+    for (auto it = deferred.rbegin(); it != deferred.rend(); ++it) {
+        Task* link = *it;
+        divide_vb(shot, shot_container_id, link->part, link->solver, tid, link, t_out);
+        Task* left = link->left_child;
+        Task* closed_unit = left->is_extraction_unit_connector ? left->right_child : left;
+        shot.post_extraction_job(ExtractionJob{shot_container_id, closed_unit}, t_out);
+    }
+}
+
 void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, const ExtractionJob& job, int tid, std::ofstream* t_out) {
     Task* root = job.subtree_root;
     if (DEBUG && t_out) {
@@ -1985,6 +2044,13 @@ void pm::DecodingUnit::decode_shots() {
                 if (DEBUG) t_out << "solver: " << t->solver << "\n";
                 bool stolen = t->try_to_steal(shot_buffer_round);
                 roots_i_solved.clear();
+                // Declared per-shot (not per-root): a CRT can now be resolved mid-climb, by a thread
+                // that never itself reaches a root this shot (a sibling subtree's own solver might win
+                // the race up to the shared parent first) -- see the report_done restructuring below.
+#ifdef USE_SHMEM
+                std::vector<CrossRankTask*> crts_i_handled;
+                pm::MatchingResult& my_result = shot.thread_results[tid];
+#endif
 #ifdef SCOREP_USER_ENABLE
                 SCOREP_USER_REGION_BEGIN(local_decoding, "Local Decoding", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
@@ -2000,18 +2066,13 @@ void pm::DecodingUnit::decode_shots() {
                     if (DEBUG) t_out << "  solver bounds: " << solver.flooder.vb_left << "(vb_left) " << solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
 #ifdef ENABLE_DRAW_FLAGS
                     if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
+                        // t is never itself a seam/CRT now (those attach via special_tasks instead) --
+                        // always the plain "leaf partition" case.
                         size_t K_p = graph.num_partitions / graph.num_obs_patches;
                         size_t K_vb = K_p - 1;
-                        if (t->is_fusion && t->left_obs_patch_id >= 0 && t->right_obs_patch_id >= 0) {
-                            // Local seam task
-                            solver.flooder.p_offsets  = { (size_t)t->left_obs_patch_id * K_p,  (size_t)t->right_obs_patch_id * K_p  };
-                            solver.flooder.vb_offsets = { (size_t)t->left_obs_patch_id * K_vb, (size_t)t->right_obs_patch_id * K_vb };
-                        } else {
-                            // Leaf partition
-                            size_t patch = (t->is_fusion) ? t->part / K_vb : t->part / K_p;
-                            solver.flooder.p_offsets  = { K_p  * patch };
-                            solver.flooder.vb_offsets = { K_vb * patch };
-                        }
+                        size_t patch = (t->is_fusion) ? t->part / K_vb : t->part / K_p;
+                        solver.flooder.p_offsets  = { K_p  * patch };
+                        solver.flooder.vb_offsets = { K_vb * patch };
                     }
 #endif // ENABLE_DRAW_FLAGS
 #endif // USE_SHMEM
@@ -2024,81 +2085,50 @@ void pm::DecodingUnit::decode_shots() {
                         true,
                         tid);
                     if (DEBUG) t_out << "  solved " << (t->is_fusion ? "f" : "p") << t->part << std::endl << std::flush;
-                    // Unit-checkpointed extraction: when a chain checkpoint resolves, divide its
-                    // own vb immediately (inline, not queued -- this is what makes it safe to
-                    // extract either side independently afterward) and post exactly one job, for
-                    // the unit that's now closed on BOTH sides. The *other* child (the new unit
-                    // just joined in) stays completely untouched -- it's still needed, intact, by
-                    // the *next* fusion's own solve, and must not be extracted yet. This also
-                    // covers the true root/last chain-link (itself tagged too) -- its own "closing"
-                    // unit gets divided+posted here; its still-reserved right child gets posted
-                    // separately once it's recognized as the root below (nothing more will ever
-                    // fuse with it).
-                    if (config_parallel::extract_preemptively && t->is_extraction_unit_connector) {
-                        divide_vb(shot, (int)shot_container_id, t->part, t->solver, tid, /*prune_target=*/t, &t_out);
-                        // ROUND's own preemptive chain never attaches a CRT as a child (CRTs sit above a
-                        // chain top via CrossRankTask's own parent-chain walk instead) -- always
-                        // genuinely Task* here.
-                        Task* left = static_cast<Task*>(t->left_child);
-                        Task* closed_unit = left->is_extraction_unit_connector
-                            ? static_cast<Task*>(left->right_child)  // Fk, k>1: U(k-1), just closed on its right
-                            : left;                                   // F1: U0, left_child IS the unit itself
-                        shot.post_extraction_job(ExtractionJob{(int)shot_container_id, closed_unit}, &t_out);
-                    }
                     t->mark_solved();
-                    if (t->parent != nullptr
-#ifdef USE_SHMEM
-                        && !t->parent->is_cross_rank_fusion
+                    // Process any attached special tasks (seams/CRTs) in order, then t's own deferred
+                    // span (if any), then t's own divide+post (if it isn't itself deferred) -- see
+                    // now-its-time-to-jazzy-turing.md Phase three §§2-4.
+                    for (SpecialTask* st : t->special_tasks) {
+                        if (st->is_local_seam_fusion()) {
+                            auto* seam = static_cast<LocalSeamTask*>(st);
+                            if (seam->try_to_steal(0)) {
+                                seam->setup();
+                                pm::Mwpm& seam_solver = *seam->solver;
+                                seam_solver.prepare_for_task(seam, shot_id);
+#ifdef ENABLE_DRAW_FLAGS
+                                if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
+                                    size_t K_p = graph.num_partitions / graph.num_obs_patches;
+                                    size_t K_vb = K_p - 1;
+                                    seam_solver.flooder.p_offsets.clear();
+                                    seam_solver.flooder.vb_offsets.clear();
+                                    for (int op : seam->obs_patch_ids) {
+                                        seam_solver.flooder.p_offsets.push_back((size_t)op * K_p);
+                                        seam_solver.flooder.vb_offsets.push_back((size_t)op * K_vb);
+                                    }
+                                }
 #endif
-                    ) {
-                        Task* local_parent = static_cast<Task*>(t->parent);
-                        Task* sibling = static_cast<Task*>((static_cast<Task*>(local_parent->left_child) == t) ? local_parent->right_child : local_parent->left_child);
-                        if (DEBUG) t_out << "    t->parent->part=" << local_parent->part << "  t->parent->solver=" << local_parent->solver << "\n" << std::flush;
-                        stolen = local_parent->try_to_steal(0);
-                        t = local_parent;
-                        // Try to steal sibling or descendent of sibling
-                        if (!stolen && !sibling->is_fusion) {
-                            stolen = sibling->try_to_steal(shot_buffer_round);
-                            t = sibling;
+                                pm::process_timeline_until_completion(
+                                    seam_solver, shot.virtual_boundary_hits[seam->part],
+#ifdef ENABLE_DRAW_FLAGS
+                                    draw_frames,
+#endif
+                                    true, tid);
+                                seam->mark_solved();
+                                divide_vb(shot, (int)shot_container_id, seam->part, seam->solver, tid, seam, &t_out);
+                                // Round-tagged, not a plain bool -- see decoding_task.h LocalSeamTask::
+                                // ready's own comment for why a stale value would otherwise be possible.
+                                seam->ready.store(shot_buffer_round, std::memory_order_release);
+                            } else {
+                                while (seam->ready.load(std::memory_order_acquire) != shot_buffer_round) {}
+                            }
                         }
-                    } else {
-                        // t is a local tree root: parent==nullptr or parent is a CrossRankTask
-                        stolen = false;
-                        roots_i_solved.push_back({t});
-                    }
-                    while (!stolen && next_p_id < my_partition_task_ids.size()) {
-                        t = &shot.tasks[my_partition_task_ids[next_p_id]];
-                        stolen = t->try_to_steal(shot_buffer_round);
-                        next_p_id += next_p_inc;
-                    }
-                    if (DEBUG && t != nullptr) {
-                        t_out << (t->is_fusion ? "  f" : "  p") << t->part << " stolen = " << stolen
-                                << std::endl << std::flush;
-                    }
-                }
-#ifdef SCOREP_USER_ENABLE
-                SCOREP_USER_REGION_END(local_decoding);
-#endif
-                if (!roots_i_solved.empty()) {
 #ifdef USE_SHMEM
-                    // Collect all CRTs handled across roots this thread solved this shot
-                    std::vector<CrossRankTask*> crts_i_handled;
-                    pm::MatchingResult& my_result = shot.thread_results[tid];
-#endif
-
-                    for (auto& [root_task] : roots_i_solved) {
-#ifdef USE_SHMEM
-                        // Walk the CRT chain above this local root
-                        TaskBase* chain_node = root_task->parent;
-                        while (chain_node != nullptr) {
-#ifdef SCOREP_USER_ENABLE
-                            SCOREP_USER_REGION_BEGIN(cross_rank_fusion, "Cross Rank Decoding", SCOREP_USER_REGION_TYPE_COMMON);
-#endif
-                            auto* crt = static_cast<CrossRankTask*>(chain_node);
+                        else if (st->is_cross_rank_fusion()) {
+                            auto* crt = static_cast<CrossRankTask*>(st);
                             if (DEBUG) t_out << "Trying cross-rank fusion vb=" << crt->part
                                              << " iamleft=" << crt->iamleft
                                              << " other_pid=" << crt->other_pid << "\n" << std::flush;
-
                             if (BARE_DEBUG) t_out << "    waiting until PE done" << std::endl << std::flush;
                             crt->wait_until_done(pid, shot_buffer_round-1);
                             if (crt->try_to_steal(pid)) {
@@ -2111,7 +2141,6 @@ void pm::DecodingUnit::decode_shots() {
                                     crt_solver.flooder.p_offsets  = { crt->left_global_offset.first,  crt->right_global_offset.first  };
                                     crt_solver.flooder.vb_offsets = { crt->left_global_offset.second, crt->right_global_offset.second };
                                 }
-                                // if (draw_frames) draw_frame(crt_solver, pm::MwpmEvent::no_event(), 1000, true, tid);
 #endif
                                 auto& crt_hitsref = shot.virtual_boundary_hits[crt->part];
                                 get_solution_from_remote_pe(shot_container_id, my_result, *crt, t_out, crt_hitsref);
@@ -2159,12 +2188,63 @@ void pm::DecodingUnit::decode_shots() {
                                 send_solution_to_remote_pe(shot_container_id, my_result, *crt, t_out);
                             }
                             crts_i_handled.push_back(crt);
-                            chain_node = crt->parent;
-#ifdef SCOREP_USER_ENABLE
-                            SCOREP_USER_REGION_END(cross_rank_fusion);
-#endif
                         }
 #endif  // USE_SHMEM
+                    }
+                    if (!t->special_tasks.empty()) {
+                        back_divide_walk(t, shot, (int)shot_container_id, tid, &t_out);
+                    }
+                    // Unit-checkpointed extraction: when a chain checkpoint resolves (and isn't itself
+                    // waiting on a deferred span -- see defer_division/back_divide_walk above), divide
+                    // its own vb immediately (inline, not queued -- this is what makes it safe to
+                    // extract either side independently afterward) and post exactly one job, for
+                    // the unit that's now closed on BOTH sides. The *other* child (the new unit
+                    // just joined in) stays completely untouched -- it's still needed, intact, by
+                    // the *next* fusion's own solve, and must not be extracted yet. This also
+                    // covers the true root/last chain-link (itself tagged too) -- its own "closing"
+                    // unit gets divided+posted here; its still-reserved right child gets posted
+                    // separately once it's recognized as the root below (nothing more will ever
+                    // fuse with it).
+                    if (config_parallel::extract_preemptively && t->is_extraction_unit_connector && !t->defer_division) {
+                        divide_vb(shot, (int)shot_container_id, t->part, t->solver, tid, /*prune_target=*/t, &t_out);
+                        Task* left = t->left_child;
+                        Task* closed_unit = left->is_extraction_unit_connector
+                            ? left->right_child   // Fk, k>1: U(k-1), just closed on its right
+                            : left;                // F1: U0, left_child IS the unit itself
+                        shot.post_extraction_job(ExtractionJob{(int)shot_container_id, closed_unit}, &t_out);
+                    }
+                    if (t->parent != nullptr) {
+                        Task* local_parent = t->parent;
+                        Task* sibling = (local_parent->left_child == t) ? local_parent->right_child : local_parent->left_child;
+                        if (DEBUG) t_out << "    t->parent->part=" << local_parent->part << "  t->parent->solver=" << local_parent->solver << "\n" << std::flush;
+                        stolen = local_parent->try_to_steal(0);
+                        t = local_parent;
+                        // Try to steal sibling or descendent of sibling
+                        if (!stolen && !sibling->is_fusion) {
+                            stolen = sibling->try_to_steal(shot_buffer_round);
+                            t = sibling;
+                        }
+                    } else {
+                        // t is a local tree root -- parent is always nullptr here now (a CrossRankTask
+                        // never sits at anyone's parent under the special-tasks-attach model).
+                        stolen = false;
+                        roots_i_solved.push_back({t});
+                    }
+                    while (!stolen && next_p_id < my_partition_task_ids.size()) {
+                        t = &shot.tasks[my_partition_task_ids[next_p_id]];
+                        stolen = t->try_to_steal(shot_buffer_round);
+                        next_p_id += next_p_inc;
+                    }
+                    if (DEBUG && t != nullptr) {
+                        t_out << (t->is_fusion ? "  f" : "  p") << t->part << " stolen = " << stolen
+                                << std::endl << std::flush;
+                    }
+                }
+#ifdef SCOREP_USER_ENABLE
+                SCOREP_USER_REGION_END(local_decoding);
+#endif
+                if (!roots_i_solved.empty()) {
+                    for (auto& [root_task] : roots_i_solved) {
 #ifdef SCOREP_USER_ENABLE
                         SCOREP_USER_REGION_BEGIN(solution_extraction, "Solution Extraction", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
@@ -2175,15 +2255,15 @@ void pm::DecodingUnit::decode_shots() {
                         // post already happened above at mark_solved time -- only its still-reserved
                         // right child (the final unit, which nothing more will ever fuse with) needs
                         // posting now. Otherwise (degenerate single-unit case, no connectors were ever
-                        // built), nothing has been divided/posted yet -- post root_task itself.
+                        // built), nothing has been divided/posted yet -- post root_task itself. Neither
+                        // branch needs to know about special_tasks -- any seam/CRT attached to root_task
+                        // already ran (and divided its own, separate vb id) during the climb above.
                         if (BARE_DEBUG) t_out << "T" << tid << " extracting solution for root part=" << root_task->part << std::endl << std::flush;
                         if (!config_parallel::extract_preemptively) {
                             post_hoc_chunk_and_post(root_task, shot, (int)shot_container_id, tid, &t_out);
                         } else if (root_task->is_extraction_unit_connector) {
-                            // ROUND's own preemptive chain never attaches a CRT as a child -- see the
-                            // similar cast earlier in this function.
                             shot.post_extraction_job(
-                                ExtractionJob{(int)shot_container_id, static_cast<Task*>(root_task->right_child)}, &t_out);
+                                ExtractionJob{(int)shot_container_id, root_task->right_child}, &t_out);
                         } else {
                             shot.post_extraction_job(ExtractionJob{(int)shot_container_id, root_task}, &t_out);
                         }
@@ -2192,15 +2272,6 @@ void pm::DecodingUnit::decode_shots() {
 #endif
                     } // end per-root loop
 
-#ifdef USE_SHMEM
-                    // Report done before waiting: all-report-then-all-wait avoids deadlock
-                    // for same-PE-pair CRTs (e.g., ROUND left+right CRTs).
-                    if (BARE_DEBUG) t_out << "    reporting done" << std::endl << std::flush;
-                    for (auto* crt : crts_i_handled) crt->report_done(shot_buffer_round);
-                    // if (BARE_DEBUG) t_out << "    waiting until other PEs done" << std::endl << std::flush;
-                    // for (auto* crt : crts_i_handled) crt->wait_until_done(pid, shot_buffer_round);
-                    // if (BARE_DEBUG) t_out << "    all done" << std::endl << std::flush;
-#endif
                     // Last thread (cumulative count == num_task_roots) combines and writes.
                     int n_my = (int)roots_i_solved.size();
                     int prev = shot.num_roots_done.fetch_add(n_my, std::memory_order_acq_rel);
@@ -2260,6 +2331,21 @@ void pm::DecodingUnit::decode_shots() {
                 // shot after the drain starts.
                 while (ExtractionJob* job = shot.try_claim_extraction_job()) {
                     process_extraction_job(shot, *job, tid, &t_out);
+                }
+#endif
+                // report_done tells the other PE "my local window buffer is free for your next shot's
+                // send_solution_to_remote_pe to reuse" -- must not fire until every job this shot
+                // posted (back_divide_walk, t's own divide+post) has actually been *processed*, not
+                // just posted, or the other PE could race ahead into next shot's send while this
+                // shot's own extraction is still reading/writing the same regions. Every thread with a
+                // non-empty crts_i_handled needs its own explicit wait here -- it can't rely on being
+                // the "last root" thread (only one thread ever is) or on the queue-drain loop above
+                // (SHMEM's idle-helper exits on root-completion, not job-completion).
+#ifdef USE_SHMEM
+                if (!crts_i_handled.empty()) {
+                    while (shot.pending_extraction_jobs.load(std::memory_order_acquire) != 0) {}
+                    if (BARE_DEBUG) t_out << "    reporting done" << std::endl << std::flush;
+                    for (auto* crt : crts_i_handled) crt->report_done(shot_buffer_round);
                 }
 #endif
                 if (i_solved_last_root) {

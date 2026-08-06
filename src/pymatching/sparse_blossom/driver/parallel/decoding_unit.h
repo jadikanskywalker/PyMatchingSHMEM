@@ -231,47 +231,20 @@ struct DecodingUnit {
     // Assumes crt->part's own vb has already been divided (see divide_vb) by the caller.
     void extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, CrossRankTask& crt, int tid, std::ofstream* t_out = nullptr);
 
-    // Corrected 3-way "what did this connector actually close" formula, replacing the plain 2-way
-    // left->is_extraction_unit_connector ? right_child : left used by ROUND (still used as-is there --
-    // see decode_shots). A seam or CRT-wrap is also is_extraction_unit_connector, but unlike an
-    // ordinary connector its own right_child is NOT "the unit freshly joined last step": a seam's
-    // right_child is a different observable's own chain tip, a CRT-wrap's right_child is a fresh,
-    // still-open unit. Both are already fully divided+posted (recursively) at their own resolution
-    // time -- returns nullptr to mean "nothing more to post" rather than "post left itself".
-    Task* identify_closed_unit_or_null(TaskBase* left);
-
-    // Walk backward through start's own left_child chain, dividing+posting every deferred
-    // (is_extraction_unit_connector && defer_division) link found, stopping at the first non-deferred
-    // boundary (already handled at its own resolution time -- nothing to do there).
-    void back_divide_walk(Task* start, ShotContainer& shot, int shot_container_id, int tid, std::ofstream* t_out = nullptr);
-
-    // Posts tip's own still-open final piece (tip->right_child if tip is a connector, tip itself
-    // otherwise) -- the second half of what finalize_side used to do in one call, now separated out
-    // because it's only safe once the seam that consumed `tip` has divided its own vb. Called for both
-    // the winner (right after its own divide_vb) and the loser (right after its seam_ready acquire-load
-    // sees the winner's release-store) of a seam's try_to_steal race, each using its own tip.
-    void post_tip_final_piece(Task* tip, ShotContainer& shot, int shot_container_id, std::ofstream* t_out = nullptr);
-
-    // Called inline, the moment a CRT is seen (never deferred) -- resolving a CRT as soon as possible,
-    // not batching it at the end, is the whole point of preemptive extraction. Triggered from wherever a
-    // CrossRankTask* is first discovered: an ordinary task's own .parent, or (independently) a seam's
-    // .parent or .right_obs_parent slot. Performs the existing per-CRT win/lose resolution (send/receive,
-    // divide, extract) for every CRT in the stack starting at `first`, appending each to crts_i_handled;
-    // report_done for all of them stays deferred to the caller, batched at the very end of the thread's
-    // own shot processing (same-PE-pair deadlock-avoidance property, unrelated to this inline timing).
-    //
-    // Stops walking (rather than blindly casting) the moment chain_node is no longer a CrossRankTask, and
-    // returns that node (or nullptr) to the caller. A CRT stack does not always terminate in nullptr or
-    // another CrossRankTask the way ROUND's/non-preemptive OBS's always do -- preemptive OBS (decoding_
-    // task.h Task ctor, Phase 1.6) lets a CRT be consumed as an ordinary fusion's left_child, so the
-    // observable's own chain can continue past a CRT via a later "wrap" fusion. The caller is responsible
-    // for racing for that trailing continuation and letting its own climb continue with it (exactly like
-    // any other ordinary step -- no separate "drain" logic needed, see decode_shots' process_task_step).
-    // Root credit is owed only when this call returns nullptr (a genuine termination) -- never when it
-    // returns a trailing Task*, since that isn't a termination at all.
-    TaskBase* resolve_crt_chain(CrossRankTask* first, ShotContainer& shot, size_t shot_container_id, int tid,
-                                int shot_id, int shot_buffer_round, std::ofstream* t_out,
-                                std::vector<CrossRankTask*>& crts_i_handled);
+    // send_solution_to_remote_pe (sender) and get_solution_from_remote_pe (receiver) each run their
+    // own inline solution-isolation shatter pass over a window that can extend past t's own vb, and a
+    // shattered blossom can span farther still (see divide_vb's own comment) -- so either pass can
+    // silently destroy a region referenced in t->regions_matched_to_virtual_boundary even though t
+    // itself is never the prune_target passed to either function. Call this once, immediately after
+    // send/get_solution_from_remote_pe returns (on the receiver side: before process_timeline_until_
+    // completion runs -- that's the only place a *new* region could get allocated into a slot just
+    // freed by this shatter, so checking beforehand needs no generation/epoch counter to stay sound),
+    // passing crt->child (the connector t that the CrossRankTask attached to). Walks t's own list and
+    // erases any pointer whose slot in its owning partition's region arena bitmap now reads free --
+    // the same liveness check send_solution_to_remote_pe already applies to regions_to_unmatch,
+    // generalized (via a global regions_ptr-relative offset + region_arena_for) to work for a pointer
+    // from any partition, not just ones inside a known p_start..p_end window.
+    void prune_stale_regions_matched_to_vb(TaskBase* t, size_t shot_container_id);
 #endif
 
     // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md). Universal
@@ -296,6 +269,14 @@ struct DecodingUnit {
     // the solver/prune_target so divide timing can be traced end-to-end (see this-is-a-broader-
     // purrfect-crystal.md).
     void divide_vb(ShotContainer& shot, int shot_container_id, int vb_id, Mwpm* solver_arg, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
+
+    // Walk backward through start's own left_child chain, dividing+posting every deferred
+    // (is_extraction_unit_connector && defer_division) link found, stopping at the first non-deferred
+    // boundary (already handled at its own resolution time -- nothing to do there). Called whenever a
+    // solved Task's own special_tasks list is non-empty, once, after every attached special task is
+    // fully resolved -- not USE_SHMEM-gated, since local seams (and the deferred spans they trigger)
+    // work the same with or without SHMEM.
+    void back_divide_walk(Task* start, ShotContainer& shot, int shot_container_id, int tid, std::ofstream* t_out = nullptr);
 
     // Shatter+extract an entire unit subtree (job.subtree_root), accumulating into
     // shot.thread_results[tid] (bit-packed) or shot.res directly (extended observables, under omp

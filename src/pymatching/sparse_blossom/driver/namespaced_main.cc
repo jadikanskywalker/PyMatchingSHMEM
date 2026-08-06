@@ -60,7 +60,11 @@ int main_predict(int argc, const char** argv) {
             "--task_division_strategy", // ROUND or OBS partitioning
             "--extraction_unit_size",
             "--extract_preemptively",
-            "--seam_buffer_size", // extra partitions to include for solution extraction / cross-rank fusion windows
+            "--seam_buffer_size", // OBS only: extra partitions around seams to include for solution extraction / cross-rank fusion windows
+#ifdef USE_SHMEM
+            "--cross_rank_fusion_window_size", // ROUND: number of partitions to send;
+                                               //   OBS: extra partitions to include for cross-rank fusion windows (if different than seam_buffer_size)
+#endif
             // Generate or pre-load DEM / shot samples
             "--graph_cache_path",
             "--gen_code",
@@ -142,8 +146,11 @@ int main_predict(int argc, const char** argv) {
     }
     config_parallel::extract_preemptively = stim::find_bool_argument("--extract_preemptively", argc, argv);
     config_parallel::L = (int)stim::find_int64_argument("--extraction_unit_size", 1, 1, INT64_MAX, argc, argv);
-    config_parallel::k = stim::find_int64_argument("--seam_buffer_size", 1, 0, INT64_MAX, argc, argv);
-#ifdef ENABLE_DRAW_FLAGS
+    config_parallel::seam_buffer_size = stim::find_int64_argument("--seam_buffer_size", 1, 0, INT64_MAX, argc, argv); // not yet implemented
+#ifdef USE_SHMEM
+    config_parallel::k = stim::find_int64_argument("--cross_rank_fusion_window_size", 1, 0, INT64_MAX, argc, argv);
+#endif
+#ifdef ENABLE_DRAW_FLAGS    
     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
 #endif
 

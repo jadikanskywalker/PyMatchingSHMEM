@@ -32,6 +32,7 @@ namespace config_parallel {
     inline int M = std::numeric_limits<int>::max(); // rounds per partition
     
     enum div_strgy { ROUND, OBS };
+    inline int seam_buffer_size = 1;
     inline int k = 1;
     inline div_strgy division_strategy = ROUND;
 

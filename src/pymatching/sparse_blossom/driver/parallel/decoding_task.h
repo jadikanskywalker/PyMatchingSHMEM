@@ -311,10 +311,15 @@ struct LocalSeamTask : public SpecialTask {
     std::vector<int> obs_patch_ids;
 #endif
 
-    // Busy-spin signal for the children.size()-1 losing threads to wait on. Reset to false in
-    // mark_solved() (re-arms for the next shot/round). Set true (release) by whichever thread wins
-    // this seam's own try_to_steal race, immediately after that seam's own mark_solved().
-    std::atomic<bool> ready{false};
+    // Busy-spin signal for the children.size()-1 losing threads to wait on, round-tagged rather than a
+    // plain bool: a bool left at `true` after the winner finishes would go stale into the *next*
+    // shot (nothing else resets it between ordinary shots -- only mark_solved(), once, by the winner),
+    // letting a loser in a later round sail through without ever actually waiting. Storing
+    // shot_buffer_round instead means a stale value from any earlier round can never accidentally
+    // match the current one, mirroring how Task::try_to_steal's own leaf-claim CAS (`expected = val -
+    // 1`) avoids the identical class of bug. -1 = never resolved yet. Set by whichever thread wins
+    // this seam's own try_to_steal race, as its last action (after that seam's own mark_solved()).
+    std::atomic<int64_t> ready{-1};
 
     LocalSeamTask(int vb, int vb_left, int vb_right, pm::Mwpm* solver)
         : SpecialTask(vb, vb_left, vb_right, true, TaskType::LocalSeamTask, solver)
@@ -361,7 +366,6 @@ struct LocalSeamTask : public SpecialTask {
     void mark_solved(size_t my_pid = 0) override {
         (void)my_pid;
         status.store(0, std::memory_order_release);
-        ready.store(false, std::memory_order_release);
     }
 
     bool try_to_steal(size_t val) override {
@@ -373,7 +377,7 @@ struct LocalSeamTask : public SpecialTask {
 
     void reset() override {
         status.store(0, std::memory_order_release);
-        ready.store(false, std::memory_order_release);
+        ready.store(-1, std::memory_order_release);
     }
 };
 
