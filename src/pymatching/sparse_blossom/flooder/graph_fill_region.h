@@ -72,6 +72,13 @@ struct GraphFillRegion {
 
     int rotating_buffer_idx = 0;
 
+    // Liveness flag, set/cleared only by the owning arena's alloc_unconstructed()/del() (see arena.h,
+    // shmem_arena.h) -- lets any code holding a possibly-stale GraphFillRegion* determine whether it's
+    // still the same live region without threading an explicit "what did I just destroy" list through
+    // every shatter path. Costs zero bytes: sits in the struct's own existing tail padding (confirmed
+    // via a compiled offsetof probe -- rotating_buffer_idx ends at offset 140, struct size is 144).
+    bool allocated = false;
+
     GraphFillRegion();
     GraphFillRegion(GraphFillRegion&&);
     GraphFillRegion(const GraphFillRegion&) = delete;

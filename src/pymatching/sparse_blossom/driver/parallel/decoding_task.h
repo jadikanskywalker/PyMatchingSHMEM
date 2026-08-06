@@ -301,10 +301,12 @@ struct LocalSeamTask : public SpecialTask {
     alignas(64) std::atomic<int64_t> status{0};
 
    public:
-    // One triggering Task per converging observable -- always a plain Task* (never another
-    // LocalSeamTask or CrossRankTask; avoiding exactly that nesting is the point of this design).
-    // Populated via Task::add_special_task, one push_back per converging Task.
-    std::vector<Task*> children;
+    // One triggering predecessor per converging observable: the plain Task itself if this is the
+    // first SpecialTask attached to it, or the previously-attached SpecialTask on that same Task if
+    // not (see Task::add_special_task) -- so setup() below always pulls from whichever list was most
+    // recently pruned for that side, not a stale copy from before an earlier attached special task's
+    // own divide_vb call. Populated via Task::add_special_task, one push_back per converging side.
+    std::vector<TaskBase*> children;
 
 #ifdef ENABLE_DRAW_FLAGS
     // Generalizes the old Task::left_obs_patch_id/right_obs_patch_id -- one entry per children[i].
@@ -353,7 +355,7 @@ struct LocalSeamTask : public SpecialTask {
     void setup() override {
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
-        for (Task* c : children) {
+        for (TaskBase* c : children) {
             for (auto& region : c->regions_matched_to_virtual_boundary) {
                 if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker)
                     regions_to_unmatch.push_back(region);
@@ -385,8 +387,11 @@ struct LocalSeamTask : public SpecialTask {
 struct CrossRankTask : public SpecialTask {
 public:
     // Cross-rank tasks only ever have one local child -- no N-ary generalization needed here the way
-    // LocalSeamTask needed one. Populated via Task::add_special_task(this), not the constructor.
-    Task* child{nullptr};
+    // LocalSeamTask needed one. TaskBase*, not Task*, for the same reason as LocalSeamTask::children
+    // above: the predecessor is the plain Task if this is the first SpecialTask attached to it, or the
+    // previously-attached SpecialTask if not. Populated via Task::add_special_task(this), not the
+    // constructor.
+    TaskBase* child{nullptr};
     bool iamleft;
 
     size_t other_pid{ 0 };
@@ -465,14 +470,21 @@ public:
 
 
     /* Helper Methods */
+    // Symmetric with LocalSeamTask::setup() -- combines regions from its one predecessor (child),
+    // splitting into regions_to_unmatch (matched to this CRT's own vb, to be sent/unmatched) vs
+    // regions_matched_to_virtual_boundary (everything else, kept live for a later setup() -- the next
+    // attached special task on the same Task, or (via the write-back in decode_shots()) that Task's
+    // own future parent). The else branch used to be commented out (this list was never read, since
+    // nothing propagated it back to child); restored now that the predecessor chain + write-back make
+    // it a genuinely consumed list again.
     void setup() override {
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
         for (auto& region : child->regions_matched_to_virtual_boundary) {
             if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker) // seam vbs are marked with global part
                 regions_to_unmatch.push_back(region);
-            // else
-            //     regions_matched_to_virtual_boundary.push_back(region);
+            else
+                regions_matched_to_virtual_boundary.push_back(region);
         }
     };
 
@@ -547,13 +559,21 @@ public:
 #endif
 
 inline void Task::add_special_task(SpecialTask* st) {
+    // The predecessor is this Task itself only if st is the first special task attached to it; if
+    // this Task already has one or more special tasks attached, the previously-attached one is the
+    // correct predecessor instead -- its own regions_matched_to_virtual_boundary is what's actually
+    // up to date (this Task's own list, populated by its setup() before any special task ran, is
+    // stale the moment a first special task's own divide_vb call prunes something from it).
+    TaskBase* predecessor = special_tasks.empty()
+        ? static_cast<TaskBase*>(this)
+        : static_cast<TaskBase*>(special_tasks.back());
     special_tasks.push_back(st);
     if (st->is_local_seam_fusion()) {
-        static_cast<LocalSeamTask*>(st)->children.push_back(this);
+        static_cast<LocalSeamTask*>(st)->children.push_back(predecessor);
     }
 #ifdef USE_SHMEM
     else if (st->is_cross_rank_fusion()) {
-        static_cast<CrossRankTask*>(st)->child = this;
+        static_cast<CrossRankTask*>(st)->child = predecessor;
     }
 #endif
 }

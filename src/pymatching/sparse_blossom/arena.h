@@ -43,18 +43,29 @@ struct Arena {
         }
         T *result = available.back();
         available.pop_back();
+        if constexpr (requires (T t) { t.allocated; }) {
+            result->allocated = true;
+        }
         return result;
     }
 
     T *alloc_default_constructed() {
         T *result = alloc_unconstructed();
         new (result) T();
+        if constexpr (requires (T t) { t.allocated; }) {
+            result->allocated = true;
+        }
         return result;
     }
 
     void del(T *p) {
-        // Destroy the object first, then mark memory as available for reuse.
-        // This avoids having an object considered "available" while its destructor is still running.
+        // Mark stale before destroying, then destroy, then mark memory as available for reuse.
+        // Marking first means any code holding a copy of p can see it's gone without racing the
+        // destructor call itself, and avoids having an object considered "available" while its
+        // destructor is still running.
+        if constexpr (requires (T t) { t.allocated; }) {
+            p->allocated = false;
+        }
         p->~T();
         available.push_back(p);
     }

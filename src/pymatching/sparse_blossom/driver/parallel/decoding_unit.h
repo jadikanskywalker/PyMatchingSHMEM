@@ -224,28 +224,25 @@ struct DecodingUnit {
     // Decoding Functions
 #ifdef USE_SHMEM
     void send_solution_to_remote_pe(size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &task, std::ofstream &t_out);
-    bool get_solution_from_remote_pe(
-        size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &task, std::ofstream &t_out,
-        std::vector<uint64_t>& hitsref); // returns whether solving is necessary
+    bool get_solution_from_remote_pe(size_t shot_container_id, CrossRankTask &task, std::ofstream &t_out, std::vector<uint64_t>& hitsref); // returns whether solving is necessary
     // Extracts a cross-rank fusion's received window immediately, inline on the resolving thread.
     // Assumes crt->part's own vb has already been divided (see divide_vb) by the caller.
     void extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, CrossRankTask& crt, int tid, std::ofstream* t_out = nullptr);
-
-    // send_solution_to_remote_pe (sender) and get_solution_from_remote_pe (receiver) each run their
-    // own inline solution-isolation shatter pass over a window that can extend past t's own vb, and a
-    // shattered blossom can span farther still (see divide_vb's own comment) -- so either pass can
-    // silently destroy a region referenced in t->regions_matched_to_virtual_boundary even though t
-    // itself is never the prune_target passed to either function. Call this once, immediately after
-    // send/get_solution_from_remote_pe returns (on the receiver side: before process_timeline_until_
-    // completion runs -- that's the only place a *new* region could get allocated into a slot just
-    // freed by this shatter, so checking beforehand needs no generation/epoch counter to stay sound),
-    // passing crt->child (the connector t that the CrossRankTask attached to). Walks t's own list and
-    // erases any pointer whose slot in its owning partition's region arena bitmap now reads free --
-    // the same liveness check send_solution_to_remote_pe already applies to regions_to_unmatch,
-    // generalized (via a global regions_ptr-relative offset + region_arena_for) to work for a pointer
-    // from any partition, not just ones inside a known p_start..p_end window.
-    void prune_stale_regions_matched_to_vb(TaskBase* t, size_t shot_container_id);
 #endif
+
+    // Erases every pointer in t->regions_matched_to_virtual_boundary whose region is no longer live
+    // (GraphFillRegion::allocated == false -- set/cleared solely by Arena/SHMEMArena's own
+    // alloc_unconstructed()/del(), so this needs no partition/shot lookup, just a field read per
+    // pointer). Not USE_SHMEM-gated: called unconditionally from divide_vb (t = its own prune_target,
+    // after that vb's own shatter -- every build, not just SHMEM ones), and additionally from
+    // send_solution_to_remote_pe (t = the CrossRankTask itself, after its own solution-isolation
+    // shatter -- the one shatter pass in the CRT path with no divide_vb call of its own to fold this
+    // into, SHMEM-only). get_solution_from_remote_pe needs no call: its own inline shatter step was
+    // removed (it was dividing over t.part before that vb was ever fused, so region_that_arrived_top
+    // there was never set -- see now-its-time-to-jazzy-turing.md Phase four Context §3), leaving
+    // divide_vb(..., crt->part, ..., prune_target=crt, ...) as the only shatter on the receiver side,
+    // already covered.
+    void prune_stale_regions_matched_to_vb(TaskBase* t);
 
     // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md). Universal
     // across build configs -- both plain USE_THREADS and USE_SHMEM+USE_THREADS builds post to and

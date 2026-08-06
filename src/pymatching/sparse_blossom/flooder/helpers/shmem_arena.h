@@ -77,16 +77,27 @@ struct SHMEMArena {
             result = available.back();
             available.pop_back();
         }
+        if constexpr (requires (T t) { t.allocated; }) {
+            result->allocated = true;
+        }
         return result;
     }
 
     T* alloc_default_constructed() {
         T* result = alloc_unconstructed();
         new (result) T();
+        if constexpr (requires (T t) { t.allocated; }) {
+            result->allocated = true;
+        }
         return result;
     }
 
     void del(T* p) {
+        // Mark stale before destroying -- see arena.h's own del() for why (write must land while the
+        // object is still formally alive, and before anything else could observe it as reused).
+        if constexpr (requires (T t) { t.allocated; }) {
+            p->allocated = false;
+        }
         p->~T();
         if (p >= shmem_buffer && p < shmem_buffer + shmem_buffer_size) {
             size_t idx = p - shmem_buffer;

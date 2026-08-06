@@ -39,7 +39,8 @@ GraphFillRegion::GraphFillRegion(GraphFillRegion &&other)
       blossom_children(std::move(other.blossom_children)),
       shell_area(std::move(other.shell_area)),
       owner_arena(other.owner_arena),
-      rotating_buffer_idx(other.rotating_buffer_idx)
+      rotating_buffer_idx(other.rotating_buffer_idx),
+      allocated(other.allocated)
 {}
 
 bool GraphFillRegion::tree_equal(const GraphFillRegion &other) const {

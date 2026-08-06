@@ -368,7 +368,7 @@ void Mwpm::unmatch_virtual_boundaries_between_partitions() {
 }
 
 GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_matches(
-    GraphFillRegion *region, MatchingResult &res, std::vector<GraphFillRegion*>* destroyed) {
+    GraphFillRegion *region, MatchingResult &res) {
     for (auto &r : region->blossom_children) {
         r.region->clear_blossom_parent_ignoring_wrapped_radius();
     }
@@ -387,14 +387,13 @@ GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_matches(
         auto &re1 = region->blossom_children[(index + i + 1) % num_children];
         auto &re2 = region->blossom_children[(index + i + 2) % num_children];
         re1.region->add_match(re2.region, re1.edge);
-        res += shatter_blossom_and_extract_matches(re1.region, destroyed);
+        res += shatter_blossom_and_extract_matches(re1.region);
     }
-    if (destroyed) destroyed->push_back(region);
     region->owner_arena->del(region);
     return subblossom;
 }
 
-MatchingResult Mwpm::shatter_blossom_and_extract_matches(GraphFillRegion *region, std::vector<GraphFillRegion*>* destroyed) {
+MatchingResult Mwpm::shatter_blossom_and_extract_matches(GraphFillRegion *region) {
     region->cleanup_shell_area();
 
     // First handle base cases (no subblossoms)
@@ -405,10 +404,6 @@ MatchingResult Mwpm::shatter_blossom_and_extract_matches(GraphFillRegion *region
             // No shattering required, so just return MatchingResult from this match.
             MatchingResult res = {
                 region->match.edge.obs_mask, region->radius.y_intercept() + region->match.region->radius.y_intercept()};
-            if (destroyed) {
-                destroyed->push_back(region->match.region);
-                destroyed->push_back(region);
-            }
             region->match.region->owner_arena->del(region->match.region);
             region->owner_arena->del(region);
             return res;
@@ -417,7 +412,6 @@ MatchingResult Mwpm::shatter_blossom_and_extract_matches(GraphFillRegion *region
         // Region with no blossom children matched to boundary
         // No shattering required, so just return MatchingResult from this match.
         MatchingResult res = {region->match.edge.obs_mask, region->radius.y_intercept()};
-        if (destroyed) destroyed->push_back(region);
         region->owner_arena->del(region);
         return res;
     }
@@ -425,15 +419,15 @@ MatchingResult Mwpm::shatter_blossom_and_extract_matches(GraphFillRegion *region
     // Pair up and shatter subblossoms into matches
     MatchingResult res{0, 0};
     if (!region->blossom_children.empty())
-        region = pair_and_shatter_subblossoms_and_extract_matches(region, res, destroyed);
+        region = pair_and_shatter_subblossoms_and_extract_matches(region, res);
     if (region->match.region && !region->match.region->blossom_children.empty())
-        pair_and_shatter_subblossoms_and_extract_matches(region->match.region, res, destroyed);
-    res += shatter_blossom_and_extract_matches(region, destroyed);
+        pair_and_shatter_subblossoms_and_extract_matches(region->match.region, res);
+    res += shatter_blossom_and_extract_matches(region);
     return res;
 }
 
 GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_match_edges(
-    GraphFillRegion *region, std::vector<CompressedEdge> &match_edges, std::vector<GraphFillRegion*>* destroyed) {
+    GraphFillRegion *region, std::vector<CompressedEdge> &match_edges) {
     for (auto &r : region->blossom_children) {
         r.region->clear_blossom_parent_ignoring_wrapped_radius();
     }
@@ -451,15 +445,14 @@ GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_match_edges(
         auto &re1 = region->blossom_children[(index + i + 1) % num_children];
         auto &re2 = region->blossom_children[(index + i + 2) % num_children];
         re1.region->add_match(re2.region, re1.edge);
-        shatter_blossom_and_extract_match_edges(re1.region, match_edges, destroyed);
+        shatter_blossom_and_extract_match_edges(re1.region, match_edges);
     }
-    if (destroyed) destroyed->push_back(region);
     region->owner_arena->del(region);
     return subblossom;
 }
 
 void Mwpm::shatter_blossom_and_extract_match_edges(
-    GraphFillRegion *region, std::vector<CompressedEdge> &match_edges, std::vector<GraphFillRegion*>* destroyed) {
+    GraphFillRegion *region, std::vector<CompressedEdge> &match_edges) {
     region->cleanup_shell_area();
 
     // First handle base cases (no subblossoms)
@@ -469,10 +462,6 @@ void Mwpm::shatter_blossom_and_extract_match_edges(
             // Neither region nor matched region have blossom children
             // No shattering required, so just return MatchingResult from this match.
             match_edges.push_back(region->match.edge);
-            if (destroyed) {
-                destroyed->push_back(region->match.region);
-                destroyed->push_back(region);
-            }
             region->match.region->owner_arena->del(region->match.region);
             region->owner_arena->del(region);
             return;
@@ -481,17 +470,16 @@ void Mwpm::shatter_blossom_and_extract_match_edges(
         // Region with no blossom children matched to boundary
         // No shattering required, so just return MatchingResult from this match.
         match_edges.push_back(region->match.edge);
-        if (destroyed) destroyed->push_back(region);
         region->owner_arena->del(region);
         return;
     }
 
     // Pair up and shatter subblossoms into matches
     if (!region->blossom_children.empty())
-        region = pair_and_shatter_subblossoms_and_extract_match_edges(region, match_edges, destroyed);
+        region = pair_and_shatter_subblossoms_and_extract_match_edges(region, match_edges);
     if (region->match.region && !region->match.region->blossom_children.empty())
-        pair_and_shatter_subblossoms_and_extract_match_edges(region->match.region, match_edges, destroyed);
-    shatter_blossom_and_extract_match_edges(region, match_edges, destroyed);
+        pair_and_shatter_subblossoms_and_extract_match_edges(region->match.region, match_edges);
+    shatter_blossom_and_extract_match_edges(region, match_edges);
     return;
 }
 
