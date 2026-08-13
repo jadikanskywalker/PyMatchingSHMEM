@@ -22,7 +22,7 @@ else
     k=$7
 fi
 
-source ~/.bashrc
+source ~/.bash_profile
 conda activate pymatching
 
 dem_suffix=${surgery_preset}_d${d}_p${p_dec}_${rounds}r

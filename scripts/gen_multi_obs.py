@@ -562,6 +562,19 @@ def build_surgery_spec_18obs():
 
     return ";".join(f"{a},{b},{s},{d}" for a, b, s, d in gates)
 
+def build_surgery_spec_9obs(M=21, duration=7):
+    """
+    Generate the surgery spec string for the 9-observable star-topology circuit
+    matching testdems/error_model_9obs_d21_p001_672r.dem's own layout: hub
+    observable 8, leaves 0..7, 16 seams total (all touching obs 8) -- a forward
+    pass over the leaves followed immediately by a backward pass, gate i placed
+    at round i*M, each lasting `duration` rounds.
+    """
+    leaves = list(range(8))
+    gates = [(8, leaf, i * M, duration) for i, leaf in enumerate(leaves)]
+    gates += [(8, leaf, (len(leaves) + i) * M, duration) for i, leaf in enumerate(reversed(leaves))]
+    return ";".join(f"{a},{b},{s},{d}" for a, b, s, d in gates)
+
 def build_surgery_spec_24obs(M=42, duration=21):
     """
     Generate the surgery spec string for the 24-observable, 756-round circuit.
@@ -770,7 +783,7 @@ def main():
                               "'obs_a,obs_b,start[,duration]' (duration defaults to "
                               "--surgery_duration).  Example: '0,1,3,2;0,2,7'.")
     surgery.add_argument("--surgery_preset", type=str, default="",
-                         choices=["36obs", "18obs", "24obs", "48obs", "64obs"],
+                         choices=["9obs", "36obs", "18obs", "24obs", "48obs", "64obs"],
                          help="Use a named preset surgery spec.  '24obs': 24-observable "
                               "756-round circuit with M=42, duration=21, 4 blocks of 6.")
 
@@ -828,6 +841,9 @@ def main():
     
     if args.surgery_spec:
         surgery_gates = parse_surgery_spec(args.surgery_spec,
+                                           default_duration=args.surgery_duration)
+    elif args.surgery_preset == "9obs":
+        surgery_gates = parse_surgery_spec(build_surgery_spec_9obs(),
                                            default_duration=args.surgery_duration)
     elif args.surgery_preset == "36obs":
         surgery_gates = parse_surgery_spec(build_surgery_spec_36obs(),

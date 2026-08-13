@@ -98,13 +98,9 @@ GraphFlooder::GraphFlooder(GraphFlooder&& flooder) noexcept
 inline bool GraphFlooder::is_active(const DetectorNode* node) const {
     if (node->vb < 0)
         return true;
-#ifdef USE_SHMEM
     if (node->vb > vb_left && node->vb < vb_right)
         return true;
     return (node->vb == vb); // OBS seam vb
-#else
-    return (node->vb > vb_left && node->vb < vb_right);
-#endif
 }
 
 void GraphFlooder::do_region_created_at_empty_detector_node(GraphFillRegion& region, DetectorNode& detector_node) {

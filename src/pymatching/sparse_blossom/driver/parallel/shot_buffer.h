@@ -41,8 +41,14 @@ enum ShotStatus : uint64_t { READY, PUT_SUMMARY, PUT_RESULT, WROTE_RESULT };
 // thread, at any time. Cross-rank fusion extraction is handled inline by the resolving thread
 // instead of going through this queue (posting would only add overhead there).
 struct ExtractionJob {
-    int shot_container_id;
+    size_t shot_container_id;
     Task* subtree_root;
+};
+
+struct LocalSeamContinuationJob {
+    size_t shot_container_id;
+    size_t special_task_id; // id of completed seam in child's SpecialTask vector
+    Task* child_task;
 };
 
 // ShotContainer isolates everything needed to solve
@@ -82,6 +88,14 @@ struct ShotContainer {
     // claimed) -- incremented on post, decremented once a claimed job finishes processing.
     alignas(64) std::atomic<int> pending_extraction_jobs{0};
 
+    std::mutex local_seam_continuation_post_mutex;
+    std::vector<LocalSeamContinuationJob> local_seam_continuation_jobs;
+    alignas(64) std::atomic<size_t> local_seam_continuation_posted_count{0};  // published (release) job count
+    alignas(64) std::atomic<size_t> local_seam_continuation_claim_cursor{0};  // next unclaimed job index
+    // Gates ShotContainer reuse until every posted job has actually been executed (not just
+    // claimed) -- incremented on post, decremented once a claimed job finishes processing.
+    alignas(64) std::atomic<int> local_seam_continuation_extraction_jobs{0};
+
     // t_out: optional per-thread debug stream; when DEBUG and non-null, logs the vb/task address of
     // the job being posted (see this-is-a-broader-purrfect-crystal.md) so posting/draining can be
     // traced end-to-end alongside decode_shots()'s existing per-thread traces.
@@ -89,13 +103,13 @@ struct ShotContainer {
     ExtractionJob* try_claim_extraction_job();
 
     std::vector<Task> tasks;  // Tasks handle dynamic fusion tree synchonization
-#ifdef USE_SHMEM
-    std::vector<CrossRankTask> cross_rank_tasks;
-#endif
     // Local-observable-boundary seams (OBS partitioning only) -- never SHMEM-specific, unlike
     // cross_rank_tasks, so unconditional even though only build_tasks_for_obs_patch_partitioning
     // populates it today.
     std::vector<LocalSeamTask> local_seam_tasks;
+#ifdef USE_SHMEM
+    std::vector<CrossRankTask> cross_rank_tasks;
+#endif
 
     ShotContainer(int num_partitions, int num_virtual_boundaries, int num_observables);
 

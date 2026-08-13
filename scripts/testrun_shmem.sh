@@ -5,12 +5,12 @@
 #SBATCH --partition=zen4
 #SBATCH --time=03:00:00
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4
+#SBATCH --ntasks=4
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=1000GB
 
 cd ~/PyMatchingSHMEM
-source ~/.bashrc
+source ~/.bash_profile
 conda activate pymatching
 # module unload python
 # module load python
@@ -83,7 +83,7 @@ python3 ../scripts/gen_multi_obs.py \
     --after_clifford_depolarization 0.1 \
     --code repetition_code \
     --task memory \
-    --num_surgery_gates 3 \
+    --num_surgery_gates 5 \
     --surgery_duration 5 \
     --circuit_out circuit.stim \
     > error_model.dem
@@ -171,21 +171,20 @@ start_parallel=$(date +%s)
 export OMP_NUM_THREADS=$nthreads_shmem
 export SHMEM_SYMMETRIC_SIZE=16G
 # export LIBFABRIC_DEBUG=0
-$SWHOME/sos_1.5_scalable/bin/oshrun  \
-    -n $n \
-    --map-by ppr:$ppn:package:PE=$nthreads_shmem \
-    --bind-to core \
-    --report-bindings \
-    ~/PyMatchingSHMEM/scripts/pe_output_wrapper.sh \
-    ~/PyMatchingSHMEM/build_sos/pymatching predict \
+# $SWHOME/sos_1.5_scalable/bin/oshrun  \
+#     -n $n \
+#     --map-by ppr:$ppn:package:PE=$nthreads_shmem \
+#     --bind-to core \
+#     --report-bindings \
+# ~/PyMatchingSHMEM/scripts/pe_output_wrapper.sh \
+~/PyMatchingSHMEM/build_threads/pymatching predict \
     --dem error_model.dem \
     --in detection_events.b8 \
     --in_format b8 \
     --out predicted_obs_flips__shmem.01 \
     --out_format 01 \
     --rounds_per_partition $M \
-    --obs_coors_included \
-    --cross_rank_fusion_window_size $k \
+    --seam_buffer_size $k \
     --task_division_strategy observable \
     --use_threads \
     --extraction_unit_size 4 \
@@ -193,6 +192,20 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --draw_frames \
     > log_shmem.out 2>log_shmem.err
 
+# ~/PyMatchingSHMEM/build_threads/pymatching predict \
+#     --dem error_model.dem \
+#     --in detection_events.b8 \
+#     --in_format b8 \
+#     --out predicted_obs_flips__shmem.01 \
+#     --out_format 01 \
+#     --rounds_per_partition $M \
+#     --seam_buffer_size $k \
+#     --task_division_strategy observable \
+#     --use_threads \
+#     --extraction_unit_size 2 \
+#     --extract_preemptively \
+#     --draw_frames \
+#     > log_shmem.out 2>log_shmem.err
 
     # --dem ../testdems/error_model_48obs_d21_p001_640r.dem \
     # --in ../testdems/detection_events_48obs_d21_p001_640r_100s.b8 \

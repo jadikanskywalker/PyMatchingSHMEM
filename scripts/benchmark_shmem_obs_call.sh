@@ -26,12 +26,16 @@ fi
 #     nodes=0
 # fi
 suffix=M${M}_ntasks${ntasks}_sockets${sockets}_ntps${ntasks_per_socket}_nthreads${nthreads}_k${k}_${SLURM_JOB_ID}
-log=log_$suffix.out
-preds=preds/preds_$suffix.01
+out=out_$suffix
+
+mkdir $out
+cd $out
+log=log_shmem.out
+preds=../preds/preds_$suffix.01
 
 echo "Job ID: $SLURM_JOB_ID" >> $log
 
-source ~/.bashrc
+source ~/.bash_profile
 conda activate pymatching
 
 export FI_VERBS_DEVICE_NAME="mlx5_2"
@@ -49,24 +53,28 @@ oshrun  \
     --map-by ppr:$ntasks_per_socket:package:PE=$threads_per_task \
     --bind-to core \
     --report-bindings \
-    ../build_sos/pymatching predict \
-        --dem $dem \
-        --in $det \
+    ~/PyMatchingSHMEM/scripts/pe_output_wrapper.sh \
+    ~/PyMatchingSHMEM/build_sos/pymatching predict \
+        --dem ../$dem \
+        --in ../$det \
         --in_format b8 \
         --out $preds \
         --out_format 01 \
         --rounds_per_partition $M \
-        --obs_coors_included \
         --cross_rank_fusion_window_size $k \
         --task_division_strategy observable \
+        --extraction_unit_size 4 \
+        --extract_preemptively \
         --use_threads \
         --num_repeats 10 \
-        &>> $log
+    &>> $log
+        
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
-echo "  NTasks=$ntasks Sockets=$sockets NTPSocket=$ntasks_per_socket Threads=$nthreads: $parallel_time seconds" >> bench.out
 
-python3 ../scripts/combine_results.py $preds $ntasks
+echo "  NTasks=$ntasks Sockets=$sockets NTPSocket=$ntasks_per_socket Threads=$nthreads: $parallel_time seconds" >> ../bench.out
+
+python3 ~/PyMatchingSHMEM/scripts/combine_results.py $preds $ntasks
 
 echo >> $log
 echo SHMEM  >> $log

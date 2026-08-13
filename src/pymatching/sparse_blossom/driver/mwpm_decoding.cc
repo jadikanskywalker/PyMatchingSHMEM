@@ -251,7 +251,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
 #ifdef USE_THREADS
 // ===============
         if (DEBUG) {
-            std::cout << "DEBUG: No perfect matching found" << std::endl;
+            std::cout << "DEBUG: No perfect matching found T" << omp_get_thread_num() << std::endl;
             std::cout << "    shot=" << mwpm.current_shot << "  task=" << (mwpm.task->is_fusion ? "f" : "p") << mwpm.task->part << std::endl
                       << "    allocated.size()=" << mwpm.node_arena.allocated.size() << "  available.size()=" << mwpm.node_arena.available.size() << std::endl;
             const std::unordered_set<pm::AltTreeNode*> freed_nodes(
@@ -259,28 +259,22 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
             for (pm::AltTreeNode *alttreenode : mwpm.node_arena.allocated) {
                 if (alttreenode == nullptr) continue;
                 if (freed_nodes.find(alttreenode) != freed_nodes.end()) continue;
-                // std::cout << "    created_by_unmatch: " << alttreenode->created_by_unmatch << std::endl
-                //           << "    destroyed_by_prune: " << alttreenode->destroyed_by_prune << std::endl
-                //           << "    shot_created: " << alttreenode->shot_created << std::endl
-                //           << "    task_created: " << alttreenode->task_created << std::endl
-                //           << "    shot_destroyed: " << alttreenode->shot_destroyed << std::endl
-                //           << "    task_destroyed: " << alttreenode->task_destroyed << std::endl; // tmp
                 if (alttreenode->inner_region) {
                     std::cout << "  inner GraphFillRegion: " << alttreenode->inner_region << std::endl;
                     for (auto &detector_node : alttreenode->inner_region->shell_area) {
                         auto index = detector_node - &*mwpm.flooder.graph.nodes.begin();
-                        std::cout << "    " << index << " vb=" << mwpm.flooder.graph.nodes[index].vb << std::endl;
+                        std::cout << "    node " << index << " vb=" << mwpm.flooder.graph.nodes[index].vb << std::endl;
                     }
                 }
                 if (alttreenode->outer_region) {
                     std::cout << "  outer GraphFillRegion: " << alttreenode->outer_region << std::endl;
                     for (auto &detector_node : alttreenode->outer_region->shell_area) {
                         auto index = detector_node - &*mwpm.flooder.graph.nodes.begin();
-                        std::cout << "    " << index << " vb=" << mwpm.flooder.graph.nodes[index].vb << std::endl;
+                        std::cout << "    node " << index << " vb=" << mwpm.flooder.graph.nodes[index].vb << std::endl;
                     }
                 }
             }
-            output_solution_state(mwpm, detection_events, parallel);
+            // output_solution_state(mwpm, detection_events, parallel);
         }
 // ===============
 #endif

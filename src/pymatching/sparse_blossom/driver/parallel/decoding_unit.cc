@@ -164,6 +164,14 @@ pm::DecodingUnit::DecodingUnit(
         const int my_obs_start = 0;
         const int my_obs_count =  graph.num_obs_patches;
 #endif
+        // A PE owning 2+ local observables joined by a local seam needs a thread free to
+        // independently reach each side -- the loser of LocalSeamTask::try_to_steal spin-waits in
+        // place rather than yielding, so a PE with fewer threads than local observables can deadlock.
+        if (max_threads < my_obs_count) {
+            throw std::invalid_argument("max_threads (" + std::to_string(max_threads) +
+                ") is less than my_obs_count (" + std::to_string(my_obs_count) +
+                "); increase OMP_NUM_THREADS to at least the largest number of observables owned by any single PE.");
+        }
         // Global partition id of my own first local partition, and how many I own -- contiguous by
         // construction (obs-major numbering, per-PE contiguous observable ownership). Distinct from
         // my_partition_task_ids, which holds indices into this PE's own tasks[] array, not global
@@ -617,6 +625,26 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                         << " vb_left " << sj.vb_left << " -> " << mid << "\n" << std::flush;
                     si.vb_right = mid;
                     sj.vb_left  = mid;
+                    // A prior adjustment (from a different overlapping pair sharing si or sj) can
+                    // already have squeezed the other side of this same seam's window -- this pairwise
+                    // resolution only ever looks at one conflicting pair at a time, so it has no way to
+                    // notice a seam getting squeezed from both sides down to (or past) zero width.
+                    if (si.vb_left >= si.vb_right) {
+                        throw std::invalid_argument("Rank " + std::to_string(pid) + ": global seam window "
+                            "conflict resolution squeezed seam " + std::to_string(si_idx) + " to a "
+                            "degenerate window (vb_left=" + std::to_string(si.vb_left) + ", vb_right="
+                            + std::to_string(si.vb_right) + ") while resolving against seam "
+                            + std::to_string(sj_idx) + " -- 3+ seams sharing overlapping observable sets "
+                            "within too few partitions is not currently supported.");
+                    }
+                    if (sj.vb_left >= sj.vb_right) {
+                        throw std::invalid_argument("Rank " + std::to_string(pid) + ": global seam window "
+                            "conflict resolution squeezed seam " + std::to_string(sj_idx) + " to a "
+                            "degenerate window (vb_left=" + std::to_string(sj.vb_left) + ", vb_right="
+                            + std::to_string(sj.vb_right) + ") while resolving against seam "
+                            + std::to_string(si_idx) + " -- 3+ seams sharing overlapping observable sets "
+                            "within too few partitions is not currently supported.");
+                    }
                 }
             } else {
                 if (sj.vb_right > si.vb_left) {
@@ -627,6 +655,22 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                         << " vb_left " << si.vb_left << " -> " << mid << "\n" << std::flush;
                     sj.vb_right = mid;
                     si.vb_left  = mid;
+                    if (si.vb_left >= si.vb_right) {
+                        throw std::invalid_argument("Rank " + std::to_string(pid) + ": global seam window "
+                            "conflict resolution squeezed seam " + std::to_string(si_idx) + " to a "
+                            "degenerate window (vb_left=" + std::to_string(si.vb_left) + ", vb_right="
+                            + std::to_string(si.vb_right) + ") while resolving against seam "
+                            + std::to_string(sj_idx) + " -- 3+ seams sharing overlapping observable sets "
+                            "within too few partitions is not currently supported.");
+                    }
+                    if (sj.vb_left >= sj.vb_right) {
+                        throw std::invalid_argument("Rank " + std::to_string(pid) + ": global seam window "
+                            "conflict resolution squeezed seam " + std::to_string(sj_idx) + " to a "
+                            "degenerate window (vb_left=" + std::to_string(sj.vb_left) + ", vb_right="
+                            + std::to_string(sj.vb_right) + ") while resolving against seam "
+                            + std::to_string(si_idx) + " -- 3+ seams sharing overlapping observable sets "
+                            "within too few partitions is not currently supported.");
+                    }
                 }
             }
         }
@@ -852,14 +896,8 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             }
 
             // ---- Step 2b: vb_left narrowing via a running "last-divided anchor" per observable ----
-            // Plain "narrow to my immediate predecessor's .part" is only correct between two connectors
-            // that both actually divide. Inside (and at the far end of) a deferred span, nothing has
-            // actually been divided since the connector that closed unit_lo, so every connector from
-            // unit_lo+1 through unit_hi inclusive -- deferred or not -- anchors back to that same .part,
-            // not to whichever connector immediately precedes it. This single forward pass reproduces
-            // ordinary one-step-back narrowing exactly wherever there's no deferred span, and handles a
-            // deferred span (and the unit_lo==0 edge case, where no anchor is ever established) with no
-            // extra case-work.
+            // anchor tracks vb_marker (local vb id), not part (global, offset by obs_vb_offset) --
+            // vb_left/vb_right are always in local per-observable vb space.
             for (int lo = 0; lo < my_obs_count; ++lo) {
                 auto& links = chain_link_at_unit[lo];
                 int anchor = 0;
@@ -867,7 +905,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                 for (size_t u = 1; u < links.size(); ++u) {
                     if (have_anchor) links[u]->vb_left = anchor;
                     if (!links[u]->defer_division) {
-                        anchor = links[u]->part;
+                        anchor = links[u]->vb_marker;
                         have_anchor = true;
                     }
                 }
@@ -2042,6 +2080,20 @@ void pm::DecodingUnit::decode_shots() {
                 size_t next_p_id = tid+next_p_inc;
                 if (DEBUG) t_out << "solver: " << t->solver << "\n";
                 bool stolen = t->try_to_steal(shot_buffer_round);
+                // This thread's own designated initial leaf (my_partition_task_ids[tid]) can already be
+                // claimed by another thread by the time we get here -- e.g. a faster thread that raced
+                // ahead, lost its own fusion's race, and grabbed this leaf directly via the "steal sibling
+                // if it's a raw leaf" trick below. Unlike that mid-climb case, an initial loss had no
+                // fallback here before: the retry loop mirroring this one (over next_p_id) only lives
+                // inside the while(stolen) body, so it was never reached if the very first steal failed --
+                // this thread would silently do zero work for the entire shot, every shot, permanently
+                // starving any local seam/CRT whose other side only that thread could ever reach. Retry
+                // with the same next_p_id stride used everywhere else before giving up on this shot.
+                while (!stolen && next_p_id < my_partition_task_ids.size()) {
+                    t = &shot.tasks[my_partition_task_ids[next_p_id]];
+                    stolen = t->try_to_steal(shot_buffer_round);
+                    next_p_id += next_p_inc;
+                }
                 roots_i_solved.clear();
                 // Declared per-shot (not per-root): a CRT can now be resolved mid-climb, by a thread
                 // that never itself reaches a root this shot (a sibling subtree's own solver might win
@@ -2092,9 +2144,11 @@ void pm::DecodingUnit::decode_shots() {
                         if (st->is_local_seam_fusion()) {
                             auto* seam = static_cast<LocalSeamTask*>(st);
                             if (seam->try_to_steal(0)) {
+                                if (DEBUG) t_out << "Thread " << tid << " solving seam f" << seam->part << std::endl << std::flush;
                                 seam->setup();
                                 pm::Mwpm& seam_solver = *seam->solver;
                                 seam_solver.prepare_for_task(seam, shot_id);
+                                if (DEBUG) t_out << "  solver bounds: " << solver.flooder.vb_left << "(vb_left) " << solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
 #ifdef ENABLE_DRAW_FLAGS
                                 if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
                                     size_t K_p = graph.num_partitions / graph.num_obs_patches;
@@ -2117,9 +2171,10 @@ void pm::DecodingUnit::decode_shots() {
                                 divide_vb(shot, (int)shot_container_id, seam->part, seam->solver, tid, seam, &t_out);
                                 // Round-tagged, not a plain bool -- see decoding_task.h LocalSeamTask::
                                 // ready's own comment for why a stale value would otherwise be possible.
-                                seam->ready.store(shot_buffer_round, std::memory_order_release);
+                                seam->mark_ready(shot_buffer_round);
                             } else {
-                                while (seam->ready.load(std::memory_order_acquire) != shot_buffer_round) {}
+                                if (DEBUG) t_out << "Thread " << tid << " waiting on seam f" << st->part << std::endl << std::flush;
+                                seam->wait_until_ready(shot_buffer_round);
                             }
                         }
 #ifdef USE_SHMEM
@@ -2135,6 +2190,7 @@ void pm::DecodingUnit::decode_shots() {
                                 crt->setup();
                                 auto& crt_solver = *crt->solver;
                                 crt_solver.prepare_for_task(crt, shot_id);
+                                if (DEBUG) t_out << "  solver bounds: " << crt_solver.flooder.vb_left << "(vb_left) " << crt_solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
 #ifdef ENABLE_DRAW_FLAGS
                                 if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
                                     crt_solver.flooder.p_offsets  = { crt->left_global_offset.first,  crt->right_global_offset.first  };

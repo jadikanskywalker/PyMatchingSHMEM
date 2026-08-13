@@ -365,16 +365,26 @@ struct LocalSeamTask : public SpecialTask {
         }
     }
 
-    void mark_solved(size_t my_pid = 0) override {
-        (void)my_pid;
-        status.store(0, std::memory_order_release);
-    }
-
     bool try_to_steal(size_t val) override {
         (void)val;
         int64_t N = (int64_t)children.size();
         int64_t old = status.fetch_add(1, std::memory_order_acq_rel);
         return old == N - 1;
+    }
+
+    // Should be called after seam vb is fused
+    void mark_solved(size_t my_pid = 0) override {
+        (void)my_pid;
+        status.store(0, std::memory_order_release);
+    }
+
+    // Should only be called after seam vb is divided
+    void mark_ready(size_t shot_buffer_round) {
+        ready.store(shot_buffer_round, std::memory_order_release);
+    }
+
+    void wait_until_ready(size_t shot_buffer_round) {
+        while (ready.load(std::memory_order_acquire) != shot_buffer_round) {}
     }
 
     void reset() override {
