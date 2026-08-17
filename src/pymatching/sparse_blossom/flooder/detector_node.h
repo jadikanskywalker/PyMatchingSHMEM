@@ -111,6 +111,7 @@ class DetectorNode {
 
 // ===============
     int vb = -1; // if node is cross partition, virtual boundary it belongs to
+    int obs_patch_id = -1;
 // ===============
 
     /// After it reached this node, how much further did the owning search region grow? Also is it currently growing?

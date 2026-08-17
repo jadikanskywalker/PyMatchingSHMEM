@@ -18,7 +18,6 @@ export OMP_PROC_BIND=true
 
 DEM=testdems/error_model_9obs_d7_p01_337r.dem
 DET=testdems/detection_events_9obs_d7_p01_337r_50s.b8
-CACHE=testdems/graph_9obs_d7_p01_337r.cache
 
 mkdir -p repro_9obs_d7_threads_asan
 cd repro_9obs_d7_threads_asan
@@ -38,7 +37,6 @@ start=$(date +%s)
     --extract_preemptively \
     --use_threads \
     --draw_frames \
-    --graph_cache_path ../$CACHE \
     > run.out 2> run.err
 echo "exit code: $?"
 end=$(date +%s)

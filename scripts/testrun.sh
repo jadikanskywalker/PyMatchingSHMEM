@@ -50,25 +50,47 @@ if [ -d "out_frames" ]
 fi
 
 if $build_circuit; then
-    stim gen \
+    rm *.01 circuit.stim *.b8 *.dem
+    python3 ../scripts/gen_multi_obs.py \
+        --num_observables 4 \
         --rounds $rounds \
-        --distance 5 \
+        --distance 7 \
         --after_clifford_depolarization 0.1 \
         --code repetition_code \
         --task memory \
-        > circuit.stim
-    stim analyze_errors \
-        --decompose_errors \
-        --fold_loops \
-        --in circuit.stim \
+        --num_surgery_gates 5 \
+        --surgery_duration 5 \
+        --circuit_out circuit.stim \
         > error_model.dem
-    stim detect \
-        --in circuit.stim \
+    # Sample detection events FROM THE DEM (not the circuit) so seam errors fire
+    stim sample_dem \
+        --in error_model.dem \
         --shots $shots \
-        --obs_out actual_obs_flips.01 \
-        --obs_out_format 01 \
         --out detection_events.b8 \
-        --out_format b8
+        --out_format b8 \
+        --obs_out actual_obs_flips.01 \
+        --obs_out_format 01
+
+
+    # stim gen \
+    #     --rounds $rounds \
+    #     --distance 5 \
+    #     --after_clifford_depolarization 0.1 \
+    #     --code repetition_code \
+    #     --task memory \
+    #     > circuit.stim
+    # stim analyze_errors \
+    #     --decompose_errors \
+    #     --fold_loops \
+    #     --in circuit.stim \
+    #     > error_model.dem
+    # stim detect \
+    #     --in circuit.stim \
+    #     --shots $shots \
+    #     --obs_out actual_obs_flips.01 \
+    #     --obs_out_format 01 \
+    #     --out detection_events.b8 \
+    #     --out_format b8
 
     # stim gen \
     #     --rounds=$rounds \
@@ -129,17 +151,19 @@ $threads_build predict \
     --out predicted_obs_flips__threads.01 \
     --out_format 01 \
     --rounds_per_partition $M \
+    --seam_buffer_size $k \
+    --task_division_strategy observable \
     --use_threads \
-    --extract_preemptively \
     --extraction_unit_size 4 \
+    --extract_preemptively \
     --draw_frames \
-    > log_parallel.out
+    > log_threads.out 2>log_threads.err
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
-echo "Parallel run completed in $parallel_time seconds."
+echo "Threads run completed in $parallel_time seconds."
 
 # Check work
-echo Parallel
+echo Threads
 echo correct predictions:
 paste -d " " predicted_obs_flips__threads.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
 echo wrong predictions:

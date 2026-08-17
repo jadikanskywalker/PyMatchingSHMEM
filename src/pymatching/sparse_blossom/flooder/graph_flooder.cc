@@ -37,39 +37,30 @@ GraphFlooder::GraphFlooder()
       negative_weight_sum(0) {
 }
 
-#ifdef USE_SHMEM
 GraphFlooder::GraphFlooder(
-    std::shared_ptr<MatchingGraph> graph, int solver_set_idx, GraphFillRegion* shmem_buffer, size_t shmem_buffer_size
+    std::shared_ptr<MatchingGraph> graph,
+    int solver_set_idx
+#ifdef USE_SHMEM
+    , GraphFillRegion* shmem_buffer,
+    size_t shmem_buffer_size
+#endif
 #ifdef ENABLE_DRAW_FLAGS
     , const std::vector<int>* node_part_id
 #endif
     ) : graph_ptr(graph),
       graph(*graph_ptr),
       negative_weight_obs_mask(0),
-      negative_weight_sum(0),
-      rotating_buffer_idx(solver_set_idx),
+      negative_weight_sum(0)
+#ifdef USE_SHMEM
+      , rotating_buffer_idx(solver_set_idx),
       region_arena(shmem_buffer, shmem_buffer_size)
+#endif
 #ifdef ENABLE_DRAW_FLAGS
       , node_part_id_ptr(node_part_id)
 #endif
     {
 }
-#else
-GraphFlooder::GraphFlooder(std::shared_ptr<MatchingGraph> graph, int solver_set_idx
-#ifdef ENABLE_DRAW_FLAGS
-    , const std::vector<int>* node_part_id
-#endif
-    ) : graph_ptr(graph),
-      graph(*graph_ptr),
-      negative_weight_obs_mask(0),
-      negative_weight_sum(0),
-      rotating_buffer_idx(solver_set_idx)
-#ifdef ENABLE_DRAW_FLAGS
-      , node_part_id_ptr(node_part_id)
-#endif
-    {
-}
-#endif // USE_SHMEM
+
 
 GraphFlooder::GraphFlooder(MatchingGraph graph_val)
     : graph_ptr(std::make_shared<MatchingGraph>(std::move(graph_val))),

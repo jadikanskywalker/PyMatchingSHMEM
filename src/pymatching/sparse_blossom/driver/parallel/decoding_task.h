@@ -176,6 +176,10 @@ struct Task : public TaskBase {
     // pass (see now-its-time-to-jazzy-turing.md Phase 2 (REVISED)) -- left as-is here.
     bool defer_division{false};
 
+    // Which observable this task belongs to (OBS partitioning only), set once in
+    // build_tasks_for_obs_patch_partitioning. -1 for ROUND partitioning.
+    int obs_patch_id{-1};
+
     Task(int partition, pm::Mwpm* solver)
         : TaskBase(partition, partition - 1, partition, false, TaskType::Task, solver)
     {
@@ -211,6 +215,7 @@ struct Task : public TaskBase {
         is_extraction_unit_connector = other.is_extraction_unit_connector;
         is_extraction_unit_root = other.is_extraction_unit_root;
         defer_division = other.defer_division;
+        obs_patch_id = other.obs_patch_id;
     }
     Task& operator=(Task&& other) noexcept {
         TaskBase::operator=(std::move(other));
@@ -222,6 +227,7 @@ struct Task : public TaskBase {
         is_extraction_unit_connector = other.is_extraction_unit_connector;
         is_extraction_unit_root = other.is_extraction_unit_root;
         defer_division = other.defer_division;
+        obs_patch_id = other.obs_patch_id;
         return *this;
     }
 

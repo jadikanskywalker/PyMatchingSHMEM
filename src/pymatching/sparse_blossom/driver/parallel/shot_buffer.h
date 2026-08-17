@@ -41,7 +41,7 @@ enum ShotStatus : uint64_t { READY, PUT_SUMMARY, PUT_RESULT, WROTE_RESULT };
 // thread, at any time. Cross-rank fusion extraction is handled inline by the resolving thread
 // instead of going through this queue (posting would only add overhead there).
 struct ExtractionJob {
-    size_t shot_container_id;
+    int shot_container_id;
     Task* subtree_root;
 };
 

@@ -749,8 +749,9 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                 for (int lp = 0; lp < K_p; ++lp) {
                     if (shot_id == 0) my_partition_task_ids.push_back(tasks.size());
                     tasks.emplace_back(obs_p_offset + lp, lp - 1, lp, solver_base[lp].get());
+                    tasks.back().obs_patch_id = o;
                 }
-                auto on_fusion = [&](Task* fusion, size_t vb_id) { fusion->vb_marker = (int)vb_id; };
+                auto on_fusion = [&](Task* fusion, size_t vb_id) { fusion->vb_marker = (int)vb_id; fusion->obs_patch_id = o; };
                 std::vector<RangeInfo> unit_roots = build_extraction_units(
                     tasks, obs_vb_offset, /*leaf_base_idx=*/tree_start, (size_t)K_p,
                     config_parallel::L, solver_base, on_fusion);
@@ -831,8 +832,9 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                 for (int lp = 0; lp < K_p; ++lp) {
                     if (shot_id == 0) my_partition_task_ids.push_back(tasks.size());
                     tasks.emplace_back(obs_p_offset + lp, lp - 1, lp, solver_base[lp].get());
+                    tasks.back().obs_patch_id = o;
                 }
-                auto on_fusion = [&](Task* fusion, size_t vb_id) { fusion->vb_marker = (int)vb_id; };
+                auto on_fusion = [&](Task* fusion, size_t vb_id) { fusion->vb_marker = (int)vb_id; fusion->obs_patch_id = o; };
                 size_t leaf_base_idx = tasks.size() - (size_t)K_p;
                 std::vector<RangeInfo> unit_roots = build_extraction_units(
                     tasks, obs_vb_offset, leaf_base_idx, (size_t)K_p, config_parallel::L,
@@ -849,6 +851,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                     Task* fusion = &tasks.back();
                     fusion->is_extraction_unit_connector = true;
                     fusion->vb_marker = (int)vb_id;
+                    fusion->obs_patch_id = o;
                     // vb_left narrowing is NOT applied here -- deferred to step 2b, which needs every
                     // seam's defer_division marks in place first (step 2a).
                     links[k] = fusion;
@@ -2017,6 +2020,29 @@ void pm::DecodingUnit::decode_shots() {
             t_out.open(t_out_name);
             std::cout << "T" << tid << " of " << num_threads << std::endl;
         }
+        // Give every locally-owned observable its own dedicated thread(s) -- prevents one
+        // observable's thread getting stuck on a seam wait from starving another's leaf leap.
+        const bool obs_partitioned = config_parallel::division_strategy == config_parallel::OBS;
+        int my_obs_idx = 0, local_tid = tid, my_obs_thread_count = num_threads;
+        size_t my_obs_leaf_start = 0, my_obs_leaf_end = my_partition_task_ids.size();
+        if (obs_partitioned) {
+            const int my_obs_count = my_partition_count / (int)graph.p_per_obs_patch;
+            const int threads_per_obs_base = num_threads / my_obs_count;
+            const int threads_rem = num_threads % my_obs_count;
+            const int rem_threads_total = threads_rem * (threads_per_obs_base + 1);
+            if (tid < rem_threads_total) {
+                my_obs_thread_count = threads_per_obs_base + 1;
+                my_obs_idx = tid / my_obs_thread_count;
+                local_tid  = tid % my_obs_thread_count;
+            } else {
+                my_obs_thread_count = threads_per_obs_base;
+                const int tid_rest = tid - rem_threads_total;
+                my_obs_idx = threads_rem + tid_rest / my_obs_thread_count;
+                local_tid  = tid_rest % my_obs_thread_count;
+            }
+            my_obs_leaf_start = (size_t)my_obs_idx * (size_t)graph.p_per_obs_patch;
+            my_obs_leaf_end   = my_obs_leaf_start + (size_t)graph.p_per_obs_patch;
+        }
         // Start decoding
         size_t shot_container_id = 0;
         int shot_buffer_round =
@@ -2074,22 +2100,23 @@ void pm::DecodingUnit::decode_shots() {
 #ifdef SCOREP_USER_ENABLE
                 SCOREP_USER_REGION_BEGIN(shot_decode, "Shot Decode", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
-                // we divide partition tasks into sets based on the number of threads available
-                Task* t = &shot.tasks[my_partition_task_ids[tid]];
-                size_t next_p_inc = num_threads; // cannot inc by two for 1 threads --- does not work for odd
-                size_t next_p_id = tid+next_p_inc;
+                // Bounds come from the per-thread observable assignment above (or the whole task
+                // set for ROUND partitioning).
+                Task* t = &shot.tasks[my_partition_task_ids[my_obs_leaf_start + local_tid]];
+                size_t next_p_inc = my_obs_thread_count; // cannot inc by two for 1 threads --- does not work for odd
+                size_t next_p_id = my_obs_leaf_start + local_tid + next_p_inc;
                 if (DEBUG) t_out << "solver: " << t->solver << "\n";
                 bool stolen = t->try_to_steal(shot_buffer_round);
-                // This thread's own designated initial leaf (my_partition_task_ids[tid]) can already be
-                // claimed by another thread by the time we get here -- e.g. a faster thread that raced
-                // ahead, lost its own fusion's race, and grabbed this leaf directly via the "steal sibling
-                // if it's a raw leaf" trick below. Unlike that mid-climb case, an initial loss had no
-                // fallback here before: the retry loop mirroring this one (over next_p_id) only lives
-                // inside the while(stolen) body, so it was never reached if the very first steal failed --
-                // this thread would silently do zero work for the entire shot, every shot, permanently
+                // This thread's own designated initial leaf can already be claimed by another thread
+                // by the time we get here -- e.g. a faster thread that raced ahead, lost its own
+                // fusion's race, and grabbed this leaf directly via the "steal sibling if it's a raw
+                // leaf" trick below. Unlike that mid-climb case, an initial loss had no fallback here
+                // before: the retry loop mirroring this one (over next_p_id) only lives inside the
+                // while(stolen) body, so it was never reached if the very first steal failed -- this
+                // thread would silently do zero work for the entire shot, every shot, permanently
                 // starving any local seam/CRT whose other side only that thread could ever reach. Retry
                 // with the same next_p_id stride used everywhere else before giving up on this shot.
-                while (!stolen && next_p_id < my_partition_task_ids.size()) {
+                while (!stolen && next_p_id < my_obs_leaf_end) {
                     t = &shot.tasks[my_partition_task_ids[next_p_id]];
                     stolen = t->try_to_steal(shot_buffer_round);
                     next_p_id += next_p_inc;
@@ -2113,20 +2140,16 @@ void pm::DecodingUnit::decode_shots() {
                     if (DEBUG) t_out << "  solver: " << t->solver << "\n";
                     pm::Mwpm& solver = *t->solver;
                     solver.prepare_for_task(t, shot_id);
-#ifdef USE_SHMEM
                     if (DEBUG) t_out << "  solver bounds: " << solver.flooder.vb_left << "(vb_left) " << solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
 #ifdef ENABLE_DRAW_FLAGS
                     if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
-                        // t is never itself a seam/CRT now (those attach via special_tasks instead) --
-                        // always the plain "leaf partition" case.
                         size_t K_p = graph.num_partitions / graph.num_obs_patches;
                         size_t K_vb = K_p - 1;
-                        size_t patch = (t->is_fusion) ? t->part / K_vb : t->part / K_p;
+                        size_t patch = (size_t)t->obs_patch_id;
                         solver.flooder.p_offsets  = { K_p  * patch };
                         solver.flooder.vb_offsets = { K_vb * patch };
                     }
 #endif // ENABLE_DRAW_FLAGS
-#endif // USE_SHMEM
                     pm::process_timeline_until_completion(
                         solver,
                         hitsref,
@@ -2247,14 +2270,21 @@ void pm::DecodingUnit::decode_shots() {
 #endif  // USE_SHMEM
                     }
                     if (!t->special_tasks.empty()) {
-                        // Each attached special task's own divide_vb call (above) pruned *that*
-                        // special task's own regions_matched_to_virtual_boundary -- t's own list,
-                        // populated earlier by t->setup() before any special task ran, is now stale.
-                        // Write back whatever the last-processed special task ended up with (itself
-                        // built by pulling from whichever predecessor add_special_task chained it to
-                        // -- see decoding_task.h's own comment), so t's future parent's setup() call
-                        // reads the fully-pruned, up-to-date state.
-                        t->regions_matched_to_virtual_boundary = std::move(t->special_tasks.back()->regions_matched_to_virtual_boundary);
+                        // Copy-filter (not move -- every seam side's thread reads this same shared
+                        // list) to just t's own observable.
+                        const auto& src = t->special_tasks.back()->regions_matched_to_virtual_boundary;
+                        t->regions_matched_to_virtual_boundary.clear();
+                        if (DEBUG) t_out << "  REGION_FILTER t=" << (t->is_fusion ? "f" : "p") << t->part
+                                          << " t->obs_patch_id=" << t->obs_patch_id << std::endl << std::flush;
+                        for (auto* region : src) {
+                            int region_obs = (region->match.edge.loc_from) ? region->match.edge.loc_from->obs_patch_id : -1;
+                            bool keep = (region_obs == t->obs_patch_id);
+                            if (DEBUG) t_out << "    region=" << region << " node_obs_patch_id=" << region_obs
+                                              << " keep=" << keep << std::endl << std::flush;
+                            if (keep) {
+                                t->regions_matched_to_virtual_boundary.push_back(region);
+                            }
+                        }
                         back_divide_walk(t, shot, (int)shot_container_id, tid, &t_out);
                     }
                     // Unit-checkpointed extraction: when a chain checkpoint resolves (and isn't itself
@@ -2293,7 +2323,7 @@ void pm::DecodingUnit::decode_shots() {
                         stolen = false;
                         roots_i_solved.push_back({t});
                     }
-                    while (!stolen && next_p_id < my_partition_task_ids.size()) {
+                    while (!stolen && next_p_id < my_obs_leaf_end) {
                         t = &shot.tasks[my_partition_task_ids[next_p_id]];
                         stolen = t->try_to_steal(shot_buffer_round);
                         next_p_id += next_p_inc;

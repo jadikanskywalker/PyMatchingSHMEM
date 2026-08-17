@@ -58,11 +58,11 @@ shmem_threads=(8 16 32 64)
 
 # Fill sockets
 shmem_ntasks2_sockets=(1 1 1 1 2)
-shmem_ntasks2_ntps=(   2 2 2 2 1) # ntasks per socket
+shmem_ntasks2_ntps=(   0 0 2 2 1) # ntasks per socket
 
 shmem_ntasks4_nodes=(  1 1 1 1 2)
 shmem_ntasks4_sockets=(1 1 1 2 4)
-shmem_ntasks4_ntps=(   4 4 4 2 1)
+shmem_ntasks4_ntps=(   0 4 4 2 1)
 
 shmem_ntasks8_nodes=(  1 1 1 2 4)
 shmem_ntasks8_sockets=(1 1 2 4 8)

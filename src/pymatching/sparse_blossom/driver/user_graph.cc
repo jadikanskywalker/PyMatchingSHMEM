@@ -274,6 +274,11 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
 ) {
     std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
     pm::MatchingGraph& matching_graph = *matching_graph_ptr;
+    // Propagate each node's own observable id to the flooder's DetectorNode, for cross-observable
+    // region routing after a seam resolves.
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        matching_graph.nodes[i].obs_patch_id = nodes[i].observable_id;
+    }
 #ifdef USE_SHMEM
     const int num_nodes = nodes.size();
     for (int i=0; i < num_nodes; ++i) {
@@ -759,7 +764,7 @@ void pm::UserGraph::partition_nodes_by_obs_patch(const stim::DetectorErrorModel&
                 // start next p
                 round_counter = 1;
                 p_or_vb = true;
-                if (DEBUG) std::cout << "Starting p" << (global_p_offset + local_p) << "\n" << std::flush;
+                // if (DEBUG) std::cout << "Starting p" << (global_p_offset + local_p) << "\n" << std::flush;
             } else { // end of p
                 ++round_counter;
                 if (round_counter == M) {
@@ -767,7 +772,7 @@ void pm::UserGraph::partition_nodes_by_obs_patch(const stim::DetectorErrorModel&
                     ++local_p;
                     pending_vb_slot = local_vb_idx;
                     p_or_vb = false;
-                    if (DEBUG) std::cout << "Starting vb" << -(global_vb_offset + pending_vb_slot + 1) << "\n" << std::flush;
+                    // if (DEBUG) std::cout << "Starting vb" << -(global_vb_offset + pending_vb_slot + 1) << "\n" << std::flush;
                 }
             }
             if (obs_count == 0) ++num_rounds;
@@ -800,7 +805,7 @@ void pm::UserGraph::partition_nodes_by_obs_patch(const stim::DetectorErrorModel&
                 local_p        = 0;
                 local_vb_idx   = 0;
                 round_counter  = 1;
-                if (DEBUG) std::cout << "Entering OBS " << obs_count << "\nStarting p" << global_p_offset << "\n" << std::flush;
+                // if (DEBUG) std::cout << "Entering OBS " << obs_count << "\nStarting p" << global_p_offset << "\n" << std::flush;
             }
         }
         last_round = round;
@@ -809,7 +814,7 @@ void pm::UserGraph::partition_nodes_by_obs_patch(const stim::DetectorErrorModel&
             ++cross_obs_vb_count;
             virtual_boundaries.push_back({});
             last_cross_obs_id = obs_id_val;
-            if (DEBUG) std::cout << "Starting cross-seam vb" << -(K_vb * obs_count + cross_obs_vb_count) << "\n" << std::flush;
+            // if (DEBUG) std::cout << "Starting cross-seam vb" << -(K_vb * obs_count + cross_obs_vb_count) << "\n" << std::flush;
         }
 
         // Assign node_part_id for this node.

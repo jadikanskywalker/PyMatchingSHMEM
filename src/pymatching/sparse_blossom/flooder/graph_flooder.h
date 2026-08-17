@@ -83,27 +83,19 @@ struct GraphFlooder {
 
     GraphFlooder();
 
-#ifdef USE_SHMEM
-    // Construct with a shared graph pointer (shared across solvers)
-    explicit GraphFlooder(
-        std::shared_ptr<MatchingGraph> graph,
-        int solver_set_idx,
-        GraphFillRegion* shmem_buffer,
-        size_t shmem_buffer_size
-#ifdef ENABLE_DRAW_FLAGS
-        , const std::vector<int>* node_part_id = nullptr
-#endif
-    );
-#else
     // Construct with a shared graph pointer (shared across solvers)
     explicit GraphFlooder(
         std::shared_ptr<MatchingGraph> graph,
         int solver_set_idx
+#ifdef USE_SHMEM
+        , GraphFillRegion* shmem_buffer,
+        size_t shmem_buffer_size
+#endif
 #ifdef ENABLE_DRAW_FLAGS
         , const std::vector<int>* node_part_id = nullptr
 #endif
     );
-#endif
+
     explicit GraphFlooder(MatchingGraph graph);
     GraphFlooder(GraphFlooder&&) noexcept;
     MwpmEvent run_until_next_mwpm_notification();

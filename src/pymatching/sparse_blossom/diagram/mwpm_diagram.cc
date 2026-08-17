@@ -37,7 +37,6 @@ pm::pick_coords_for_drawing_from_dem(const stim::DetectorErrorModel &dem, float 
             continue;
         }
         auto &cs = p->second;
-#ifdef USE_SHMEM
         // The last coordinate may encode the observable axis.
         // Cross-observable (seam) nodes are encoded as -seam_idx
         // Decode to the visual midpoint (obs_a+obs_b)/2
@@ -49,7 +48,6 @@ pm::pick_coords_for_drawing_from_dem(const stim::DetectorErrorModel &dem, float 
                 cs[nc-2] = tmp;
             }
         }
-#endif
         if (cs.size() == 1) {
             coords.push_back({cs[0], 0});
         } else {
@@ -60,23 +58,8 @@ pm::pick_coords_for_drawing_from_dem(const stim::DetectorErrorModel &dem, float 
         double s = 1;
         for (size_t d = 2; d < cs.size(); d++) {
             s *= 0.66;
-// #ifdef USE_SHMEM
-//             // The last coordinate may encode the observable axis.
-//             // Cross-observable (seam) nodes are encoded as -seam_idx
-//             // Decode to the visual midpoint (obs_a+obs_b)/2
-//             double cd = cs[d];
-//             // if (config_parallel::division_strategy == config_parallel::OBS && d == cs.size() - 1) {
-//             //     if (cd < 0)
-//             //         cd = -cd;
-//             //     else
-//             //         continue;
-//             // }
-//             coords.back().first += cd * s;
-//             coords.back().second += cd * s / (d + 1);
-// #else
             coords.back().first += cs[d] * s;
             coords.back().second += cs[d] * s / (d + 1);
-// #endif
         }
     }
 
@@ -140,7 +123,6 @@ struct StateHelper {
     const std::vector<std::pair<float, float>> &boundary_coords;
     std::ostream &out;
 
-#ifdef USE_THREADS
 #ifdef ENABLE_DRAW_FLAGS
     bool should_include_node(size_t k) const {
         if (mwpm.flooder.node_part_id_ptr == nullptr) return true;
@@ -161,57 +143,32 @@ struct StateHelper {
     inline const DetectorNodeEphemeralFields &node_state(const DetectorNode &node) const {
         return node.state(mwpm.flooder.rotating_buffer_idx);
     }
-#endif
 
     inline GraphFillRegion *region_that_arrived(const DetectorNode &node) const {
-#ifdef USE_THREADS
         return node_state(node).region_that_arrived;
-#else
-        return node.region_that_arrived;
-#endif
     }
 
     inline GraphFillRegion *region_that_arrived_top(const DetectorNode &node) const {
-#ifdef USE_THREADS
         return node_state(node).region_that_arrived_top;
-#else
-        return node.region_that_arrived_top;
-#endif
     }
 
     inline DetectorNode *reached_from_source(const DetectorNode &node) const {
-#ifdef USE_THREADS
         return node_state(node).reached_from_source;
-#else
-        return node.reached_from_source;
-#endif
     }
 
     inline VaryingCT local_radius(const DetectorNode &node) const {
-#ifdef USE_THREADS
         return node.local_radius(mwpm.flooder.rotating_buffer_idx);
-#else
-        return node.local_radius();
-#endif
     }
 
     inline cumulative_time_int local_radius_at_time_bounded(
         const DetectorNode &node, cumulative_time_int time, const GraphFillRegion &region) const {
-#ifdef USE_THREADS
         return node.compute_local_radius_at_time_bounded_by_region(time, region, mwpm.flooder.rotating_buffer_idx);
-#else
-        return node.compute_local_radius_at_time_bounded_by_region(time, region);
-#endif
     }
 
     inline std::optional<float> stitch_radius_at_time(
         const DetectorNode &node, cumulative_time_int time, const GraphFillRegion &region, size_t neighbor_index) const {
-#ifdef USE_THREADS
         return node.compute_stitch_radius_at_time_bounded_by_region_towards_neighbor(
             time, region, neighbor_index, mwpm.flooder.rotating_buffer_idx);
-#else
-        return node.compute_stitch_radius_at_time_bounded_by_region_towards_neighbor(time, region, neighbor_index);
-#endif
     }
 
     std::pair<float, float> neighbor_coords(const DetectorNode &src, const DetectorNode *dst) {
@@ -292,10 +249,8 @@ struct StateHelper {
     void draw_detector_graph_edges() {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
-#ifdef USE_THREADS
 #ifdef ENABLE_DRAW_FLAGS
             if (!should_include_node(k)) continue;
-#endif
 #endif
             for (const auto *n2_ptr : n.neighbors) {
                 auto nc = neighbor_coords(n, n2_ptr);
@@ -316,10 +271,8 @@ struct StateHelper {
     void draw_unexcited_detector_nodes() {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
-#ifdef USE_THREADS
 #ifdef ENABLE_DRAW_FLAGS
             if (!should_include_node(k)) continue;
-#endif
 #endif
             if (reached_from_source(n) != &n) {
                 out << " <circle cx=\"" << coords[k].first << "\" cy=\"" << coords[k].second << "\" r=\"" << 3
@@ -333,10 +286,8 @@ struct StateHelper {
         std::set<GraphFillRegion *> regions;
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
-#ifdef USE_THREADS
 #ifdef ENABLE_DRAW_FLAGS
             if (!should_include_node(k)) continue;
-#endif
 #endif
             GraphFillRegion *r = region_that_arrived(n);
             while (r != nullptr) {
@@ -360,10 +311,8 @@ struct StateHelper {
     void draw_detection_events() {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
-#ifdef USE_THREADS
 #ifdef ENABLE_DRAW_FLAGS
             if (!should_include_node(k)) continue;
-#endif
 #endif
             if (reached_from_source(n) == &n) {
                 out << " <circle cx=\"" << coords[k].first << "\" cy=\"" << coords[k].second << "\" r=\"" << 3
@@ -376,10 +325,8 @@ struct StateHelper {
     void draw_pending_collisions() {
         for (size_t k = 0; k < ns.size(); k++) {
             const auto &n = ns[k];
-#ifdef USE_THREADS
 #ifdef ENABLE_DRAW_FLAGS
             if (!should_include_node(k)) continue;
-#endif
 #endif
             if (region_that_arrived_top(n) == nullptr) {
                 continue;
@@ -561,15 +508,9 @@ void pm::write_animated_decoding_svg_frames(
     for (auto &detection : detection_events) {
         mwpm.create_detection_event(&mwpm.flooder.graph.nodes[detection]);
     }
-#ifdef USE_THREADS
     auto region_top_for_node = [&](DetectorNode &node) -> GraphFillRegion * {
         return node.state(mwpm.flooder.rotating_buffer_idx).region_that_arrived_top;
     };
-#else
-    auto region_top_for_node = [&](DetectorNode &node) -> GraphFillRegion * {
-        return node.region_that_arrived_top;
-    };
-#endif
     auto check_if_done = [&]() {
         for (auto &detection : detection_events) {
             auto *region_top = region_top_for_node(mwpm.flooder.graph.nodes[detection]);

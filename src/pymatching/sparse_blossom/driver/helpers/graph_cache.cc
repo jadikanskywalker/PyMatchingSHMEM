@@ -7,7 +7,7 @@
 namespace {
 
 constexpr uint64_t GRAPH_CACHE_MAGIC = 0x484341474d5024ULL;
-constexpr uint32_t GRAPH_CACHE_VERSION = 1;
+constexpr uint32_t GRAPH_CACHE_VERSION = 2;  // bumped: UserNode::vb removed (dead field, never used)
 
 template <typename T>
 void write_pod(FILE* f, const T& value) {
@@ -103,9 +103,7 @@ void pm::write_user_graph_cache(
             write_pod(f, node.x);
             write_pod(f, node.y);
             write_pod(f, node.round);
-            int32_t vb = node.vb;
             int32_t observable_id = node.observable_id;
-            write_pod(f, vb);
             write_pod(f, observable_id);
         }
 
@@ -270,10 +268,8 @@ pm::UserGraph pm::read_user_graph_cache(
             read_pod(f, node.x);
             read_pod(f, node.y);
             read_pod(f, node.round);
-            int32_t vb, observable_id;
-            read_pod(f, vb);
+            int32_t observable_id;
             read_pod(f, observable_id);
-            node.vb = vb;
             node.observable_id = observable_id;
         }
 

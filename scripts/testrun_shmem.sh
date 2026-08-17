@@ -74,28 +74,27 @@ if [ -d "scorep_results" ]
     rm -r scorep_results
 fi
 
-# # need to find d=21 lattice surgery circuit
+# need to find d=21 lattice surgery circuit
 # rm *.01 circuit.stim *.b8 *.dem
-python3 ../scripts/gen_multi_obs.py \
-    --num_observables 4 \
-    --rounds $rounds \
-    --distance 7 \
-    --after_clifford_depolarization 0.1 \
-    --code repetition_code \
-    --task memory \
-    --num_surgery_gates 5 \
-    --surgery_duration 5 \
-    --circuit_out circuit.stim \
-    > error_model.dem
-# Sample detection events FROM THE DEM (not the circuit) so seam errors fire
-stim sample_dem \
-    --in error_model.dem \
-    --shots $shots \
-    --out detection_events.b8 \
-    --out_format b8 \
-    --obs_out actual_obs_flips.01 \
-    --obs_out_format 01
-
+# python3 ../scripts/gen_multi_obs.py \
+#     --num_observables 4 \
+#     --rounds $rounds \
+#     --distance 7 \
+#     --after_clifford_depolarization 0.1 \
+#     --code repetition_code \
+#     --task memory \
+#     --num_surgery_gates 5 \
+#     --surgery_duration 5 \
+#     --circuit_out circuit.stim \
+#     > error_model.dem
+# # Sample detection events FROM THE DEM (not the circuit) so seam errors fire
+# stim sample_dem \
+#     --in error_model.dem \
+#     --shots $shots \
+#     --out detection_events.b8 \
+#     --out_format b8 \
+#     --obs_out actual_obs_flips.01 \
+#     --obs_out_format 01
 
 # python scripts/gen_multi_obs.py \
 #     --num_observables 24 \
@@ -171,13 +170,13 @@ start_parallel=$(date +%s)
 export OMP_NUM_THREADS=$nthreads_shmem
 export SHMEM_SYMMETRIC_SIZE=16G
 # export LIBFABRIC_DEBUG=0
-# $SWHOME/sos_1.5_scalable/bin/oshrun  \
-#     -n $n \
-#     --map-by ppr:$ppn:package:PE=$nthreads_shmem \
-#     --bind-to core \
-#     --report-bindings \
-# ~/PyMatchingSHMEM/scripts/pe_output_wrapper.sh \
-~/PyMatchingSHMEM/build_threads/pymatching predict \
+$SWHOME/sos_1.5_scalable/bin/oshrun  \
+    -n $n \
+    --map-by ppr:$ppn:package:PE=$nthreads_shmem \
+    --bind-to core \
+    --report-bindings \
+~/PyMatchingSHMEM/scripts/pe_output_wrapper.sh \
+~/PyMatchingSHMEM/build_sos/pymatching predict \
     --dem error_model.dem \
     --in detection_events.b8 \
     --in_format b8 \
@@ -191,21 +190,6 @@ export SHMEM_SYMMETRIC_SIZE=16G
     --extract_preemptively \
     --draw_frames \
     > log_shmem.out 2>log_shmem.err
-
-# ~/PyMatchingSHMEM/build_threads/pymatching predict \
-#     --dem error_model.dem \
-#     --in detection_events.b8 \
-#     --in_format b8 \
-#     --out predicted_obs_flips__shmem.01 \
-#     --out_format 01 \
-#     --rounds_per_partition $M \
-#     --seam_buffer_size $k \
-#     --task_division_strategy observable \
-#     --use_threads \
-#     --extraction_unit_size 2 \
-#     --extract_preemptively \
-#     --draw_frames \
-#     > log_shmem.out 2>log_shmem.err
 
     # --dem ../testdems/error_model_48obs_d21_p001_640r.dem \
     # --in ../testdems/detection_events_48obs_d21_p001_640r_100s.b8 \

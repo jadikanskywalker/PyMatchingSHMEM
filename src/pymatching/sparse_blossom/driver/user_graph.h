@@ -56,8 +56,6 @@ class UserNode {
     bool is_boundary;
     // topological coordinates for partitioning
     double x, y, round;
-    int p = -1;
-    int vb = -1;
     int observable_id = -1;  /// Observable ID: -1 for cross-observable, >= 0 for observable index
 };
 
