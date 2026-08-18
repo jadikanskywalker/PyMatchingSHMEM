@@ -15,6 +15,7 @@
 #ifndef PYMATCHING2_DECODING_TASK_H
 #define PYMATCHING2_DECODING_TASK_H
 
+#include <algorithm>
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -357,16 +358,23 @@ struct LocalSeamTask : public SpecialTask {
     }
 
     // Combines regions from every child -- same shape as Task::setup(), just looping children instead
-    // of two fixed fields (left_child/right_child).
+    // of two fixed fields (left_child/right_child). Dedups on push: two children can resolve to the
+    // same underlying source (e.g. two seams connecting the same observable pair collapse both
+    // sides' own "last attached special task" to one shared predecessor), so the same region can
+    // otherwise be discovered more than once. children itself must stay un-deduped -- its size is
+    // the arrival count N in try_to_steal().
     void setup() override {
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
         for (TaskBase* c : children) {
             for (auto& region : c->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker)
-                    regions_to_unmatch.push_back(region);
-                else
-                    regions_matched_to_virtual_boundary.push_back(region);
+                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker) {
+                    if (std::find(regions_to_unmatch.begin(), regions_to_unmatch.end(), region) == regions_to_unmatch.end())
+                        regions_to_unmatch.push_back(region);
+                } else {
+                    if (std::find(regions_matched_to_virtual_boundary.begin(), regions_matched_to_virtual_boundary.end(), region) == regions_matched_to_virtual_boundary.end())
+                        regions_matched_to_virtual_boundary.push_back(region);
+                }
             }
         }
     }

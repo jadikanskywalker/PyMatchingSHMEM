@@ -19,6 +19,8 @@
 #include <iostream>
 #include <vector>
 
+#include "pymatching/sparse_blossom/config_parallel.h"
+
 namespace pm {
 
 /// World's simplest bulk memory owner.
@@ -63,6 +65,15 @@ struct Arena {
         // Marking first means any code holding a copy of p can see it's gone without racing the
         // destructor call itself, and avoids having an object considered "available" while its
         // destructor is still running.
+        if (DEBUG) {
+            // Types without their own `allocated` flag (e.g. AltTreeNode) have no protection at
+            // all against a double-del() -- this O(n) scan is a diagnostic-only safety net to
+            // catch that before it corrupts the heap (a second ~T() on an already-destructed
+            // vector-holding member is exactly a "double free" trigger).
+            if (std::find(available.begin(), available.end(), p) != available.end()) {
+                std::cout << "ERROR: Arena::del() called twice on same pointer p=" << p << std::endl << std::flush;
+            }
+        }
         if constexpr (requires (T t) { t.allocated; }) {
             p->allocated = false;
         }
