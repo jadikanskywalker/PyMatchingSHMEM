@@ -44,7 +44,7 @@ rm *.out *.err *.01 *.txt
 
 # # need to find d=21 lattice surgery circuit
 # rm *.01 circuit.stim *.b8 *.dem
-# python3 ../scripts/gen_multi_obs.py \
+# python3 ../dem_gen/scripts/gen_multi_obs.py \
 #     --num_observables 2 \
 #     --rounds 230 \
 #     --distance 21 \

@@ -2285,20 +2285,15 @@ void pm::DecodingUnit::decode_shots() {
                                 t->regions_matched_to_virtual_boundary.push_back(region);
                             }
                         }
-                        back_divide_walk(t, shot, (int)shot_container_id, tid, &t_out);
                     }
-                    // Unit-checkpointed extraction: when a chain checkpoint resolves (and isn't itself
-                    // waiting on a deferred span -- see defer_division/back_divide_walk above), divide
-                    // its own vb immediately (inline, not queued -- this is what makes it safe to
-                    // extract either side independently afterward) and post exactly one job, for
-                    // the unit that's now closed on BOTH sides. The *other* child (the new unit
-                    // just joined in) stays completely untouched -- it's still needed, intact, by
-                    // the *next* fusion's own solve, and must not be extracted yet. This also
-                    // covers the true root/last chain-link (itself tagged too) -- its own "closing"
-                    // unit gets divided+posted here; its still-reserved right child gets posted
-                    // separately once it's recognized as the root below (nothing more will ever
-                    // fuse with it).
+                    // Preemptive extraction: when a non-deferred unit connector is completed,
+                    // divide+post_left_child for any deferred connectors and the current connector
                     if (config_parallel::extract_preemptively && t->is_extraction_unit_connector && !t->defer_division) {
+                        if (!t->special_tasks.empty()) {
+                            // By definition, the connector that terminates a run of deferred
+                            // predecessors will have SpecialTask(s), because they cause the deferrence
+                            back_divide_walk(t, shot, (int)shot_container_id, tid, &t_out);
+                        }
                         divide_vb(shot, (int)shot_container_id, t->part, t->solver, tid, /*prune_target=*/t, &t_out);
                         Task* left = t->left_child;
                         Task* closed_unit = left->is_extraction_unit_connector
@@ -2341,23 +2336,16 @@ void pm::DecodingUnit::decode_shots() {
 #ifdef SCOREP_USER_ENABLE
                         SCOREP_USER_REGION_BEGIN(solution_extraction, "Solution Extraction", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
-                        // Post-solve extraction for this root's own subtree. Non-preemptive: the whole
-                        // tree is a balanced-over-units shape that was never divided/posted yet --
-                        // post_hoc_chunk_and_post walks it top-down via the extraction-role tags.
-                        // Preemptive: if the root is a chain connector, its own divide+"closing unit"
-                        // post already happened above at mark_solved time -- only its still-reserved
-                        // right child (the final unit, which nothing more will ever fuse with) needs
-                        // posting now. Otherwise (degenerate single-unit case, no connectors were ever
-                        // built), nothing has been divided/posted yet -- post root_task itself. Neither
-                        // branch needs to know about special_tasks -- any seam/CRT attached to root_task
-                        // already ran (and divided its own, separate vb id) during the climb above.
                         if (BARE_DEBUG) t_out << "T" << tid << " extracting solution for root part=" << root_task->part << std::endl << std::flush;
                         if (!config_parallel::extract_preemptively) {
+                            // Divide+post all extraction jobs
                             post_hoc_chunk_and_post(root_task, shot, (int)shot_container_id, tid, &t_out);
                         } else if (root_task->is_extraction_unit_connector) {
+                            // Divide+post root connector's right_child (final unit)
                             shot.post_extraction_job(
                                 ExtractionJob{(int)shot_container_id, root_task->right_child}, &t_out);
                         } else {
+                            // Divide+post root task (degenerative one unit case)
                             shot.post_extraction_job(ExtractionJob{(int)shot_container_id, root_task}, &t_out);
                         }
 #ifdef SCOREP_USER_ENABLE

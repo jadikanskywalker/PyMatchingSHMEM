@@ -46,9 +46,9 @@ if [ ! -d out ]
     mkdir out
 fi
 
-dem=../testdems/error_model_$dem_suffix.dem
-det=../testdems/detection_events_$det_suffix.b8
-flips=../testdems/actual_obs_flips_$det_suffix.01
+dem=~/PyMatchingSHMEM/testdems/error_model_$dem_suffix.dem
+det=~/PyMatchingSHMEM/testdems/detection_events_$det_suffix.b8
+flips=~/PyMatchingSHMEM/testdems/actual_obs_flips_$det_suffix.01
 echo $dem
 echo $det
 echo $flips

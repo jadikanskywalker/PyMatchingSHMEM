@@ -14,6 +14,7 @@
 #ifndef PYMATCHING2_SHMEM_ARENA_H
 #define PYMATCHING2_SHMEM_ARENA_H
 
+#include <iostream>
 #include <limits>
 
 #include <omp.h>
@@ -96,7 +97,20 @@ struct SHMEMArena {
         // Mark stale before destroying -- see arena.h's own del() for why (write must land while the
         // object is still formally alive, and before anything else could observe it as reused).
         if constexpr (requires (T t) { t.allocated; }) {
-            p->allocated = false;
+            // Atomic check-and-clear: a plain "if (!p->allocated) ...; p->allocated = false;" has a
+            // TOCTOU gap that a genuine concurrent double-del() (two threads racing to del() the same
+            // region) sails straight through -- both read allocated==true before either writes false,
+            // so neither trips a naive check. __atomic_exchange_n makes the read-and-clear one step,
+            // so exactly one caller can ever observe was_allocated==true for a given transition.
+            bool was_allocated = __atomic_exchange_n(&p->allocated, false, __ATOMIC_ACQ_REL);
+            if (!was_allocated) {
+                if (DEBUG) {
+                    // Lost the race (or this is a same-thread double-del()): p is already gone -- do
+                    // NOT destruct/free it again, that's exactly what corrupts the heap.
+                    std::cout << "ERROR: T" << omp_get_thread_num() << " called SHMEMArena::del() on deleted pointer p=" << p << std::endl << std::flush;
+                }
+                return;
+            }
         }
         p->~T();
         if (p >= shmem_buffer && p < shmem_buffer + shmem_buffer_size) {

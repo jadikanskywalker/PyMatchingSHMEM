@@ -76,7 +76,7 @@ fi
 
 # need to find d=21 lattice surgery circuit
 # rm *.01 circuit.stim *.b8 *.dem
-# python3 ../scripts/gen_multi_obs.py \
+# python3 ../dem_gen/scripts/gen_multi_obs.py \
 #     --num_observables 4 \
 #     --rounds $rounds \
 #     --distance 7 \
@@ -96,7 +96,7 @@ fi
 #     --obs_out actual_obs_flips.01 \
 #     --obs_out_format 01
 
-# python scripts/gen_multi_obs.py \
+# python dem_gen/scripts/gen_multi_obs.py \
 #     --num_observables 24 \
 #     --rounds 755 \
 #     --distance 21 \

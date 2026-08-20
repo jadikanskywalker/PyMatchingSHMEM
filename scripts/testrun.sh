@@ -51,7 +51,7 @@ fi
 
 if $build_circuit; then
     rm *.01 circuit.stim *.b8 *.dem
-    python3 ../scripts/gen_multi_obs.py \
+    python3 ../dem_gen/scripts/gen_multi_obs.py \
         --num_observables 4 \
         --rounds $rounds \
         --distance 7 \
