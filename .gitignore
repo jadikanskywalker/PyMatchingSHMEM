@@ -42,3 +42,17 @@ logs
 docs/doxygen
 tmp
 build*
+
+trace*
+*.out
+*.err
+*.01
+*.b8
+*.dem
+acc_results
+profiling_results
+bench_*
+testdems
+run*
+cscope*
+tags
