@@ -245,8 +245,8 @@ struct DecodingUnit {
     void prune_stale_regions_matched_to_vb(TaskBase* t);
 
     // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md). Universal
-    // across build configs -- both plain USE_THREADS and USE_SHMEM+USE_THREADS builds post to and
-    // drain the same job queue.
+    // across build configs -- both plain threads and USE_SHMEM builds post to and drain the same
+    // job queue.
 
     // Separates the two subgraphs joined at vb_id: loops every node in graph.vb_bounds[vb_id]
     // (not just ones with "hits" -- a blossom can span the vb without either side registering a hit

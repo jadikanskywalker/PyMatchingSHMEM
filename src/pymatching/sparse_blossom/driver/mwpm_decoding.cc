@@ -22,14 +22,12 @@
 
 #include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
 
-#ifdef USE_THREADS
 #include "../config_parallel.h"
 #include <omp.h>
 #include <fstream>
 #include <filesystem>
 #include "pymatching/sparse_blossom/diagram/mwpm_diagram.h"
 #include "pymatching/sparse_blossom/driver/parallel/decoding_unit.h"
-#endif
 
 #include "pymatching/sparse_blossom/driver/user_graph.h"
 #include <unordered_set>
@@ -97,28 +95,6 @@ pm::Mwpm pm::detector_error_model_to_mwpm(
     return user_graph.to_mwpm(num_distinct_weights, ensure_search_flooder_included);
 }
 
-// #ifdef USE_THREADS
-// pm::DecodingUnit pm::detector_error_model_to_decoding_unit(
-// #ifdef USE_SHMEM
-//     void* &nodes_ephemeral_fields_ptr,
-// #endif
-//     const stim::DetectorErrorModel& detector_error_model,
-//     pm::weight_int num_distinct_weights,
-//     bool ensure_search_flooder_included,
-//     bool enable_correlations) {
-//     auto user_graph =
-//         pm::detector_error_model_to_user_graph(detector_error_model, enable_correlations, num_distinct_weights);
-// #ifdef USE_SHMEM
-//     /* PEs allocate detector nodes in shared memory */
-//     nodes_ephemeral_fields_ptr = shmem_malloc(user_graph.nodes.size() * NUM_BUFFERS_PER_UNIT * sizeof(DetectorNodeEphemeralFields));
-//     return user_graph.to_decoding_unit(num_distinct_weights, (DetectorNodeEphemeralFields*) nodes_ephemeral_fields_ptr);
-// #else
-//     return user_graph.to_decoding_unit(num_distinct_weights);
-// #endif
-// }
-// #endif
-
-#ifdef USE_THREADS
 void pm::process_timeline_until_completion(
     pm::Mwpm& mwpm,
     const std::vector<uint64_t>& detection_events,
@@ -126,21 +102,15 @@ void pm::process_timeline_until_completion(
     bool draw_frames,
 #endif
     bool parallel,
-    int tid)
-#else
-void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events)
-#endif
-    {
+    int tid) {
     if (!mwpm.flooder.queue.empty()) {
         throw std::invalid_argument("!mwpm.flooder.queue.empty()");
     }
     mwpm.flooder.queue.cur_time = 0;
 
-#ifdef USE_THREADS
     mwpm.unmatch_virtual_boundaries_between_partitions();
 
     const int rotating_buffer_idx = mwpm.flooder.rotating_buffer_idx;
-#endif
 
     if (mwpm.flooder.negative_weight_detection_events.empty()) {
         // if (DEBUG) std::cout << "  DEBUG: no negative detection events" << std::endl;
@@ -166,11 +136,7 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
     } else {
         // First mark nodes with negative weight detection events
         for (auto& det : mwpm.flooder.negative_weight_detection_events) {
-#ifdef USE_THREADS
             mwpm.flooder.graph.nodes[det].state(rotating_buffer_idx).radius_of_arrival = 1;
-#else
-            mwpm.flooder.graph.nodes[det].radius_of_arrival = 1;
-#endif
         }
 
         // Now add detection events for unmarked nodes
@@ -179,44 +145,25 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
                 throw std::invalid_argument(
                     "Detection event index `" + std::to_string(detection) +
                     "` is larger than any detector node index in the graph.");
-#ifdef USE_THREADS
             if (!mwpm.flooder.graph.nodes[detection].state(rotating_buffer_idx).radius_of_arrival) {
-#else
-            if (!mwpm.flooder.graph.nodes[detection].radius_of_arrival) {
-#endif
                 if (detection + 1 > mwpm.flooder.graph.is_user_graph_boundary_node.size() ||
                     !mwpm.flooder.graph.is_user_graph_boundary_node[detection])
                     mwpm.create_detection_event(&mwpm.flooder.graph.nodes[detection]);
             } else {
                 // Unmark node
-#ifdef USE_THREADS
                 mwpm.flooder.graph.nodes[detection].state(rotating_buffer_idx).radius_of_arrival = 0;
-#else
-                mwpm.flooder.graph.nodes[detection].radius_of_arrival = 0;
-#endif
             }
         }
 
         for (auto& det : mwpm.flooder.negative_weight_detection_events) {
-#ifdef USE_THREADS
             if (mwpm.flooder.graph.nodes[det].state(rotating_buffer_idx).radius_of_arrival) {
                 mwpm.flooder.graph.nodes[det].state(rotating_buffer_idx).radius_of_arrival = 0;
-#else
-            if (mwpm.flooder.graph.nodes[det].radius_of_arrival) {
-                // Add a detection event if the node is still marked
-                mwpm.flooder.graph.nodes[det].radius_of_arrival = 0;
-#endif
-#ifdef USE_THREADS // Only add detection events for active non-virtual nodes
-// ===============
                 if (mwpm.flooder.graph.nodes[det].vb < 0 || (mwpm.flooder.graph.nodes[det].vb > mwpm.flooder.vb_left && mwpm.flooder.graph.nodes[det].vb < mwpm.flooder.vb_right))
-// ===============
-#endif
-                mwpm.create_detection_event(&mwpm.flooder.graph.nodes[det]);
+                    mwpm.create_detection_event(&mwpm.flooder.graph.nodes[det]);
             }
         }
     }
 
-#ifdef USE_THREADS
 #ifdef ENABLE_DRAW_FLAGS
 // ===============
     int frame = 0;
@@ -226,19 +173,14 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
     }
 // ===============
 #endif
-#endif
 
     while (true) {
         auto event = mwpm.flooder.run_until_next_mwpm_notification();
-#ifdef USE_THREADS
 #ifdef ENABLE_DRAW_FLAGS
-// ===============
         if (draw_frames) {
             draw_frame(mwpm, event, frame, parallel, tid);
             frame++;
         }
-// ===============
-#endif
 #endif
         if (event.event_type == pm::NO_EVENT)
             break;
@@ -248,8 +190,6 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
     // If some alternating tree nodes remain, a perfect matching cannot be found
     if (mwpm.node_arena.allocated.size() != mwpm.node_arena.available.size()
     ) {
-#ifdef USE_THREADS
-// ===============
         if (DEBUG) {
             std::cout << "DEBUG: No perfect matching found T" << omp_get_thread_num() << std::endl;
             std::cout << "    shot=" << mwpm.current_shot << "  task=" << (mwpm.task->is_fusion ? "f" : "p") << mwpm.task->part << std::endl
@@ -276,8 +216,6 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
             }
             // output_solution_state(mwpm, detection_events, parallel);
         }
-// ===============
-#endif
         mwpm.reset();
         throw std::invalid_argument(
             "No perfect matching could be found. This likely means that the syndrome has odd "
@@ -285,50 +223,27 @@ void process_timeline_until_completion(pm::Mwpm& mwpm, const std::vector<uint64_
     }
 }
 
-pm::MatchingResult 
-#ifdef USE_THREADS
-  pm::
-#endif
-shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
+pm::MatchingResult pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events) {
-#ifdef USE_THREADS
     const int rotating_buffer_idx = mwpm.flooder.rotating_buffer_idx;
-#endif
     pm::MatchingResult res;
     for (auto& i : detection_events) {
-#ifdef USE_THREADS
         if (mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived) {
             if (!mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived_top)
                 throw std::invalid_argument("Thread " + std::to_string(omp_get_thread_num()) + ": extracting solution, node has region_that_arrived but not region_that_arrived_top!");
             res += mwpm.shatter_blossom_and_extract_matches(mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived_top);
         }
-#else
-        if (mwpm.flooder.graph.nodes[i].region_that_arrived)
-            res += mwpm.shatter_blossom_and_extract_matches(mwpm.flooder.graph.nodes[i].region_that_arrived_top);
-#endif
     }
     return res;
 }
 
-void
-#ifdef USE_THREADS
-  pm::
-#endif
-shatter_blossoms_for_all_detection_events_and_extract_match_edges(
+void pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events) {
-#ifdef USE_THREADS
     const int rotating_buffer_idx = mwpm.flooder.rotating_buffer_idx;
-#endif
     for (auto& i : detection_events) {
-#ifdef USE_THREADS
         if (mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived)
             mwpm.shatter_blossom_and_extract_match_edges(
                 mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived_top, mwpm.flooder.match_edges);
-#else
-        if (mwpm.flooder.graph.nodes[i].region_that_arrived)
-            mwpm.shatter_blossom_and_extract_match_edges(
-                mwpm.flooder.graph.nodes[i].region_that_arrived_top, mwpm.flooder.match_edges);
-#endif
     }
 }
 
@@ -366,14 +281,10 @@ void pm::decode_detection_events(
     const std::vector<uint64_t>& detection_events,
     uint8_t* obs_begin_ptr,
     pm::total_weight_int& weight,
-    bool edge_correlations
-#ifdef USE_THREADS
-// ===============
-    , int shot
+    bool edge_correlations,
+    int shot
 #ifdef ENABLE_DRAW_FLAGS
     , bool draw_frames
-#endif
-// ===============
 #endif
     ) {
     if (edge_correlations) {
@@ -387,34 +298,22 @@ void pm::decode_detection_events(
         mwpm.search_flooder.graph.reweight_for_edges(edges);
     }
 
-#ifdef USE_THREADS
-// ===============
     if (DEBUG)
         output_detection_events(mwpm, detection_events, shot, false);
 #ifdef ENABLE_DRAW_FLAGS
     if (draw_frames)
         std::filesystem::create_directory("out_serial/frames/" + std::to_string(shot));
 #endif
-    // ===============
-#endif
 
     size_t num_observables = mwpm.flooder.graph.num_observables;
     process_timeline_until_completion(mwpm, detection_events
-#ifdef USE_THREADS
-// ===============
 #ifdef ENABLE_DRAW_FLAGS
         , draw_frames
 #endif
-// ===============
-#endif
     );
 
-#ifdef USE_THREADS
-// ===============
     if (DEBUG)
         output_solution_state(mwpm, detection_events, false);
-// ===============
-#endif
 
     if (num_observables > sizeof(pm::obs_int) * 8) {
         mwpm.flooder.match_edges.clear();
@@ -541,8 +440,6 @@ void pm::decode_detection_events_to_edges_with_edge_correlations(
     mwpm.search_flooder.graph.undo_reweights();
 }
 
-#ifdef USE_THREADS
-// ===============
 // DEBUG Functions
 void pm::setup_output_dirs(
 #ifdef ENABLE_DRAW_FLAGS
@@ -747,154 +644,3 @@ void pm::draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int frame_number, bool par
     pm::write_decoder_state_as_svg(mwpm.coords.first, mwpm.coords.second, mwpm, ev, out_file);
     out_file.close();
 }
-
-// DecodingTask Helper Functions
-// inline std::vector<uint64_t> create_detection_events_mask(const std::vector<uint64_t>& detection_events, std::vector<int> node_mask) {
-//     std::vector<uint64_t> detection_events_mask;
-//     int node_i = 0;
-//     int mask_size = node_mask.size();
-//     for (auto& det : detection_events) {
-//         while (node_i < mask_size && det > node_mask[node_i]) {
-//             ++node_i;
-//         }
-//         if (node_i == mask_size) {
-//             break;
-//         }
-//         if (det == node_mask[node_i]) {
-//             detection_events_mask.push_back(det); // COULD IMPROVE
-//         }
-//     }
-//     return detection_events_mask;
-// }
-
-// inline void solve_task(DecodingUnit& unit, Task* task, int tid, int shot,
-//     //  const std::vector<uint64_t>& detection_events,
-//     int draw_frames) {
-//     task->setup();
-//     auto& solver = *unit.solvers[tid];
-//     // std::vector<int> node_mask;
-//     // if (!task->is_fusion) {
-//     //     node_mask = unit.partitions[task->part];
-//     // } else {
-//     //     node_mask = unit.virtual_boundaries[task->part];
-//     // }
-//     solver.prepare_for_task(task, shot);
-//     // auto detection_events_mask = create_detection_events_mask(detection_events, node_mask);
-//     if (DEBUG && omp_get_thread_num()==0) {
-//         output_detector_nodes(solver, true);
-//     }
-//     auto& hits = (task->is_fusion) ? unit.hits.virtual_boundary_hits[task->part] : unit.hits.partition_hits[task->part];
-//     process_timeline_until_completion(solver, hits, draw_frames, true, tid);
-//     if (DEBUG) {
-//         output_solution_state(solver, hits, true);
-//     }
-// }
-
-// void pm::decode_detection_events_using_threads(
-//     DecodingUnit unit,
-//     const std::vector<uint64_t>& detection_events,
-//     uint8_t* obs_begin_ptr,
-//     pm::total_weight_int& weight,
-//     bool edge_correlations,
-//     int shot,
-//     bool draw_frames
-// ) {
-//     if (edge_correlations) {
-//         throw std::invalid_argument("Edge correlations are not yet implemented in parallel.");
-//     }
-
-//     auto &mwpm = *unit.solvers[0];
-
-//     if (DEBUG)
-//         output_detection_events(mwpm, detection_events, shot, true);
-//     if (draw_frames)
-//         std::filesystem::create_directory("out_parallel/frames/" + std::to_string(shot));
-
-//     size_t num_observables = mwpm.flooder.graph.num_observables;
-
-//     unit.partition_detection_events(detection_events);
-
-//     // if (DEBUG) {
-//     //     std::cout << "Starting shot " << shot << std::endl;
-//     // }
-//     // std::vector<std::stringstream> thread_streams(num_threads);
-//     #pragma omp parallel
-//     {
-//         int tid = omp_get_thread_num();
-//         int num_threads = omp_get_num_threads();
-//         try {
-//             if (draw_frames)
-//                 std::filesystem::create_directory("out_parallel/frames/" + std::to_string(shot) + "/t" + std::to_string(tid));
-
-//             std::queue<int> partition_tasks;
-//             // std::queue<Task *> fusion_tasks;
-//             for (int i = tid; i < unit.num_partitions; i += num_threads) {
-//                 partition_tasks.push(i);
-//             }
-//             Task *t = &(*unit.tasks)[partition_tasks.front()];
-//             partition_tasks.pop();
-//             bool stolen = t->try_to_steal_leaf(shot);
-//             while (true) {
-//                 if (stolen) {
-//                     // Got task
-//                     // if (DEBUG) {
-//                         // std::cout << "Thread " << tid << " solving " << (t->is_fusion ? "f" : "p") << t->part << std::endl;
-//                     // }
-//                     unit.solve_task(t, tid, shot, draw_frames);
-//                     t->mark_solved(shot);
-//                     // Try to steal parent
-//                     if (t->parent) {
-//                         stolen = t->try_to_steal_parent();
-//                         t = t->parent;
-//                     } else {
-//                         stolen = false;
-//                     }
-//                 } else if (!partition_tasks.empty()) {
-//                     t = &(*unit.tasks)[partition_tasks.front()];
-//                     partition_tasks.pop();
-//                     stolen = t->try_to_steal_leaf(shot);
-//                 } else {
-//                     break;
-//                 }
-//             }
-//         } catch (const std::exception &e) {
-//             #pragma omp critical
-//             {
-//                 std::cerr << "ERROR: Thread " << tid << " caught exception: " << e.what() << std::endl;
-//             }
-//         } catch (...) {
-//             #pragma omp critical
-//             {
-//                 std::cerr << "ERROR: Thread " << tid << " caught unknown exception." << std::endl;
-//             }
-//         }
-//     }
-
-//     if (num_observables > sizeof(pm::obs_int) * 8) {
-//         mwpm.flooder.match_edges.clear();
-//         shatter_blossoms_for_all_detection_events_and_extract_match_edges(mwpm, detection_events);
-//         if (!mwpm.flooder.negative_weight_detection_events.empty())
-//             shatter_blossoms_for_all_detection_events_and_extract_match_edges(
-//                 mwpm, mwpm.flooder.negative_weight_detection_events);
-//         mwpm.extract_paths_from_match_edges(mwpm.flooder.match_edges, obs_begin_ptr, weight);
-
-//         // XOR negative weight observables
-//         for (auto& obs : mwpm.flooder.negative_weight_observables)
-//             *(obs_begin_ptr + obs) ^= 1;
-//         // Add negative weight sum to blossom solution weight
-//         weight += mwpm.flooder.negative_weight_sum;
-//     } else {
-//         pm::MatchingResult bit_packed_res =
-//             shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(mwpm, detection_events);
-//         if (!mwpm.flooder.negative_weight_detection_events.empty())
-//             bit_packed_res += shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
-//                 mwpm, mwpm.flooder.negative_weight_detection_events);
-//         // XOR in negative weight observable mask
-//         bit_packed_res.obs_mask ^= mwpm.flooder.negative_weight_obs_mask;
-//         // Translate observable mask into bit vector
-//         fill_bit_vector_from_obs_mask(bit_packed_res.obs_mask, obs_begin_ptr, num_observables);
-//         // Add negative weight sum to blossom solution weight
-//         weight = bit_packed_res.weight + mwpm.flooder.negative_weight_sum;
-//     }
-// }
-#endif

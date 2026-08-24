@@ -34,7 +34,7 @@ enum ShotStatus : uint64_t { READY, PUT_SUMMARY, PUT_RESULT, WROTE_RESULT };
 
 // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md Design §3): a
 // self-describing extraction job, unconditional across build configs since checkpoint chains and
-// post-hoc chunking both run under plain USE_THREADS too, not just USE_SHMEM. Any thread can process
+// post-hoc chunking both run under plain threads too, not just USE_SHMEM. Any thread can process
 // a job regardless of which shot/root it's nominally working on. A job always names a fully-closed
 // unit subtree -- closed meaning both its boundaries (if any) have already been "divided" (see
 // DecodingUnit::divide_vb) before the job is posted, so it's safe to extract independently, by any
