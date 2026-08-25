@@ -16,10 +16,24 @@
 
 #include <limits>
 
-pm::SearchFlooder::SearchFlooder() : target_type(NO_TARGET) {
+pm::SearchFlooder::SearchFlooder()
+    : graph_ptr(std::make_shared<SearchGraph>()), graph(*graph_ptr), target_type(NO_TARGET) {
 }
 
-pm::SearchFlooder::SearchFlooder(pm::SearchGraph graph) : graph(std::move(graph)), target_type(NO_TARGET) {
+pm::SearchFlooder::SearchFlooder(pm::SearchGraph graph_val)
+    : graph_ptr(std::make_shared<SearchGraph>(std::move(graph_val))), graph(*graph_ptr), target_type(NO_TARGET) {
+}
+
+pm::SearchFlooder::SearchFlooder(std::shared_ptr<pm::SearchGraph> graph, int solver_set_idx)
+    : graph_ptr(std::move(graph)), graph(*graph_ptr), rotating_buffer_idx(solver_set_idx), target_type(NO_TARGET) {
+}
+
+inline bool pm::SearchFlooder::is_active(const pm::SearchDetectorNode* node) const {
+    if (node->vb < 0)
+        return true;
+    if (node->vb > vb_left && node->vb < vb_right)
+        return true;
+    return (node->vb == vb);  // OBS seam vb
 }
 
 std::pair<size_t, pm::cumulative_time_int> pm::SearchFlooder::find_next_event_at_node_returning_neighbor_index_and_time(
@@ -27,11 +41,13 @@ std::pair<size_t, pm::cumulative_time_int> pm::SearchFlooder::find_next_event_at
     pm::cumulative_time_int best_time = std::numeric_limits<cumulative_time_int>::max();
     size_t best_neighbor = SIZE_MAX;
 
+    auto &detector_node_state = detector_node.state(rotating_buffer_idx);
+
     size_t start = 0;
     if (!detector_node.neighbors.empty() && detector_node.neighbors[0] == nullptr) {
         if (target_type == BOUNDARY) {
             auto weight = detector_node.neighbor_weights[0];
-            auto collision_time = queue.cur_time + weight - (queue.cur_time - detector_node.distance_from_source);
+            auto collision_time = queue.cur_time + weight - (queue.cur_time - detector_node_state.distance_from_source);
             if (collision_time < best_time) {
                 best_time = collision_time;
                 best_neighbor = 0;
@@ -45,16 +61,21 @@ std::pair<size_t, pm::cumulative_time_int> pm::SearchFlooder::find_next_event_at
         auto weight = detector_node.neighbor_weights[i];
         auto neighbor = detector_node.neighbors[i];
 
+        if (!is_active(neighbor))  // never a candidate, never queued, never settled
+            continue;
+
+        auto &neighbor_state = neighbor->state(rotating_buffer_idx);
+
         pm::cumulative_time_int collision_time;
 
-        if (neighbor->reached_from_source == detector_node.reached_from_source) {
+        if (neighbor_state.reached_from_source == detector_node_state.reached_from_source) {
             continue;
-        } else if (!neighbor->reached_from_source) {
-            collision_time = queue.cur_time + weight - (queue.cur_time - detector_node.distance_from_source);
+        } else if (!neighbor_state.reached_from_source) {
+            collision_time = queue.cur_time + weight - (queue.cur_time - detector_node_state.distance_from_source);
         } else {
-            // neighbor->reached_from_source != detector_node.reached_from_source
-            auto covered_from_this_node = queue.cur_time - detector_node.distance_from_source;
-            auto covered_from_neighbor = queue.cur_time - neighbor->distance_from_source;
+            // neighbor_state.reached_from_source != detector_node_state.reached_from_source
+            auto covered_from_this_node = queue.cur_time - detector_node_state.distance_from_source;
+            auto covered_from_neighbor = queue.cur_time - neighbor_state.distance_from_source;
             collision_time = queue.cur_time + (weight - covered_from_this_node - covered_from_neighbor) / 2;
         }
 
@@ -69,17 +90,19 @@ std::pair<size_t, pm::cumulative_time_int> pm::SearchFlooder::find_next_event_at
 
 void pm::SearchFlooder::reschedule_events_at_search_detector_node(pm::SearchDetectorNode &detector_node) {
     auto x = find_next_event_at_node_returning_neighbor_index_and_time(detector_node);
+    auto &detector_node_state = detector_node.state(rotating_buffer_idx);
     if (x.first == SIZE_MAX) {
-        detector_node.node_event_tracker.set_no_desired_event();
+        detector_node_state.node_event_tracker.set_no_desired_event();
     } else {
-        detector_node.node_event_tracker.set_desired_event({&detector_node, cyclic_time_int{x.second}}, queue);
+        detector_node_state.node_event_tracker.set_desired_event({&detector_node, cyclic_time_int{x.second}}, queue);
     }
 }
 
 void pm::SearchFlooder::do_search_starting_at_empty_search_detector_node(pm::SearchDetectorNode *src) {
-    src->reached_from_source = src;
-    src->index_of_predecessor = SIZE_MAX;
-    src->distance_from_source = 0;
+    auto &src_state = src->state(rotating_buffer_idx);
+    src_state.reached_from_source = src;
+    src_state.index_of_predecessor = SIZE_MAX;
+    src_state.distance_from_source = 0;
     reached_nodes.push_back(src);
     reschedule_events_at_search_detector_node(*src);
 }
@@ -87,26 +110,29 @@ void pm::SearchFlooder::do_search_starting_at_empty_search_detector_node(pm::Sea
 void pm::SearchFlooder::do_search_exploring_empty_detector_node(
     pm::SearchDetectorNode &empty_node, size_t empty_to_from_index) {
     auto from_node = empty_node.neighbors[empty_to_from_index];
-    empty_node.reached_from_source = from_node->reached_from_source;
-    empty_node.index_of_predecessor = empty_to_from_index;
-    empty_node.distance_from_source =
-        empty_node.neighbor_weights[empty_to_from_index] + from_node->distance_from_source;
+    auto &from_node_state = from_node->state(rotating_buffer_idx);
+    auto &empty_node_state = empty_node.state(rotating_buffer_idx);
+    empty_node_state.reached_from_source = from_node_state.reached_from_source;
+    empty_node_state.index_of_predecessor = empty_to_from_index;
+    empty_node_state.distance_from_source =
+        empty_node.neighbor_weights[empty_to_from_index] + from_node_state.distance_from_source;
     reached_nodes.push_back(&empty_node);
     reschedule_events_at_search_detector_node(empty_node);
 }
 
 pm::SearchGraphEdge pm::SearchFlooder::do_look_at_node_event(pm::SearchDetectorNode &node) {
     auto next = find_next_event_at_node_returning_neighbor_index_and_time(node);
+    auto &node_state = node.state(rotating_buffer_idx);
     if (next.second == queue.cur_time) {
         auto dst = node.neighbors[next.first];
         if (!dst) {
             // Found boundary (and must have target_type == BOUNDARY). Return collision edge for search to terminate.
             return {&node, next.first};
-        } else if (node.reached_from_source && !dst->reached_from_source) {
+        } else if (node_state.reached_from_source && !dst->state(rotating_buffer_idx).reached_from_source) {
             do_search_exploring_empty_detector_node(*dst, dst->index_of_neighbor(&node));
             // Need to revisit node immediately, since the search hasn't finished and other events may need to be
             // handled along other adjacent edges.
-            node.node_event_tracker.set_desired_event(
+            node_state.node_event_tracker.set_desired_event(
                 {
                     &node,
                     cyclic_time_int{queue.cur_time},
@@ -118,7 +144,7 @@ pm::SearchGraphEdge pm::SearchFlooder::do_look_at_node_event(pm::SearchDetectorN
         }
     } else if (next.first != SIZE_MAX) {
         // Need to revisit this node, but at a later time
-        node.node_event_tracker.set_desired_event(
+        node_state.node_event_tracker.set_desired_event(
             {
                 &node,
                 cyclic_time_int{next.second},
@@ -139,7 +165,7 @@ pm::SearchGraphEdge pm::SearchFlooder::run_until_collision(pm::SearchDetectorNod
 
     while (!queue.empty()) {
         FloodCheckEvent ev = queue.dequeue();
-        if (ev.data_look_at_search_node->node_event_tracker.dequeue_decision(ev, queue)) {
+        if (ev.data_look_at_search_node->state(rotating_buffer_idx).node_event_tracker.dequeue_decision(ev, queue)) {
             auto collision_edge = do_look_at_node_event(*ev.data_look_at_search_node);
             if (collision_edge.detector_node) {
                 return collision_edge;
@@ -151,7 +177,7 @@ pm::SearchGraphEdge pm::SearchFlooder::run_until_collision(pm::SearchDetectorNod
 
 void pm::SearchFlooder::reset_graph() {
     for (auto &detector_node : reached_nodes)
-        detector_node->reset();
+        detector_node->reset(rotating_buffer_idx);
     reached_nodes.clear();
 }
 
@@ -161,7 +187,9 @@ void pm::SearchFlooder::reset() {
 }
 
 pm::SearchFlooder::SearchFlooder(pm::SearchFlooder &&other) noexcept
-    : graph(std::move(other.graph)),
+    : graph_ptr(std::move(other.graph_ptr)),
+      graph(*graph_ptr),
+      rotating_buffer_idx(other.rotating_buffer_idx),
       queue(std::move(other.queue)),
       reached_nodes(std::move(other.reached_nodes)),
       target_type(other.target_type) {

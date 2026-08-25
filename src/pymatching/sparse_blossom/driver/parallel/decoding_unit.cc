@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <limits>
 #include <omp.h>
 #include <set>
 #include <unordered_map>
@@ -80,6 +81,11 @@ pm::DecodingUnit::DecodingUnit(
     );
     if (graph.num_partitions <= 0) {
         throw std::invalid_argument("Graph partitioning produced no partitions. Check --rounds_per_partition.");
+    }
+    needs_search_flooder =
+        ensure_search_flooder_included || (graph.graph_ptr->num_observables > sizeof(pm::obs_int) * 8);
+    if (needs_search_flooder) {
+        search_graph_ptr = user_graph.to_shared_search_graph(num_distinct_weights);
     }
 #ifdef USE_SHMEM
     // Bound k
@@ -1040,8 +1046,8 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
 // Mwpm/GraphFlooder is unnecessary for a remote partition -- only its SHMEMArena (bitmap + buffer
 // pointer) is, see the remote_arenas block below and region_arena_for().
 void pm::DecodingUnit::build_solvers() {
-    if (ensure_search_flooder_included || enable_correlations) {
-        throw std::invalid_argument("Correlations and SearchFlooder are not yet supported with threads");
+    if (enable_correlations) {
+        throw std::invalid_argument("Correlations are not yet supported with threads");
     }
 #ifdef ENABLE_SHOT_BUFFERS
     const int num_shot_containers = NUM_BUFFERS_PER_UNIT;
@@ -1058,19 +1064,28 @@ void pm::DecodingUnit::build_solvers() {
 #ifdef USE_SHMEM
             if (DEBUG) std::cout << "solver: " << idx*num_solvers_per_buffer + t << "  " << get_regions_ptr(idx, global_partition) << std::endl << std::flush;
 #endif
-            solvers.emplace_back(
-                std::make_shared<pm::Mwpm>(pm::GraphFlooder(
-                    graph.graph_ptr,
-                    idx
+            pm::GraphFlooder gf(
+                graph.graph_ptr,
+                idx
 #ifdef USE_SHMEM
-                    ,
-                    get_regions_ptr(idx, global_partition),
-                    regions_nelems_per_solver
+                ,
+                get_regions_ptr(idx, global_partition),
+                regions_nelems_per_solver
 #endif
 #ifdef ENABLE_DRAW_FLAGS
-                    , &graph.node_part_id
+                , &graph.node_part_id
 #endif
-                    )));
+                );
+            if (needs_search_flooder) {
+                // Every solver on a given shot container shares the same shot-container-id slot
+                // (idx, not idx*num_solvers_per_buffer+t) into the SearchGraph's ephemeral fields --
+                // safe because SearchFlooder::is_active bounds each search to its own task's
+                // partition, so concurrent solvers on the same shot can never settle the same node.
+                solvers.emplace_back(std::make_shared<pm::Mwpm>(
+                    std::move(gf), pm::SearchFlooder(search_graph_ptr, (int)idx)));
+            } else {
+                solvers.emplace_back(std::make_shared<pm::Mwpm>(std::move(gf)));
+            }
             solvers.back()->flooder.sync_negative_weight_observables_and_detection_events();
         }
     }
@@ -1802,7 +1817,7 @@ void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t s
     }
 
     if (DEBUG && t_out) {
-        *t_out << "  EXTRACT_CRT part=" << crt.part
+        *t_out << "  EXTRACT_CRT tid=" << tid << " part=" << crt.part
                << " p=[" << p_lo << ", " << p_hi << "]"
                << " vb=[" << vb_lo << ", " << vb_hi << "]"
                << " solver=" << crt.solver << std::endl << std::flush;
@@ -1819,6 +1834,15 @@ void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t s
         // thread ever touches its own CRT/connector's solver+shot.res at this point -- see plan
         // this-is-a-broader-purrfect-crystal.md Design §10).
         do_walk();
+        // set_vb_to_part=false: crt's own seam was already divided and must stay excluded here --
+        // the local window on this side and this received window are extracted separately.
+        solver.prepare_for_extraction(&crt, /*set_vb_to_part=*/false);
+        if (DEBUG && t_out) {
+            *t_out << "    EXTRACT_CRT tid=" << tid << " search_flooder vb=" << solver.search_flooder.vb
+                   << " vb_left=" << solver.search_flooder.vb_left
+                   << " vb_right=" << solver.search_flooder.vb_right
+                   << " match_edges=" << solver.flooder.match_edges.size() << std::endl << std::flush;
+        }
         solver.extract_paths_from_match_edges(solver.flooder.match_edges, shot.res.obs_crossed.data(), shot.res.weight);
         solver.flooder.match_edges.clear();
     } else {
@@ -1836,9 +1860,14 @@ void pm::DecodingUnit::prune_stale_regions_matched_to_vb(TaskBase* t) {
         list.end());
 }
 
-void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, int vb_id, pm::Mwpm* solver_arg, int tid, TaskBase* prune_target, std::ofstream* t_out) {
+void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, TaskBase* range_task, int tid, TaskBase* prune_target, std::ofstream* t_out) {
+    int vb_id = range_task->part;
     if (DEBUG && t_out) {
-        *t_out << "  DIVIDE_VB vb=" << vb_id << " solver=" << solver_arg
+        *t_out << "  DIVIDE_VB tid=" << tid << " vb=" << vb_id << " range_task=" << static_cast<void*>(range_task)
+               << " range_task->vb_marker=" << range_task->vb_marker
+               << " range_task->vb_left=" << range_task->vb_left
+               << " range_task->vb_right=" << range_task->vb_right
+               << " solver=" << range_task->solver
                << " prune_target=" << static_cast<void*>(prune_target) << std::endl << std::flush;
     }
     // Loop every node in the vb's range (not just ones with "hits" -- a blossom can span the vb
@@ -1849,13 +1878,20 @@ void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, int
     // whichever solver this thread (or another) is legitimately still using for its own in-flight
     // work at this exact moment -- a real, previously-hit crash.
     auto& vb_bounds = graph.vb_bounds[vb_id];
-    auto& solver = *solver_arg;
+    auto& solver = *range_task->solver;
     bool extended = shot.num_observables > sizeof(pm::obs_int) * 8;
     if (extended) {
         // No synchronization needed: this thread owns solver exclusively here (see Design §10).
         for (size_t i = vb_bounds.first; i <= vb_bounds.second; ++i) {
             auto* region = graph.graph_ptr->nodes[i].state(shot_container_id).region_that_arrived_top;
             if (region) solver.shatter_blossom_and_extract_match_edges(region, solver.flooder.match_edges);
+        }
+        solver.prepare_for_extraction(range_task);
+        if (DEBUG && t_out) {
+            *t_out << "    DIVIDE_VB tid=" << tid << " search_flooder vb=" << solver.search_flooder.vb
+                   << " vb_left=" << solver.search_flooder.vb_left
+                   << " vb_right=" << solver.search_flooder.vb_right
+                   << " match_edges=" << solver.flooder.match_edges.size() << std::endl << std::flush;
         }
         solver.extract_paths_from_match_edges(solver.flooder.match_edges, shot.res.obs_crossed.data(), shot.res.weight);
         solver.flooder.match_edges.clear();
@@ -1896,7 +1932,7 @@ void pm::DecodingUnit::back_divide_walk(
     }
     for (auto it = deferred.rbegin(); it != deferred.rend(); ++it) {
         Task* link = *it;
-        divide_vb(shot, shot_container_id, link->part, link->solver, tid, link, t_out);
+        divide_vb(shot, shot_container_id, link, tid, link, t_out);
         Task* left = link->left_child;
         Task* closed_unit = left->is_extraction_unit_connector ? left->right_child : left;
         shot.post_extraction_job(ExtractionJob{shot_container_id, closed_unit}, t_out);
@@ -1906,8 +1942,11 @@ void pm::DecodingUnit::back_divide_walk(
 void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, const ExtractionJob& job, int tid, std::ofstream* t_out) {
     Task* root = job.subtree_root;
     if (DEBUG && t_out) {
-        *t_out << "  PROCESS_JOB " << (root->is_fusion ? "vb=" : "p=") << root->part
-               << " task=" << static_cast<void*>(root) << std::endl << std::flush;
+        *t_out << "  PROCESS_JOB tid=" << tid << " " << (root->is_fusion ? "vb=" : "p=") << root->part
+               << " task=" << static_cast<void*>(root)
+               << " root->vb_marker=" << root->vb_marker
+               << " root->vb_left=" << root->vb_left
+               << " root->vb_right=" << root->vb_right << std::endl << std::flush;
     }
     // Any solver from this shot_container_id block would work as scratch here (region ownership is
     // globally node-indexed, not solver-private) -- use the subtree root's own already-assigned solver.
@@ -1939,6 +1978,13 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, const Extract
 
     if (extended) {
         do_walk();
+        solver.prepare_for_extraction(root);
+        if (DEBUG && t_out) {
+            *t_out << "    PROCESS_JOB tid=" << tid << " search_flooder vb=" << solver.search_flooder.vb
+                   << " vb_left=" << solver.search_flooder.vb_left
+                   << " vb_right=" << solver.search_flooder.vb_right
+                   << " match_edges=" << solver.flooder.match_edges.size() << std::endl << std::flush;
+        }
         solver.extract_paths_from_match_edges(solver.flooder.match_edges, shot.res.obs_crossed.data(), shot.res.weight);
         solver.flooder.match_edges.clear();
     } else {
@@ -1957,7 +2003,7 @@ void pm::DecodingUnit::post_hoc_chunk_and_post(Task* node, ShotContainer& shot, 
     // children independently safe to post/recurse into, regardless of order or which thread
     // eventually drains them -- then recurse into each. Single top-down pass, every node visited
     // exactly once, so there's no risk of double-posting a subtree.
-    divide_vb(shot, shot_container_id, node->part, node->solver, tid, /*prune_target=*/nullptr, t_out);
+    divide_vb(shot, shot_container_id, node, tid, /*prune_target=*/nullptr, t_out);
     // Non-preemptive OBS/ROUND trees never attach a CRT as a child (see do_walk's own comment above) --
     // always genuinely Task* here.
     post_hoc_chunk_and_post(static_cast<Task*>(node->left_child), shot, shot_container_id, tid, t_out);
@@ -2191,7 +2237,7 @@ void pm::DecodingUnit::decode_shots() {
 #endif
                                     true, tid);
                                 seam->mark_solved();
-                                divide_vb(shot, (int)shot_container_id, seam->part, seam->solver, tid, seam, &t_out);
+                                divide_vb(shot, (int)shot_container_id, seam, tid, seam, &t_out);
                                 // Round-tagged, not a plain bool -- see decoding_task.h LocalSeamTask::
                                 // ready's own comment for why a stale value would otherwise be possible.
                                 seam->mark_ready(shot_buffer_round);
@@ -2238,7 +2284,7 @@ void pm::DecodingUnit::decode_shots() {
                                 // doing the work). Divide crt->part first (now that it's fully
                                 // solved) so the received window can be safely extracted alongside
                                 // it, in the same breath.
-                                divide_vb(shot, (int)shot_container_id, crt->part, crt->solver, tid, /*prune_target=*/crt, &t_out);
+                                divide_vb(shot, (int)shot_container_id, crt, tid, /*prune_target=*/crt, &t_out);
                                 extract_crt_received_window(shot, shot_container_id, *crt, tid, &t_out);
 #ifdef ENABLE_DRAW_FLAGS
                                 if (draw_frames) draw_frame(crt_solver, pm::MwpmEvent::no_event(), 1001, true, tid);
@@ -2294,7 +2340,7 @@ void pm::DecodingUnit::decode_shots() {
                             // predecessors will have SpecialTask(s), because they cause the deferrence
                             back_divide_walk(t, shot, (int)shot_container_id, tid, &t_out);
                         }
-                        divide_vb(shot, (int)shot_container_id, t->part, t->solver, tid, /*prune_target=*/t, &t_out);
+                        divide_vb(shot, (int)shot_container_id, t, tid, /*prune_target=*/t, &t_out);
                         Task* left = t->left_child;
                         Task* closed_unit = left->is_extraction_unit_connector
                             ? left->right_child   // Fk, k>1: U(k-1), just closed on its right
@@ -2451,6 +2497,22 @@ void pm::DecodingUnit::decode_shots() {
                         if (!any_solver.flooder.negative_weight_detection_events.empty()) {
                             pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
                                 any_solver, any_solver.flooder.negative_weight_detection_events);
+                            // Runs single-threaded after every extraction job for this shot has
+                            // finished (see the pending_extraction_jobs spin above) and spans
+                            // negative-weight detection events across this whole PE's local graph,
+                            // not one task's partition -- no concurrent search to bound against, so
+                            // make is_active() accept every node instead of scoping to one task.
+                            any_solver.search_flooder.vb_left = -1;
+                            any_solver.search_flooder.vb_right = std::numeric_limits<int>::max();
+                            any_solver.search_flooder.vb = -1;
+                            if (DEBUG) {
+                                t_out << "  EXTRACT_FINAL tid=" << tid
+                                      << " search_flooder vb=" << any_solver.search_flooder.vb
+                                      << " vb_left=" << any_solver.search_flooder.vb_left
+                                      << " vb_right=" << any_solver.search_flooder.vb_right
+                                      << " match_edges=" << any_solver.flooder.match_edges.size()
+                                      << std::endl << std::flush;
+                            }
                             any_solver.extract_paths_from_match_edges(
                                 any_solver.flooder.match_edges, shot.res.obs_crossed.data(), shot.res.weight);
                             any_solver.flooder.match_edges.clear();

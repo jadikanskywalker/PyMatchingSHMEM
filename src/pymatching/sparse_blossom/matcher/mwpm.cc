@@ -547,6 +547,12 @@ void Mwpm::prepare_for_task(TaskBase* t, int shot_id) {
     current_shot = shot_id;
 }
 
+void Mwpm::prepare_for_extraction(TaskBase* t, bool set_vb_to_part) {
+    search_flooder.vb = set_vb_to_part ? t->vb_marker : -1;
+    search_flooder.vb_left = t->vb_left;
+    search_flooder.vb_right = t->vb_right;
+}
+
 Mwpm::Mwpm() {
 }
 
@@ -560,8 +566,15 @@ void Mwpm::reset() {
         n.reset(0);
 #endif
     }
-    for (auto &m : search_flooder.graph.nodes)
-        m.reset();
+    for (auto &m : search_flooder.graph.nodes) {
+#ifdef ENABLE_SHOT_BUFFERS
+        for (int solver_idx = 0; solver_idx < NUM_BUFFERS_PER_UNIT; ++solver_idx) {
+            m.reset(solver_idx);
+        }
+#else
+        m.reset(0);
+#endif
+    }
     flooder.queue.clear();
     node_arena.~Arena();
 #ifdef USE_SHMEM

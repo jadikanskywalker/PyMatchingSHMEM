@@ -63,6 +63,13 @@ struct FusionSummary {
 struct DecodingUnit {
     // Graph
     SharedMatchingGraph graph;
+    // Built only when needed (>64 observables, or ensure_search_flooder_included) -- shared
+    // read-only across every solver on this PE, mirroring graph.graph_ptr. No partition/vb bounds
+    // metadata needed (unlike SharedMatchingGraph): extract_paths_from_match_edges only ever runs
+    // on a single already-fused solver's own local match_edges, after cross-rank fusion for that
+    // shot/vb has fully resolved locally.
+    std::shared_ptr<pm::SearchGraph> search_graph_ptr;
+    bool needs_search_flooder{false};
 
     // Shots
     std::shared_ptr<ShotBuffer> shot_buffer;
@@ -248,24 +255,32 @@ struct DecodingUnit {
     // across build configs -- both plain threads and USE_SHMEM builds post to and drain the same
     // job queue.
 
-    // Separates the two subgraphs joined at vb_id: loops every node in graph.vb_bounds[vb_id]
-    // (not just ones with "hits" -- a blossom can span the vb without either side registering a hit
-    // exactly there) and shatters/extracts any non-null region_that_arrived_top. Synchronous/inline,
-    // never queued -- this is what makes it safe to later post an extraction job for either side
-    // independently: once divided, neither side's regions reference across the boundary anymore.
-    // solver_arg must be a genuine descendant leaf's own solver (the caller's own already-assigned
-    // ->solver, not an arbitrary fixed choice -- see definition for why).
+    // Separates the two subgraphs joined at range_task->part: loops every node in
+    // graph.vb_bounds[range_task->part] (not just ones with "hits" -- a blossom can span the vb
+    // without either side registering a hit exactly there) and shatters/extracts any non-null
+    // region_that_arrived_top. Synchronous/inline, never queued -- this is what makes it safe to
+    // later post an extraction job for either side independently: once divided, neither side's
+    // regions reference across the boundary anymore.
+    // range_task supplies both the vb id/solver to use (range_task->part / range_task->solver, a
+    // genuine descendant leaf's own solver, not an arbitrary fixed choice -- see definition for why)
+    // and the extraction-bounding window passed to Mwpm::prepare_for_extraction (range_task->
+    // vb_marker/vb_left/vb_right), so the search reconstructing each shattered match's path can't
+    // stray into a concurrently-processed neighboring partition (see SearchFlooder::is_active).
+    // Every call site happens to already have the right task on hand for this in every case traced
+    // (LocalSeamTask/CrossRankTask for their own seam, the connector Task for preemptive division,
+    // the link for back_divide_walk, the node for post-hoc chunking).
     // prune_target: the fusion task whose vb this is (Task* for a checkpoint, CrossRankTask* for a
-    // cross-rank fusion -- both derive from TaskBase). A blossom shattered here can span farther than
-    // this vb and destroy a region still referenced in prune_target->regions_matched_to_virtual_
-    // boundary (kept there for a LATER setup() call to consume) -- passing prune_target makes divide_vb
-    // prune any now-stale pointers out of that list afterward. Pass nullptr only when no future
-    // setup() call will ever read that list again (post-hoc chunking, run after the whole tree is
-    // already fully solved).
+    // cross-rank fusion -- both derive from TaskBase; often, but not always, the same object as
+    // range_task -- post-hoc chunking passes nullptr here while still needing range_task for the
+    // extraction bound). A blossom shattered here can span farther than this vb and destroy a region
+    // still referenced in prune_target->regions_matched_to_virtual_boundary (kept there for a LATER
+    // setup() call to consume) -- passing prune_target makes divide_vb prune any now-stale pointers
+    // out of that list afterward. Pass nullptr only when no future setup() call will ever read that
+    // list again (post-hoc chunking, run after the whole tree is already fully solved).
     // t_out: optional per-thread debug stream; when DEBUG and non-null, logs the vb being divided and
     // the solver/prune_target so divide timing can be traced end-to-end (see this-is-a-broader-
     // purrfect-crystal.md).
-    void divide_vb(ShotContainer& shot, int shot_container_id, int vb_id, Mwpm* solver_arg, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
+    void divide_vb(ShotContainer& shot, int shot_container_id, TaskBase* range_task, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
 
     // Walk backward through start's own left_child chain, dividing+posting every deferred
     // (is_extraction_unit_connector && defer_division) link found, stopping at the first non-deferred

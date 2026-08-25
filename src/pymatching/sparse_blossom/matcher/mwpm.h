@@ -84,6 +84,16 @@ struct Mwpm {
     // Removes matchings to virtual boundaries, turning matched regions into alternating trees
     void unmatch_virtual_boundaries_between_partitions();
     void prepare_for_task(TaskBase* task, int shot_id);
+    // Sets search_flooder's vb/vb_left/vb_right from the given task, bounding
+    // extract_paths_from_match_edges' Dijkstra search to the task's own partition (see
+    // SearchFlooder::is_active). Separate from prepare_for_task: the task an extraction job is
+    // scoped to isn't necessarily the task the solver last grew for, and extraction is a distinct
+    // concern from task solving.
+    // set_vb_to_part controls whether search_flooder.vb is set to task->vb_marker (default) or left
+    // at -1 (never matches a real seam id): a received CRT window is bounded to [vb_left, vb_right]
+    // but must NOT re-include the CRT's own seam id, since that seam was already divided -- the
+    // local window on this side and the received window on the other side are extracted separately.
+    void prepare_for_extraction(TaskBase* task, bool set_vb_to_part = true);
     // Liveness of a possibly-stale GraphFillRegion* after a shatter is now tracked directly on the
     // region itself (GraphFillRegion::allocated, maintained solely by Arena/SHMEMArena's own
     // alloc_unconstructed()/del()) -- callers that need to prune a stale-pointer list after a shatter

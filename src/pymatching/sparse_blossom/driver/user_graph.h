@@ -17,6 +17,7 @@
 
 #include <cmath>
 #include <list>
+#include <memory>
 #include <set>
 #include <stdexcept>
 #include <vector>
@@ -137,6 +138,7 @@ class UserGraph {
     pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);
 
     pm::SearchGraph to_search_graph(pm::weight_int num_distinct_weights);
+    std::shared_ptr<pm::SearchGraph> to_shared_search_graph(pm::weight_int num_distinct_weights);
     pm::Mwpm to_mwpm(pm::weight_int num_distinct_weights, bool ensure_search_graph_included);
     void update_mwpm();
     Mwpm& get_mwpm();
