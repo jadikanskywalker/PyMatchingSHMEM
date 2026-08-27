@@ -2,7 +2,7 @@
 
 #include <limits>
 
-#define DEBUG 1 // set for full debugging
+#define DEBUG 0 // set for full debugging
 #if !DEBUG
 #define BARE_DEBUG 0 // set for per shot prints when DEBUG == 0
 #else

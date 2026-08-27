@@ -60,7 +60,6 @@ struct DetectorNodeEphemeralFields {
 /// graph and the DETECTOR annotations in a Stim circuit.
 class DetectorNode {
    public:
-    // when using shmem, each neighbors array is stored in shared memory
     DetectorNode() = default;
 
     /// == Ephemeral fields used to track algorithmic state during matching. ==

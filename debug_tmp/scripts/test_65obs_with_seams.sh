@@ -1,39 +1,43 @@
 #!/bin/bash
-#SBATCH --job-name=test_65obs_no_seams
-#SBATCH --output=debug_tmp/out/test_65obs_no_seams-%j.out
-#SBATCH --error=debug_tmp/out/test_65obs_no_seams-%j.err
+#SBATCH --job-name=test_65obs_with_seams
+#SBATCH --output=debug_tmp/out/test_65obs_with_seams-%j.out
+#SBATCH --error=debug_tmp/out/test_65obs_with_seams-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=00:30:00
 #SBATCH --nodes=1
 #SBATCH --exclusive
 #SBATCH --mem=64GB
 
-# First real exercise of the new SearchFlooder/>64-obs path: 65 fully independent observables
-# (no --gen_surgery_preset/--gen_surgery_spec, so zero cross-observable gates -- no seams between
-# observables at all), single PE, OBS task_division_strategy so each observable still gets K_p>1
-# local partitions (exercises divide_vb/LocalSeamTask/extraction intra-observable, just not
-# CrossRankTask/cross-PE fusion). Compares the threaded DecodingUnit path against the serial
-# to_mwpm() path on the same detection events.
+# Same 65-observable, no-surgery-preset base as test_65obs_no_seams.sh, but with 16
+# --gen_surgery_spec gates introducing real cross-observable seams -- spread across the full
+# observable index range (0-61) so the same spec is reusable later for a multi-PE build_sos run
+# (some gates should land same-PE -> LocalSeamTask, some cross-PE -> CrossRankTask, depending on
+# ntasks), and staggered across the 255-round window so they don't all fall in the same partition.
+# For now: single PE, build_threads only, exercising LocalSeamTask/divide_vb across observables
+# (not just within one observable's own K_p partitions).
 
 source ~/.bash_profile
 conda activate pymatching
 
 cd ~/PyMatchingSHMEM
 
-outdir=~/PyMatchingSHMEM/debug_tmp/out/test_65obs_no_seams_$SLURM_JOB_ID
+outdir=~/PyMatchingSHMEM/debug_tmp/out/test_65obs_with_seams_$SLURM_JOB_ID
 mkdir -p "$outdir"
 cd "$outdir"
 
 BIN=~/PyMatchingSHMEM/build_threads/pymatching
 
-# --- Generate the DEM + sample shots, one shot (no surgery preset/spec => no seams) ---
+# --- Generate the DEM + sample shots, with 16 cross-observable gates (seams), staggered across
+# both observable index (low..high, for later multi-PE same-PE/cross-PE coverage) and round (so
+# they don't all land in the same partition) ---
 $BIN predict \
     --gen_code repetition_code \
     --gen_task memory \
     --gen_distance 5 \
     --gen_rounds 255 \
     --gen_num_obs 65 \
-    --gen_depolarization 0.001 \
+    --gen_depolarization 0.01 \
+    --gen_surgery_spec "0,1,20,3;4,5,35,3;8,9,50,3;12,13,65,3;16,17,80,3;20,21,95,3;24,25,110,3;28,29,125,3;32,33,140,3;36,37,155,3;40,41,170,3;44,45,185,3;48,49,200,3;52,53,215,3;56,57,230,3;60,61,245,3" \
     --gen_det_out det.b8 \
     --gen_obs_out actual_obs.01 \
     --gen_sample_shots 50 \
@@ -60,7 +64,7 @@ echo "serial exit=$?"
 
 # --- Threaded DecodingUnit path (>64 obs => needs_search_flooder true, per-obs solver needs
 # max_threads >= my_obs_count=65 on a single PE) ---
-export OMP_NUM_THREADS=128
+export OMP_NUM_THREADS=72
 export OMP_PLACES=cores
 export OMP_PROC_BIND=true
 $BIN predict \
@@ -71,8 +75,6 @@ $BIN predict \
     --out_format 01 \
     --rounds_per_partition 8 \
     --task_division_strategy observable \
-    --extraction_unit_size 4 \
-    --extract_preemptively \
     --use_threads \
     > log_threaded.out 2>log_threaded.err
 echo "threaded exit=$?"

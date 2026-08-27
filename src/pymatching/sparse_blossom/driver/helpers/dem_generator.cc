@@ -600,6 +600,82 @@ std::vector<SurgerySpec> MultiObsDemGenerator::preset_72obs(int M) {
     return gates;
 }
 
+std::vector<SurgerySpec> MultiObsDemGenerator::preset_144obs(int M) {
+    // Copy 1: obs 0-72, identical to preset_72obs().
+    std::vector<SurgerySpec> gates = preset_72obs();
+
+    // Copy 2: obs 73-145, same schedule, offset by +73.
+    auto copy2 = preset_72obs();
+    for (auto& g : copy2) {
+        g.obs_a += 73;
+        g.obs_b += 73;
+    }
+    gates.insert(gates.end(), copy2.begin(), copy2.end());
+
+    // preset_72obs()'s own last gate (its adder_top's 16th gate) starts at
+    // 2058 + 2*21 + 15*42 = 2730 and ends at 2751 -- computed once and hardcoded here,
+    // mirroring how preset_72obs() itself hardcodes preset_36obs()'s own end (2058)
+    // rather than recomputing it.
+    int T_break_end = 2751 + 2 * M;
+
+    // Final reduction: a new top-level carry (obs 146) combining copy 1's and copy
+    // 2's own top-level adder_top operand groups {13,14,15,16}/{86,87,88,89} (73+
+    // shifted). Mirrors preset_72obs's own top join one level higher.
+    auto adder_top = reduction_adder(146, {13, 14, 15, 16}, {86, 87, 88, 89}, T_break_end);
+    gates.insert(gates.end(), adder_top.begin(), adder_top.end());
+
+    return gates;
+}
+
+std::vector<SurgerySpec> MultiObsDemGenerator::preset_128obs(int M, int duration) {
+    // Copy 1: obs 0-63, identical to preset_64obs().
+    std::vector<SurgerySpec> gates = preset_64obs();
+
+    // Copy 2: obs 64-127, same schedule, offset by +64.
+    auto copy2 = preset_64obs();
+    for (auto& g : copy2) {
+        g.obs_a += 64;
+        g.obs_b += 64;
+    }
+    gates.insert(gates.end(), copy2.begin(), copy2.end());
+
+    // preset_64obs()'s own last gate ({7,39} at round 63*22=1386) ends at 1407 --
+    // computed once and hardcoded here, same convention as preset_144obs above.
+    int T_break_end = 1407 + 2 * M;
+
+    // Single plain connecting gate joining each copy's own top-level representative
+    // pair (copy 1's obs 39, copy 2's obs 39+64=103) -- mirrors preset_64obs's own
+    // sparser top join style (a single gate, not a reduction_adder), one level up.
+    // No new carry observable, matching preset_64obs's own convention.
+    gates.push_back({7, 39 + 64, T_break_end, duration});
+
+    return gates;
+}
+
+std::vector<SurgerySpec> MultiObsDemGenerator::preset_256obs(int M, int duration) {
+    // Copy 1: obs 0-127, identical to preset_128obs().
+    std::vector<SurgerySpec> gates = preset_128obs();
+
+    // Copy 2: obs 128-255, same schedule, offset by +128.
+    auto copy2 = preset_128obs();
+    for (auto& g : copy2) {
+        g.obs_a += 128;
+        g.obs_b += 128;
+    }
+    gates.insert(gates.end(), copy2.begin(), copy2.end());
+
+    // preset_128obs()'s own last gate ({7,103} at round 1407+2*22=1451) ends at
+    // 1472 -- computed once and hardcoded here, same convention as above.
+    int T_break_end = 1472 + 2 * M;
+
+    // Single plain connecting gate joining each copy's own top-level representative
+    // pair (copy 1's obs 39, copy 2's obs 39+128=167) -- continues preset_128obs's
+    // sparse top join style one level higher. No new carry observable.
+    gates.push_back({7, 39 + 128, T_break_end, duration});
+
+    return gates;
+}
+
 std::vector<SurgerySpec> MultiObsDemGenerator::preset_36obs_repeated(int repeats, int M) {
     int period = 2058 + 2 * M;  // one repetition's span + 2*M idle gap before the next
     std::vector<SurgerySpec> gates;

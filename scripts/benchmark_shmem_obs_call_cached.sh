@@ -4,9 +4,12 @@
 #SBATCH --partition=zen4
 #SBATCH --time=02:00:00
 
+# Graph-cache variant of benchmark_shmem_obs_call.sh -- see benchmark_shmem_obs_cached.sh for
+# why (presets too large to keep a raw .dem around) and the M-must-match-the-cache caveat.
+
 if [ $# -le 8 ]
   then
-    echo "Args: [ntasks] [sockets] [ntasks_per_socket] [nthreads] [M] [k] [dem] [det] [flips]"
+    echo "Args: [ntasks] [sockets] [ntasks_per_socket] [nthreads] [M] [k] [graph_cache] [det] [flips]"
     exit 1
 else
     ntasks=$1
@@ -15,16 +18,11 @@ else
     nthreads=$4
     M=$5
     k=$6
-    dem=$7
+    graph_cache=$7
     det=$8
     flips=$9
 fi
 
-# nodes=$((sockets / 1))
-# if [ $nodes -lt 1 ]
-#   then
-#     nodes=0
-# fi
 suffix=M${M}_ntasks${ntasks}_sockets${sockets}_ntps${ntasks_per_socket}_nthreads${nthreads}_k${k}_${SLURM_JOB_ID}
 out=out_$suffix
 
@@ -39,7 +37,16 @@ source ~/.bash_profile
 conda activate pymatching
 
 export FI_VERBS_DEVICE_NAME="mlx5_2"
-export SHMEM_SYMMETRIC_SIZE=16G
+# Bigger than benchmark_shmem_obs_call.sh's 16G: these graphs (72/128/256/144obs) are larger
+# than the 36obs one that value was tuned against -- regions_ptr/child_edges_ptr scale with
+# the GLOBAL partition count (they do NOT shrink with more PEs, see gen_36obsx4.sh's own
+# sizing notes), so this needs headroom regardless of ntasks/nthreads for this run.
+#
+# Confirmed real "Out of symmetric memory" failure (clean error, not a crash) at 32G for
+# 256obs (18176 partitions, needed heap size 32G + ~25GB overrun before failing) -- 144obs has
+# even more partitions (24108). Matching the largest gen_*obs.sh's own SHMEM_SYMMETRIC_SIZE
+# (gen_144obs.sh uses 256G) rather than hand-tuning per preset again.
+export SHMEM_SYMMETRIC_SIZE=256G
 
 export OMP_NUM_THREADS=$nthreads
 export OMP_PLACES="cores($nthreads)"
@@ -55,7 +62,7 @@ oshrun  \
     --report-bindings \
     ~/PyMatchingSHMEM/scripts/pe_output_wrapper.sh \
     ~/PyMatchingSHMEM/build_sos/pymatching predict \
-        --dem $dem \
+        --graph_cache_path $graph_cache \
         --in $det \
         --in_format b8 \
         --out $preds \
@@ -68,7 +75,7 @@ oshrun  \
         --use_threads \
         --num_repeats 10 \
     &>> $log
-        
+
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
 
@@ -96,12 +103,3 @@ END {
     print "wrong predictions:"
     print wrong + 0 "/" total
 }' >> $log
-
-# echo
-# echo Shots with differring predictions:
-# awk 'NR==FNR{a[NR]=$0; n=NR; next} {
-#   if (FNR>n || $0!=a[FNR]) { print FNR-1; out=1 }
-# } END {
-#   if (n>FNR) { for (i=FNR+1;i<=n;i++) { print i-1; out=1 } }
-#   if (!out) print "no differences"
-# }' predicted_obs_flips__threads.01 predicted_obs_flips__shmem.01

@@ -39,12 +39,33 @@ class MultiObsDemGenerator {
     // obs 72) combining each copy's adder_G operand group -- mirrors adder_G itself,
     // just one level higher. Total observables: 73.
     static std::vector<SurgerySpec> preset_72obs(int M = 21);
+    // Two independent copies of preset_72obs() (obs 0-72 and obs 73-145, same round
+    // schedule, ending at round 2751), followed by a 2*M idle gap, then one final
+    // reduction_adder (a new top-level carry at obs 146) combining each copy's own
+    // top-level adder_top operand group ({13,14,15,16} and its +73 shift) -- mirrors
+    // preset_72obs's own construction from preset_36obs, one level higher. Total
+    // observables: 147.
+    static std::vector<SurgerySpec> preset_144obs(int M = 21);
     // preset_36obs() repeated `repeats` times back-to-back in time, reusing the
     // SAME 36 observables each time (no new observable indices -- stays safely
     // under the 64-observable limit), with a 2*M idle gap (no surgeries) between
     // repetitions. Purely a larger/longer test case for scaling benchmarks, not a
     // new computation. Total observables: 36. Round period per repetition: 2058 + 2*M.
     static std::vector<SurgerySpec> preset_36obs_repeated(int repeats = 4, int M = 21);
+    // Two independent copies of preset_64obs() (obs 0-63 and obs 64-127, same round
+    // schedule, ending at round 1407), followed by a 2*M idle gap, then a single
+    // plain connecting gate joining each copy's own top-level representative pair
+    // ({7,39} and its +64 shift) -- mirrors preset_64obs's own sparser (non-adder)
+    // top-level join style, not preset_72obs's denser reduction_adder. Total
+    // observables: 128 (no new carry observable, matching preset_64obs's own
+    // convention of connecting existing nodes rather than adding one).
+    static std::vector<SurgerySpec> preset_128obs(int M = 22, int duration = 21);
+    // Two independent copies of preset_128obs() (obs 0-127 and obs 128-255, ending
+    // at round 1472), followed by a 2*M idle gap, then a single plain connecting
+    // gate joining each copy's own top-level representative pair ({7,39} and its
+    // +128 shift) -- continues preset_128obs's sparse top-join style one level
+    // higher. Total observables: 256.
+    static std::vector<SurgerySpec> preset_256obs(int M = 22, int duration = 21);
 
     static std::vector<SurgerySpec> parse_spec(const std::string& spec, int default_duration = 1);
 
