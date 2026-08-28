@@ -316,6 +316,7 @@ int main_predict(int argc, const char** argv) {
     using std::chrono::milliseconds;
     using std::chrono::steady_clock;
     double total_ms = 0.0;
+    double total_decode_only_ms = 0.0;
 #endif
 
     if (config_parallel::use_threads) {
@@ -355,10 +356,10 @@ int main_predict(int argc, const char** argv) {
             decoding_unit.reset();
 
             auto t1 = steady_clock::now();
-
             decoding_unit.decode_shots();
-            
             auto t2 = steady_clock::now();
+
+            total_decode_only_ms += decoding_unit.last_decode_shots_wall_ms;
             total_ms += duration<double, std::milli>(t2 - t1).count();
             std::cout << duration<double, std::milli>(t2 - t1).count() << "ms\n" << std::flush;
         }
@@ -390,7 +391,10 @@ int main_predict(int argc, const char** argv) {
             auto t1 = steady_clock::now();
 
             while (pm::start_and_read_entire_record_buffered(*reader, sparse_shot)) {
+                auto dt1 = steady_clock::now();
                 pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations);
+                auto dt2 = steady_clock::now();
+                total_decode_only_ms += duration<double, std::milli>(dt2 - dt1).count();
                 for (size_t k = 0; k < num_obs; k++) {
                     writer->write_bit(res.obs_crossed[k]);
                 }
@@ -408,6 +412,7 @@ int main_predict(int argc, const char** argv) {
 
 #ifdef OUTPUT_DECODING_TIME
     std::cout << "Average decoding time: " << total_ms / (double)num_repeats << "ms\n";
+    std::cout << "Average decode-only time: " << total_decode_only_ms / (double)num_repeats << "ms\n";
 #endif
 
     if (predictions_out != stdout) {

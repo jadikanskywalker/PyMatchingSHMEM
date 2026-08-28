@@ -14,6 +14,7 @@
 
 #include "pymatching/sparse_blossom/driver/parallel/decoding_unit.h"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -2017,6 +2018,16 @@ void pm::DecodingUnit::decode_shots() {
     if (enable_correlations) {
         throw std::invalid_argument("Edge correlations are not yet implemented in parallel.");
     }
+    // Reset per-call decode-only wall-clock accumulator; see decoding_unit.h's comment on this field.
+    last_decode_shots_wall_ms = 0.0;
+    // Decode-only timing: single shared "clock" marking the start of the current shot-boundary
+    // interval. Declared here, outside the #pragma omp parallel region below, so it's implicitly
+    // shared across all threads by ordinary OpenMP data-sharing rules (variables from the enclosing
+    // scope are shared by default), rather than each thread getting its own private copy. Written
+    // once by thread 0 right after the setup barrier below (starting the interval for this call's
+    // first shot), then subsequently read-and-rewritten only by whichever single thread is "last" for
+    // each shot -- see the i_solved_last_root block further down.
+    std::chrono::steady_clock::time_point interval_start;
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_FUNC_BEGIN();
 #endif
@@ -2102,6 +2113,18 @@ void pm::DecodingUnit::decode_shots() {
         struct RootInfo { Task* task; };
         std::vector<RootInfo> roots_i_solved;
         bool i_solved_last_root = false;
+        // Decode-only timing: barrier so every thread has finished its per-thread static setup above
+        // (and, on this call's first entry, the OpenMP team has fully spun up) before the clock
+        // starts -- keeps OMP thread-team spin-up overhead out of the decode-only measurement, just
+        // like shot 1's data is already pre-loaded by decoding_unit::reset() before decode_shots() is
+        // ever entered. Only thread 0 then records the start of the first shot-boundary interval;
+        // every other thread proceeds straight into the loop below. There is a narrow, accepted race
+        // where another thread could race ahead and become "last" for shot 1 before thread 0 finishes
+        // writing interval_start -- deemed negligible in practice.
+#pragma omp barrier
+        if (tid == 0) {
+            interval_start = std::chrono::steady_clock::now();
+        }
         try {
             while (true) {
                 if (BARE_DEBUG) {
@@ -2539,7 +2562,28 @@ void pm::DecodingUnit::decode_shots() {
                     }
                     // Reset before unlocking: prevents next-shot threads racing on this counter.
                     shot.num_roots_done.store(0, std::memory_order_release);
+                    // Decode-only timing: stop the single shared clock -- started either by thread 0
+                    // right after the setup barrier above (for this decode_shots() call's first shot),
+                    // or by whichever thread was "last" for the previous shot, immediately after its own
+                    // write_result_and_get_next_shot call below -- and accumulate the interval that just
+                    // elapsed. This spans the full wall-clock decode window across every thread for this
+                    // shot (including inter-thread wake-up/synchronization variance), not just this
+                    // thread's own local busy time. Every other thread is already parked in its own
+                    // spin-wait for the next shot by this point, so exactly one thread is ever "active"
+                    // here -- provably race-free even as a plain shared time_point (the seq_cst
+                    // current_buffer_round RMW in read_shot, which every thread must observe before
+                    // proceeding to its own next shot, already establishes happens-before from this
+                    // write to whichever thread's read/write comes next). The critical section below is
+                    // kept anyway as a cheap, self-documenting guard; never contended in practice.
+                    auto now = std::chrono::steady_clock::now();
+#pragma omp critical(decode_only_timer_update)
+                    {
+                        last_decode_shots_wall_ms += std::chrono::duration<double, std::milli>(
+                            now - interval_start).count();
+                    }
                     shot_buffer->write_result_and_get_next_shot(shot_container_id, graph.node_part_id);
+                    // Restart the shared clock for the next shot's interval.
+                    interval_start = std::chrono::steady_clock::now();
                 }
 #ifdef SCOREP_USER_ENABLE
                 SCOREP_USER_REGION_END(shot_decode);

@@ -2,7 +2,7 @@
 #SBATCH --job-name=pycall
 #SBATCH --output=out/s-%j.out
 #SBATCH --partition=zen4
-#SBATCH --time=02:00:00
+#SBATCH --time=08:00:00
 
 # Graph-cache variant of benchmark_shmem_obs_call.sh -- see benchmark_shmem_obs_cached.sh for
 # why (presets too large to keep a raw .dem around) and the M-must-match-the-cache caveat.

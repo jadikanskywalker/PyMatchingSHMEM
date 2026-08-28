@@ -311,6 +311,11 @@ struct DecodingUnit {
     // independently safe to post/recurse into) and recurse into both.
     void post_hoc_chunk_and_post(Task* node, ShotContainer& shot, int shot_container_id, int tid, std::ofstream* t_out = nullptr);
 
+    // Reset to 0.0 at the top of every decode_shots() call; accumulated by the single "last" thread
+    // per shot into wall-clock ms of pure decode compute, excluding the I/O window inside
+    // write_result_and_get_next_shot(). Read by the caller immediately after each decode_shots() call.
+    double last_decode_shots_wall_ms{0.0};
+
     void decode_shots();
     void reset();
 };

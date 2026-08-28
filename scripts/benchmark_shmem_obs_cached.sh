@@ -120,8 +120,15 @@ shmem_half_nodes=(   1  2  1)
 # only sets this job's own OOM-kill threshold -- there is no cost to just requesting close to
 # the full node on every tier instead of hand-tuning a per-ntasks formula that keeps turning out
 # to be wrong. NODE_MEM is per node (SLURM's --mem is per-node, not total, when --nodes>1), so
-# this also correctly gives each node in a multi-node run its own ~1.45TB budget.
-NODE_MEM=1450GB
+# this also correctly gives each node in a multi-node run its own budget.
+#
+# Bumped from 1450GB: node RealMemory is 1547650MB (~1511GiB, sinfo); 148095 (256obs,
+# ntasks4/sockets2/ntps2/nthreads64) confirmed OOM'd AT 1450GB (MaxRSS pinned at the cap) even
+# after this fix was first applied -- not a stale pre-fix run. 1490GB leaves ~21GB headroom for
+# the OS/slurmd; if a config still OOMs at this ceiling, that specific ntasks=4 config is
+# genuinely infeasible on one node at this preset size (a legitimate finding, not a tuning bug --
+# see the per-PE partitioned-graph-construction plan for the actual fix).
+NODE_MEM=1490GB
 
 repeats=1
 
