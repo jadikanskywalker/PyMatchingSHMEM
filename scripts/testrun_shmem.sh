@@ -23,7 +23,7 @@ export FI_VERBS_DEVICE_NAME="mlx5_2"
 
 if [ $# -le 7 ]
   then
-    echo "Args: [n] [ppn] [nthreads_shmem] [nthreads] [shots] [rounds] [M] [k]"
+    echo "Args: [n] [ppn] [nthreads_shmem] [nthreads] [shots] [rounds] [M] [k] [num_repeats]"
     exit 1
 else
     n=$1
@@ -34,6 +34,7 @@ else
     rounds=$(($6-1))
     M=$7
     k=$8
+    num_repeats=${9:-1}
 fi
 
 if [ ! -d "run" ]
@@ -189,6 +190,7 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --extraction_unit_size 4 \
     --extract_preemptively \
     --draw_frames \
+    --num_repeats $num_repeats \
     > log_shmem.out 2>log_shmem.err
 
     # --dem ../testdems/error_model_48obs_d21_p001_640r.dem \

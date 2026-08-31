@@ -33,7 +33,6 @@ mkdir -p "${result_dir}"
 
 vtune -collect "${analysis}" \
       -knob enable-stack-collection=true \
-      -knob enable-memory-bandwidth=false \
       -r "${result_dir}/${run_tag}" \
       --app-working-dir "${PWD}" \
       -- "$@"
@@ -46,6 +45,7 @@ vtune -report summary -r "${result_dir}/${run_tag}/${run_tag}.vtune" \
       -report-output "${summary_report}"
 
 vtune -report top-down -r "${result_dir}/${run_tag}/${run_tag}.vtune" \
+      -call-stack-mode all -column="CPU Time:Self","Module" -filter "Function Stack" \
       --format csv -csv-delimiter comma \
       -report-output "${topdown_report}"
 

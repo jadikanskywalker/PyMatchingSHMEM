@@ -3,17 +3,19 @@ import os
 import glob
 import sys
 
+AVG_RE = re.compile(r'Average decoding time:\s*([0-9.]+)\s*ms')
+
+
 def parse_log_file(filepath):
-    """Returns max decoding time found in the file."""
-    times = []
+    """Returns the "Average decoding time" summary line's value, or None if absent (e.g. a
+    construction-throw or launch failure that never reached the OUTPUT_DECODING_TIME block)."""
+    time = None
     with open(filepath, 'r') as f:
         for line in f:
-            match = re.search(r'Decoding time:\s*([0-9.]+)\s*ms', line)
+            match = AVG_RE.search(line)
             if match:
-                times.append(float(match.group(1)))
-    if not times:
-        return None
-    return max(times)
+                time = float(match.group(1))
+    return time
 
 def main():
     directory = 'bench001'

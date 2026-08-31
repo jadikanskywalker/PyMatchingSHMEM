@@ -29,57 +29,58 @@
 namespace pm {
 
 #ifdef USE_SHMEM
-enum ShotStatus : uint64_t { READY, PUT_SUMMARY, PUT_RESULT, WROTE_RESULT };
+// enum ShotStatus : uint64_t { READY, PUT_SUMMARY, PUT_RESULT, WROTE_RESULT };
 #endif
 
 // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md Design §3): a
-// self-describing extraction job, unconditional across build configs since checkpoint chains and
-// post-hoc chunking both run under plain threads too, not just USE_SHMEM. Any thread can process
-// a job regardless of which shot/root it's nominally working on. A job always names a fully-closed
-// unit subtree -- closed meaning both its boundaries (if any) have already been "divided" (see
-// DecodingUnit::divide_vb) before the job is posted, so it's safe to extract independently, by any
-// thread, at any time. Cross-rank fusion extraction is handled inline by the resolving thread
-// instead of going through this queue (posting would only add overhead there).
+// self-describing extraction job. Any thread can process a job; a job always names a fully-closed
+// unit subtree -- closed meaning its outer boundaries have been "divided" (see DecodingUnit::
+// divide_vb). Cross-rank fusion extraction of received window is handled inline avoiding posting
 struct ExtractionJob {
     int shot_container_id;
     Task* subtree_root;
-};
-
-struct LocalSeamContinuationJob {
-    size_t shot_container_id;
-    size_t special_task_id; // id of completed seam in child's SpecialTask vector
-    Task* child_task;
-};
-
-// ShotContainer isolates everything needed to solve
-// a single shot in parallel.
-struct ShotContainer {
-    alignas(64) std::atomic<int64_t> current_buffer_round{-1};  // Used for idle thread spin-wait until new shot read
-
-    stim::SparseShot sparse_shot;
-
-    std::vector<std::vector<uint64_t>> partition_hits;
-    std::vector<std::vector<uint64_t>> virtual_boundary_hits;
-
-    int num_observables;
     pm::MatchingResult obs_mask;
     pm::ExtendedMatchingResult res;
+};
 
-    // Set during build_tasks_*; count of chain tops (parent==nullptr) across tasks + CRTs. Always 1
-    // for round-partitioning (a single true root regardless of extract_preemptively/L -- checkpoint
-    // chain-links are never independent roots, see this-is-a-broader-purrfect-crystal.md Design §2).
-    int num_task_roots{0};
-    // Incremented by each thread when it finishes all its roots for a shot.
-    // Last thread (cumulative count reaches num_task_roots) resets to 0 and writes result.
-    alignas(64) std::atomic<int64_t> num_roots_done{0};
-    // Per-thread partial MatchingResult accumulator (indexed by omp thread id).
-    // Sized to num_threads during build_tasks_*.
+// ShotIOResource isolates everything needs to store hits (input for a shot), manage extraction jobs,
+// and build results (output for a shot). This is decoupled from ShotContainer to allow multiple shots
+// to be active in the same buffer, avoiding a global current_buffer_round atomic -> inter-shot barrier.
+// Instead, partition tasks are marked ready when their extraction unit is extracted; a thread cannot 
+// only steal the partition task for the next shot when ready. This effectively moves inter-shot
+// synchronization to the task level (granular) instead of all threads racing on a single atomic.
+struct ShotIOResource {
+    // -- Input --
+    // Hits
+    stim::SparseShot sparse_shot;
+    // Partitioned hits
+    std::vector<std::vector<uint64_t>> partition_hits;
+    std::vector<std::vector<uint64_t>> virtual_boundary_hits;
+    // -- Output --
+    // num_observables deliberately NOT stored here -- it's a fixed per-run constant, already
+    // cached once on ShotBuffer::num_observables; no need for every shot to carry its own copy.
+    pm::MatchingResult obs_mask;
+    pm::ExtendedMatchingResult res;
+    // Per-thread partial MatchingResult accumulator
     std::vector<pm::MatchingResult> thread_results;
-
-    // Unit-checkpointed extraction queue (Design §3-6). Posting (rare, ~num_partitions/L per shot) is
-    // mutex-guarded; claiming (hot, up to ~2*num_partitions steal attempts per shot) is non-locking
-    // via a fetch_add cursor. extraction_jobs' capacity is reserved once in the constructor and never
-    // grown, so a claimer reading extraction_jobs[i] without the lock never races a reallocation.
+    // Per-thread partial ExtendedMatchingResult accumulator (>64-obs path only, but always sized
+    // so callers don't need to branch). extract_paths_from_match_edges (mwpm.cc) writes directly
+    // into obs_crossed/weight with plain, non-atomic ops -- multiple threads can be inside
+    // process_extraction_job/divide_vb/extract_crt_received_window simultaneously for the same
+    // shot (try_claim_extraction_job's lock-free cursor lets any idle thread claim any posted
+    // job), so writing straight into a single shared `res` races. Mirrors thread_results exactly:
+    // each thread accumulates into its own slot, combined once single-threaded at the end of the
+    // shot under the same pending_extraction_jobs==0 gate that already exists there.
+    std::vector<pm::ExtendedMatchingResult> thread_extended_results;
+    // num_task_roots also deliberately NOT stored here -- same reasoning as num_observables
+    // above: a fixed per-run constant (always 1 for ROUND, my_obs_count for OBS, never varies
+    // per shot), cached once on ShotBuffer::num_task_roots instead.
+    // Incremented by each thread when it finishes all its roots for a shot.
+    // Thread to reach num_task_roots writes result
+    alignas(64) std::atomic<int64_t> num_roots_done{0};
+    // Unit-checkpointed extraction queue (Design §3-6). Posting is mutex-guarded;
+    // claiming is non-locking via a fetch_add cursor.
+    // capacity is reserved once and never grown to never race a reallocation.
     std::mutex extraction_post_mutex;
     std::vector<ExtractionJob> extraction_jobs;
     alignas(64) std::atomic<size_t> extraction_posted_count{0};  // published (release) job count
@@ -88,20 +89,38 @@ struct ShotContainer {
     // claimed) -- incremented on post, decremented once a claimed job finishes processing.
     alignas(64) std::atomic<int> pending_extraction_jobs{0};
 
-    std::mutex local_seam_continuation_post_mutex;
-    std::vector<LocalSeamContinuationJob> local_seam_continuation_jobs;
-    alignas(64) std::atomic<size_t> local_seam_continuation_posted_count{0};  // published (release) job count
-    alignas(64) std::atomic<size_t> local_seam_continuation_claim_cursor{0};  // next unclaimed job index
-    // Gates ShotContainer reuse until every posted job has actually been executed (not just
-    // claimed) -- incremented on post, decremented once a claimed job finishes processing.
-    alignas(64) std::atomic<int> local_seam_continuation_extraction_jobs{0};
+    ShotIOResource(
+        int num_partitions,
+        int num_virtual_boundaries,
+        int num_observables,  // sizes res/obs_mask/thread_extended_results only, not stored
+        int num_threads);
 
-    // t_out: optional per-thread debug stream; when DEBUG and non-null, logs the vb/task address of
-    // the job being posted (see this-is-a-broader-purrfect-crystal.md) so posting/draining can be
-    // traced end-to-end alongside decode_shots()'s existing per-thread traces.
+    // extraction_post_mutex makes this non-movable/non-copyable by default (std::mutex has
+    // neither). Custom move ctor/assign needed so std::vector<ShotIOResource> can grow via
+    // emplace_back during read_all_shots_and_create_IO_resources (io_resources is sized
+    // incrementally, one shot at a time, since the total shot count isn't known upfront) --
+    // mirrors ShotContainer's existing pattern exactly: skip the mutex (default-constructs fresh
+    // in the moved-to object, correct since it's never contended at move time), manually
+    // .load()/.store() every atomic.
+    ShotIOResource(const ShotIOResource&) = delete;
+    ShotIOResource& operator=(const ShotIOResource&) = delete;
+    ShotIOResource(ShotIOResource&& other) noexcept;
+    ShotIOResource& operator=(ShotIOResource&& other) noexcept;
+
+    // t_out: optional per-thread debug stream; when DEBUG and non-null
     void post_extraction_job(const ExtractionJob& job, std::ofstream* t_out = nullptr);
     ExtractionJob* try_claim_extraction_job();
 
+    // Per-repeat (--num_repeats) reset only -- never called per-shot. Resets thread_results,
+    // thread_extended_results, res, obs_mask, num_roots_done, and the whole extraction queue.
+    // Deliberately does NOT touch sparse_shot/partition_hits/virtual_boundary_hits (read once
+    // upfront and reused verbatim across repeats).
+    void reset();
+};
+
+// ShotContainer isolates everything needed to decode a single shot in parallel,
+// all the way down to reserved ephemeral field slots on DetectorNodes.
+struct ShotContainer {
     std::vector<Task> tasks;  // Tasks handle dynamic fusion tree synchonization
     // Local-observable-boundary seams (OBS partitioning only) -- never SHMEM-specific, unlike
     // cross_rank_tasks, so unconditional even though only build_tasks_for_obs_patch_partitioning
@@ -111,7 +130,12 @@ struct ShotContainer {
     std::vector<CrossRankTask> cross_rank_tasks;
 #endif
 
-    ShotContainer(int num_partitions, int num_virtual_boundaries, int num_observables);
+    // No constructor params -- tasks/local_seam_tasks/cross_rank_tasks are sized/reserved later
+    // by build_tasks_for_round_partitioning/build_tasks_for_obs_patch_partitioning, which have
+    // the actual partition/vb counts needed for a correct worst-case reservation. Nothing here
+    // depends on partition/vb/observable counts now that Tier B construction has moved to
+    // ShotIOResource.
+    ShotContainer() = default;
 
     ShotContainer(const ShotContainer&) = delete;
     ShotContainer& operator=(const ShotContainer&) = delete;
@@ -119,7 +143,6 @@ struct ShotContainer {
     ShotContainer(ShotContainer&& other) noexcept;
     ShotContainer& operator=(ShotContainer&& other) noexcept;
 
-    void clear();
     void reset();
 };
 
@@ -130,6 +153,20 @@ struct ShotBuffer {
     std::unique_ptr<stim::MeasureRecordWriter> writer;
 
     std::vector<ShotContainer> buffer;
+
+    std::vector<ShotIOResource> io_resources;
+
+    // Stashed from the constructor so read_all_shots_and_create_IO_resources (called separately,
+    // once the total shot count is known) doesn't need them re-passed. num_observables also
+    // serves as the single source of truth callers should read directly (ShotIOResource itself
+    // no longer stores a per-shot copy).
+    int num_partitions{0};
+    int num_virtual_boundaries{0};
+    int num_observables{0};
+    // Fixed for the whole run (always 1 for ROUND, my_obs_count for OBS) -- set once by
+    // read_all_shots_and_create_IO_resources, read directly by callers instead of a per-shot
+    // ShotIOResource field (it never varies per shot, same reasoning as num_observables above).
+    int num_task_roots{0};
 
     alignas(64) int64_t next_shot_container_id{ 0 };
     alignas(64) int64_t last_shot_container_id{ -1 };
@@ -145,14 +182,57 @@ struct ShotBuffer {
         int num_virtual_boundaries,
         int num_observables);
 
-    // Reads next shot into shot_container_id
-    void write_result_and_get_next_shot(int shot_container_id, std::vector<int> &node_part_id
+    // Writes shot_id's finished result to the output file once it's this container's turn
+    // (unchanged cv/next_shot_container_id turn-taking -- serializes *output* order, an
+    // orthogonal concern from the per-partition decode desynchronization this design targets;
+    // shot_container_id cycles 0..N-1 across shots 0..total-1 in lockstep with real shot order,
+    // so per-container turn-taking still correctly serializes writes in global shot order even
+    // though containers are now reused many times). No longer reads a new shot afterward --
+    // reading is fully upfront now, see read_all_shots_and_create_IO_resources.
+    void write_shot_result(int shot_container_id, size_t shot_id
 #ifdef USE_SHMEM
         , bool write_results=true
 #endif
     );
 
-    void read_shot(int shot_container_id, std::vector<int> &node_part_id);
+    // Reads every shot in the input file upfront, partitioning each shot's hits by
+    // node_part_id and appending one fully-populated ShotIOResource per shot to io_resources.
+    // num_threads sizes each ShotIOResource's thread_results/thread_extended_results at
+    // construction, rather than those being set post-hoc by task-tree-building code.
+    // num_task_roots_in is stashed directly onto ShotBuffer::num_task_roots (a fixed per-run
+    // constant, not per-shot -- see the field comment above).
+    void read_all_shots_and_create_IO_resources(
+        std::vector<int>& node_part_id, int num_threads, int num_task_roots_in);
+
+    // -- Helpers below decouple DecodingUnit from ShotIOResource's internal layout: every one of
+    // these is keyed by shot_id (Tier B, one slot per real shot) rather than shot_container_id
+    // (Tier A, the small reused Task-tree pool) -- see docs/decentralized_shot_sync_design.md. --
+
+    // Total real shot count -- a property of the whole buffer, not of one shot_id, but still
+    // routed through a helper rather than a direct io_resources.size() read: a future
+    // streaming/circular-buffer redesign (design doc §10) wouldn't have a plain "vector size ==
+    // total shots" shape, and callers should never need to know that today's implementation does.
+    size_t num_shots() const;
+    // Returns partition_hits[id] (is_vb=false) or virtual_boundary_hits[id] (is_vb=true) for shot_id.
+    std::vector<uint64_t>& hits(size_t shot_id, bool is_vb, int id);
+    pm::ExtendedMatchingResult& result(size_t shot_id);
+    pm::MatchingResult& obs_mask(size_t shot_id);
+    // No num_observables(shot_id) helper -- it's a fixed per-run constant, read directly off
+    // ShotBuffer::num_observables at call sites instead (never per-shot).
+    std::vector<pm::MatchingResult>& thread_results(size_t shot_id);
+    std::vector<pm::ExtendedMatchingResult>& thread_extended_results(size_t shot_id);
+    int64_t fetch_add_roots_done(size_t shot_id, int64_t n);
+    // True once every root of this shot's tree has resolved (compares against the cached
+    // num_task_roots internally, rather than making every caller re-derive the comparison).
+    bool all_roots_done(size_t shot_id) const;
+    // No num_task_roots(shot_id) helper -- fixed per-run constant, read directly off
+    // ShotBuffer::num_task_roots at call sites instead (never per-shot).
+    void post_extraction_job(size_t shot_id, const ExtractionJob& job, std::ofstream* t_out = nullptr);
+    ExtractionJob* try_claim_extraction_job(size_t shot_id);
+    int pending_extraction_jobs(size_t shot_id) const;
+    // Called once a claimed job has actually finished processing (not just claimed) -- decrements
+    // the counter post_extraction_job incremented at post time.
+    void mark_extraction_job_finished(size_t shot_id);
 
     void reset();
 };

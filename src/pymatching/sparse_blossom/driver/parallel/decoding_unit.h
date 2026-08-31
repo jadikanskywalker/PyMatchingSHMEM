@@ -230,11 +230,11 @@ struct DecodingUnit {
 
     // Decoding Functions
 #ifdef USE_SHMEM
-    void send_solution_to_remote_pe(size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &task, std::ofstream &t_out);
+    void send_solution_to_remote_pe(size_t shot_container_id, size_t shot_id, pm::MatchingResult& res, CrossRankTask &task, std::ofstream &t_out);
     bool get_solution_from_remote_pe(size_t shot_container_id, CrossRankTask &task, std::ofstream &t_out, std::vector<uint64_t>& hitsref); // returns whether solving is necessary
     // Extracts a cross-rank fusion's received window immediately, inline on the resolving thread.
     // Assumes crt->part's own vb has already been divided (see divide_vb) by the caller.
-    void extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, CrossRankTask& crt, int tid, std::ofstream* t_out = nullptr);
+    void extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, size_t shot_id, CrossRankTask& crt, int tid, std::ofstream* t_out = nullptr);
 #endif
 
     // Erases every pointer in t->regions_matched_to_virtual_boundary whose region is no longer live
@@ -280,7 +280,7 @@ struct DecodingUnit {
     // t_out: optional per-thread debug stream; when DEBUG and non-null, logs the vb being divided and
     // the solver/prune_target so divide timing can be traced end-to-end (see this-is-a-broader-
     // purrfect-crystal.md).
-    void divide_vb(ShotContainer& shot, int shot_container_id, TaskBase* range_task, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
+    void divide_vb(ShotContainer& shot, int shot_container_id, size_t shot_id, TaskBase* range_task, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
 
     // Walk backward through start's own left_child chain, dividing+posting every deferred
     // (is_extraction_unit_connector && defer_division) link found, stopping at the first non-deferred
@@ -288,7 +288,7 @@ struct DecodingUnit {
     // solved Task's own special_tasks list is non-empty, once, after every attached special task is
     // fully resolved -- not USE_SHMEM-gated, since local seams (and the deferred spans they trigger)
     // work the same with or without SHMEM.
-    void back_divide_walk(Task* start, ShotContainer& shot, int shot_container_id, int tid, std::ofstream* t_out = nullptr);
+    void back_divide_walk(Task* start, ShotContainer& shot, int shot_container_id, size_t shot_id, int tid, std::ofstream* t_out = nullptr);
 
     // Shatter+extract an entire unit subtree (job.subtree_root), accumulating into
     // shot.thread_results[tid] (bit-packed) or shot.res directly (extended observables, under omp
@@ -302,18 +302,18 @@ struct DecodingUnit {
     // not yet fixed -- tracked separately) virtual_boundary_hits-based approach.
     // t_out: optional per-thread debug stream; when DEBUG and non-null, logs the vb/task address of
     // the job being processed.
-    void process_extraction_job(ShotContainer& shot, const ExtractionJob& job, int tid, std::ofstream* t_out = nullptr);
+    void process_extraction_job(ShotContainer& shot, size_t shot_id, const ExtractionJob& job, int tid, std::ofstream* t_out = nullptr);
 
     // Non-preemptive (extract_preemptively == false) post-hoc chunking: a single top-down walk of the
     // balanced-over-units tree, driven entirely by the extraction-role tags (see
     // decoding_task.h/build_tasks_for_round_partitioning) -- no dynamic leaf-counting needed. At a
     // unit root, post it and return; at a connector, divide its own vb inline (making both children
     // independently safe to post/recurse into) and recurse into both.
-    void post_hoc_chunk_and_post(Task* node, ShotContainer& shot, int shot_container_id, int tid, std::ofstream* t_out = nullptr);
+    void post_hoc_chunk_and_post(Task* node, ShotContainer& shot, int shot_container_id, size_t shot_id, int tid, std::ofstream* t_out = nullptr);
 
     // Reset to 0.0 at the top of every decode_shots() call; accumulated by the single "last" thread
     // per shot into wall-clock ms of pure decode compute, excluding the I/O window inside
-    // write_result_and_get_next_shot(). Read by the caller immediately after each decode_shots() call.
+    // write_shot_result(). Read by the caller immediately after each decode_shots() call.
     double last_decode_shots_wall_ms{0.0};
 
     void decode_shots();

@@ -14,7 +14,7 @@ thisThreads=$2
 source ~/.bash_profile
 conda activate pymatching
 
-threads_build=~/PyMatchingSHMEM/build_threads/pymatching
+threads_build=~/PyMatchingSHMEM/build_threads_release/pymatching
 # sos_build=~/PyMatchingSHMEM/build_sos/pymatching
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close

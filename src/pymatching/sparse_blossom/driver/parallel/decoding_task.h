@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <immintrin.h>
 #include <memory>
 #include <vector>
 
@@ -181,6 +182,16 @@ struct Task : public TaskBase {
     // build_tasks_for_obs_patch_partitioning. -1 for ROUND partitioning.
     int obs_patch_id{-1};
 
+    // Decentralized shot sync (docs/decentralized_shot_sync_design.md §6): a plain, ever-
+    // incrementing counter of how many rounds' worth of extraction this partition leaf has
+    // completed. No reset is needed between shots (or even between rounds) -- try_to_steal's CAS
+    // already guarantees exactly one thread ever owns a given round for a given partition, so
+    // there is no reader/writer race on a stale value to protect against. Only Task::reset()
+    // (a full --num_repeats restart) puts it back to 0. Meaningful only for partition leaves
+    // (!is_fusion), but kept unconditional on Task for simplicity, mirroring how `status` itself
+    // is unconditional despite its two branches meaning different things.
+    alignas(64) std::atomic<int64_t> extraction_done{0};
+
     Task(int partition, pm::Mwpm* solver)
         : TaskBase(partition, partition - 1, partition, false, TaskType::Task, solver)
     {
@@ -209,6 +220,7 @@ struct Task : public TaskBase {
         : TaskBase(std::move(other))
     {
         status.store(other.status.load());
+        extraction_done.store(other.extraction_done.load());
         parent = other.parent;
         left_child = other.left_child;
         right_child = other.right_child;
@@ -221,6 +233,7 @@ struct Task : public TaskBase {
     Task& operator=(Task&& other) noexcept {
         TaskBase::operator=(std::move(other));
         status.store(other.status.load());
+        extraction_done.store(other.extraction_done.load());
         parent = other.parent;
         left_child = other.left_child;
         right_child = other.right_child;
@@ -291,6 +304,51 @@ struct Task : public TaskBase {
 
     void reset() override {
         status.store((is_fusion) ? 0 : -1, std::memory_order_release);
+        extraction_done.store(0, std::memory_order_release);
+    }
+
+    // Called by whichever thread just finished extracting this partition leaf's own previously-
+    // closed round. Plain increment, no round argument: the gating this enables (decode(R) can't
+    // start until extract(R-1) is marked done; extract(R) can't happen until decode(R) finishes)
+    // already forces every partition's own sequence of these calls to happen in strict round
+    // order, so a plain counter can never skip or reorder.
+    void mark_extraction_done() {
+        extraction_done.fetch_add(1, std::memory_order_release);
+    }
+
+    // Called immediately after winning try_to_steal(round) for this leaf, before proceeding to
+    // decode -- the CAS succeeding only means this thread now owns the partition going forward,
+    // not that its buffer is safe to reuse yet. Pure spin-wait, deliberately not
+    // std::atomic::wait()/.notify_all(): measured directly on this exact per-partition site (not
+    // just the old global current_buffer_round rendezvous in
+    // docs/decentralized_shot_sync_design.md §1) -- even with at most one waiter per atomic,
+    // futex wait/wake syscall volume at round-granularity call frequency (10,000 rounds/shot) made
+    // decode-only wall time 1.1x-4.2x worse (16->256 threads), dominated by `syscall` self-time
+    // (20,050 CPU-s at 256 threads, vs 8,767 CPU-s for the spin it replaced).
+    //
+    // Exponential _mm_pause() backoff, not a single pause per check: PAUSE's latency is wildly
+    // architecture-dependent (measured ~18.5s of self-time on Intel Sapphire Rapids at 32 threads,
+    // doesn't even register on AMD Zen4 -- Zen4's PAUSE is only a few cycles vs 100+ on many
+    // recent Intel parts), so a fixed one-pause-per-check delay is Intel-tuned by accident. Scaling
+    // the *count* of pauses per check instead makes the achieved delay self-calibrating to
+    // whatever a PAUSE actually costs on the running core, on either architecture, with no syscall
+    // involved (so it can't reproduce the wait/notify regression above). Capped, not unbounded:
+    // an uncapped backoff would trade check latency for spin cost on a long wait; 1024 keeps the
+    // worst-case delay between checks small relative to a round's own decode work.
+    //
+    // Exact match against `round` itself, no -1 offset: extraction_done starts at 0, so claiming
+    // round 0 checks 0 == 0 and never waits.
+    void wait_until_previous_extraction_done(int64_t round) {
+        int spin_count = 1;
+        constexpr int max_spin_count = 1024;
+        while (extraction_done.load(std::memory_order_acquire) != round) {
+            for (int i = 0; i < spin_count; ++i) {
+                _mm_pause();
+            }
+            if (spin_count < max_spin_count) {
+                spin_count *= 2;
+            }
+        }
     }
 };
 
@@ -328,7 +386,10 @@ struct LocalSeamTask : public SpecialTask {
     // match the current one, mirroring how Task::try_to_steal's own leaf-claim CAS (`expected = val -
     // 1`) avoids the identical class of bug. -1 = never resolved yet. Set by whichever thread wins
     // this seam's own try_to_steal race, as its last action (after that seam's own mark_solved()).
-    std::atomic<int64_t> ready{-1};
+    // Named decode_done (not the old `ready`) to distinguish this purely intra-shot, inter-thread
+    // signal from the unrelated per-partition extraction_done added to Task for shot-advancement
+    // gating (docs/decentralized_shot_sync_design.md §7) -- different purpose, different state.
+    std::atomic<int64_t> decode_done{-1};
 
     LocalSeamTask(int vb, int vb_left, int vb_right, pm::Mwpm* solver)
         : SpecialTask(vb, vb_left, vb_right, true, TaskType::LocalSeamTask, solver)
@@ -344,7 +405,7 @@ struct LocalSeamTask : public SpecialTask {
 #ifdef ENABLE_DRAW_FLAGS
         obs_patch_ids = std::move(other.obs_patch_ids);
 #endif
-        ready.store(other.ready.load());
+        decode_done.store(other.decode_done.load());
     }
     LocalSeamTask& operator=(LocalSeamTask&& other) noexcept {
         SpecialTask::operator=(std::move(other));
@@ -353,7 +414,7 @@ struct LocalSeamTask : public SpecialTask {
 #ifdef ENABLE_DRAW_FLAGS
         obs_patch_ids = std::move(other.obs_patch_ids);
 #endif
-        ready.store(other.ready.load());
+        decode_done.store(other.decode_done.load());
         return *this;
     }
 
@@ -393,17 +454,17 @@ struct LocalSeamTask : public SpecialTask {
     }
 
     // Should only be called after seam vb is divided
-    void mark_ready(size_t shot_buffer_round) {
-        ready.store(shot_buffer_round, std::memory_order_release);
+    void mark_decode_done(size_t shot_buffer_round) {
+        decode_done.store(shot_buffer_round, std::memory_order_release);
     }
 
-    void wait_until_ready(size_t shot_buffer_round) {
-        while (ready.load(std::memory_order_acquire) != shot_buffer_round) {}
+    void wait_until_decode_done(size_t shot_buffer_round) {
+        while (decode_done.load(std::memory_order_acquire) != shot_buffer_round) {}
     }
 
     void reset() override {
         status.store(0, std::memory_order_release);
-        ready.store(-1, std::memory_order_release);
+        decode_done.store(-1, std::memory_order_release);
     }
 };
 

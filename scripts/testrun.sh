@@ -8,16 +8,17 @@
 
 if [ $# -le 3 ]
   then
-    echo "Args: [nthreads] [shots] [rounds] [M] ... [skip_stim]"
+    echo "Args: [nthreads] [shots] [rounds] [M] [num_repeats] [skip_stim]"
     exit 1
 else
     nthreads=$1
     shots=$2
     rounds=$(($3-1))
     M=$4
+    num_repeats=${5:-1}
 fi
 
-if [[ -n ${5+x} ]]; then
+if [[ -n ${6+x} ]]; then
     build_circuit=false
 else
     build_circuit=true
@@ -151,12 +152,12 @@ $threads_build predict \
     --out predicted_obs_flips__threads.01 \
     --out_format 01 \
     --rounds_per_partition $M \
-    --seam_buffer_size $k \
     --task_division_strategy observable \
     --use_threads \
     --extraction_unit_size 4 \
     --extract_preemptively \
     --draw_frames \
+    --num_repeats $num_repeats \
     > log_threads.out 2>log_threads.err
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))

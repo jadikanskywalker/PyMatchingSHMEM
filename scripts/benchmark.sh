@@ -38,7 +38,7 @@ cd $dir
 pwd > bench.out
 
 rounds=8192
-threads=(2 4 8 16 32)
+threads=(2 4 8 16 32 64 128 256)
 # threads=(32)
 # M=(64 32 16 8)
 M=(8 16 32 64)
@@ -50,7 +50,7 @@ task=rotated_memory_x
 p=0.$p_dec
 
 serial_build=~/PyMatchingSHMEM/build/pymatching
-threads_build=~/PyMatchingSHMEM/build_threads/pymatching
+threads_build=~/PyMatchingSHMEM/build_threads_release/pymatching
 echo "serial_build:  $serial_build" >> bench.out
 echo "threads_build: $threads_build"
 
