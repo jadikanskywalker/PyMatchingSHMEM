@@ -35,12 +35,44 @@ namespace pm {
 // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md Design §3): a
 // self-describing extraction job. Any thread can process a job; a job always names a fully-closed
 // unit subtree -- closed meaning its outer boundaries have been "divided" (see DecodingUnit::
-// divide_vb). Cross-rank fusion extraction of received window is handled inline avoiding posting
+// divide_vb). Cross-rank fusion extraction of received window is handled inline avoiding posting.
+// ready gates a claimer reading subtree_root/shot_container_id: a slot exists (default-constructed,
+// unposted) as soon as ShotIOResource itself is built, so a thread can claim slot i before job i is
+// actually posted -- see ShotIOResource::try_claim_extraction_job. alignas(64) bumps the whole
+// struct's alignment so adjacent slots in ShotIOResource::extraction_jobs never share a cache line
+// (each slot is spun on by a different thread while waiting).
 struct ExtractionJob {
     int shot_container_id;
     Task* subtree_root;
     pm::MatchingResult obs_mask;
     pm::ExtendedMatchingResult res;
+    alignas(64) std::atomic<int> ready{0};
+
+    ExtractionJob() = default;
+    ExtractionJob(const ExtractionJob&) = delete;
+    ExtractionJob& operator=(const ExtractionJob&) = delete;
+
+    // ready makes the implicit move ctor/assign deleted; std::vector<ExtractionJob>::reserve()
+    // still needs this to at least compile (even though, in practice, reserve() is only ever
+    // called on an empty vector here -- see ShotIOResource's ctor -- so there's nothing to
+    // actually move at runtime). Mirrors ShotIOResource's own atomic-skipping move pattern.
+    ExtractionJob(ExtractionJob&& other) noexcept
+        : shot_container_id(other.shot_container_id),
+          subtree_root(other.subtree_root),
+          obs_mask(other.obs_mask),
+          res(std::move(other.res)) {
+        ready.store(other.ready.load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+    ExtractionJob& operator=(ExtractionJob&& other) noexcept {
+        if (this != &other) {
+            shot_container_id = other.shot_container_id;
+            subtree_root = other.subtree_root;
+            obs_mask = other.obs_mask;
+            res = std::move(other.res);
+            ready.store(other.ready.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        }
+        return *this;
+    }
 };
 
 // ShotIOResource isolates everything needs to store hits (input for a shot), manage extraction jobs,
@@ -78,13 +110,14 @@ struct ShotIOResource {
     // Incremented by each thread when it finishes all its roots for a shot.
     // Thread to reach num_task_roots writes result
     alignas(64) std::atomic<int64_t> num_roots_done{0};
-    // Unit-checkpointed extraction queue (Design §3-6). Posting is mutex-guarded;
-    // claiming is non-locking via a fetch_add cursor.
-    // capacity is reserved once and never grown to never race a reallocation.
-    std::mutex extraction_post_mutex;
+    // Unit-checkpointed extraction queue (Design §3-6). extraction_jobs is pre-sized to exactly
+    // num_extraction_units slots at construction (a static, verified-exact per-shot constant, see
+    // ShotBuffer::num_extraction_units) and never grown afterward -- posting and claiming both
+    // reduce to a single fetch_add each (see post_extraction_job/try_claim_extraction_job), no
+    // mutex needed: each poster's fetch_add hands it a unique, exclusively-owned slot index.
     std::vector<ExtractionJob> extraction_jobs;
-    alignas(64) std::atomic<size_t> extraction_posted_count{0};  // published (release) job count
-    alignas(64) std::atomic<size_t> extraction_claim_cursor{0};  // next unclaimed job index
+    alignas(64) std::atomic<size_t> extraction_posted_count{0};  // next slot index to post into
+    alignas(64) std::atomic<size_t> extraction_claim_cursor{0};  // next slot index to claim/wait on
     // Gates ShotContainer reuse until every posted job has actually been executed (not just
     // claimed) -- incremented on post, decremented once a claimed job finishes processing.
     alignas(64) std::atomic<int> pending_extraction_jobs{0};
@@ -93,23 +126,30 @@ struct ShotIOResource {
         int num_partitions,
         int num_virtual_boundaries,
         int num_observables,  // sizes res/obs_mask/thread_extended_results only, not stored
-        int num_threads);
+        int num_threads,
+        int num_extraction_units);
 
-    // extraction_post_mutex makes this non-movable/non-copyable by default (std::mutex has
-    // neither). Custom move ctor/assign needed so std::vector<ShotIOResource> can grow via
-    // emplace_back during read_all_shots_and_create_IO_resources (io_resources is sized
-    // incrementally, one shot at a time, since the total shot count isn't known upfront) --
-    // mirrors ShotContainer's existing pattern exactly: skip the mutex (default-constructs fresh
-    // in the moved-to object, correct since it's never contended at move time), manually
-    // .load()/.store() every atomic.
+    // Custom move ctor/assign needed so std::vector<ShotIOResource> can grow via emplace_back
+    // during read_all_shots_and_create_IO_resources (io_resources is sized incrementally, one shot
+    // at a time, since the total shot count isn't known upfront) -- mirrors ShotContainer's
+    // existing pattern: manually .load()/.store() every atomic. extraction_jobs itself moves as a
+    // plain std::vector (always fine regardless of ExtractionJob containing an atomic -- vector
+    // move never touches individual elements).
     ShotIOResource(const ShotIOResource&) = delete;
     ShotIOResource& operator=(const ShotIOResource&) = delete;
     ShotIOResource(ShotIOResource&& other) noexcept;
     ShotIOResource& operator=(ShotIOResource&& other) noexcept;
 
-    // t_out: optional per-thread debug stream; when DEBUG and non-null
-    void post_extraction_job(const ExtractionJob& job, std::ofstream* t_out = nullptr);
-    ExtractionJob* try_claim_extraction_job();
+    // Per-value parameters, not a whole ExtractionJob&: ExtractionJob now owns an atomic (ready),
+    // so there's nothing sensible to construct-and-pass-by-reference at a call site -- callers
+    // only ever have a (shot_container_id, subtree_root) pair to publish. t_out: optional
+    // per-thread debug stream; when DEBUG and non-null.
+    void post_extraction_job(int shot_container_id, Task* subtree_root, std::ofstream* t_out = nullptr);
+    // num_extraction_units: the exact, static total this shot will ever post (see ShotBuffer::
+    // num_extraction_units) -- once claim_cursor reaches it, every slot has been claimed and no
+    // more will ever exist, so this returns nullptr immediately rather than waiting. Otherwise
+    // spins on the claimed slot's own ready flag until that specific job is posted.
+    ExtractionJob* try_claim_extraction_job(size_t num_extraction_units);
 
     // Per-repeat (--num_repeats) reset only -- never called per-shot. Resets thread_results,
     // thread_extended_results, res, obs_mask, num_roots_done, and the whole extraction queue.
@@ -167,6 +207,11 @@ struct ShotBuffer {
     // read_all_shots_and_create_IO_resources, read directly by callers instead of a per-shot
     // ShotIOResource field (it never varies per shot, same reasoning as num_observables above).
     int num_task_roots{0};
+    // Exact total extraction jobs a shot will ever post (ceil(my_partition_count/L) for ROUND,
+    // summed per-obs-patch for OBS) -- also fixed for the whole run, set once by
+    // read_all_shots_and_create_IO_resources, and used both to pre-size each ShotIOResource's
+    // extraction_jobs slots and as try_claim_extraction_job's exact termination bound.
+    int num_extraction_units{0};
 
     alignas(64) int64_t next_shot_container_id{ 0 };
     alignas(64) int64_t last_shot_container_id{ -1 };
@@ -199,10 +244,13 @@ struct ShotBuffer {
     // node_part_id and appending one fully-populated ShotIOResource per shot to io_resources.
     // num_threads sizes each ShotIOResource's thread_results/thread_extended_results at
     // construction, rather than those being set post-hoc by task-tree-building code.
-    // num_task_roots_in is stashed directly onto ShotBuffer::num_task_roots (a fixed per-run
-    // constant, not per-shot -- see the field comment above).
+    // num_task_roots_in/num_extraction_units_in are stashed directly onto ShotBuffer::
+    // num_task_roots/num_extraction_units (fixed per-run constants, not per-shot -- see the field
+    // comments above), and num_extraction_units_in also sizes each new ShotIOResource's
+    // extraction_jobs slots.
     void read_all_shots_and_create_IO_resources(
-        std::vector<int>& node_part_id, int num_threads, int num_task_roots_in);
+        std::vector<int>& node_part_id, int num_threads, int num_task_roots_in,
+        int num_extraction_units_in);
 
     // -- Helpers below decouple DecodingUnit from ShotIOResource's internal layout: every one of
     // these is keyed by shot_id (Tier B, one slot per real shot) rather than shot_container_id
@@ -227,7 +275,9 @@ struct ShotBuffer {
     bool all_roots_done(size_t shot_id) const;
     // No num_task_roots(shot_id) helper -- fixed per-run constant, read directly off
     // ShotBuffer::num_task_roots at call sites instead (never per-shot).
-    void post_extraction_job(size_t shot_id, const ExtractionJob& job, std::ofstream* t_out = nullptr);
+    void post_extraction_job(size_t shot_id, int shot_container_id, Task* subtree_root, std::ofstream* t_out = nullptr);
+    // Forwards the cached num_extraction_units bound -- callers never need to query "how many have
+    // posted so far" separately; nullptr means every slot for this shot has been claimed.
     ExtractionJob* try_claim_extraction_job(size_t shot_id);
     int pending_extraction_jobs(size_t shot_id) const;
     // Called once a claimed job has actually finished processing (not just claimed) -- decrements

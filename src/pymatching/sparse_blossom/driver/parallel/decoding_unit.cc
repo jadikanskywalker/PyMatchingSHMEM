@@ -153,6 +153,10 @@ pm::DecodingUnit::DecodingUnit(
     // below; computed here since it falls straight out of the OBS/ROUND branch already below,
     // rather than duplicating that branch's logic a second time.
     int num_task_roots_for_shots = 1;
+    // Exact total extraction jobs a shot will ever post (ceil(my_partition_count/L) for ROUND,
+    // summed per-obs-patch for OBS) -- a static, verified-exact per-run constant (see the plan
+    // this implements), computed here for the same reason as num_task_roots_for_shots above.
+    int num_extraction_units_for_shots = 0;
     // --- Populate my_partition_task_ids (ROUND only -- OBS populates this itself, from inside
     // build_tasks_for_obs_patch_partitioning, recording each leaf's *actual* tasks[] index as it's
     // created. A fixed p_base formula here would assume every observable occupies a fixed-size block
@@ -185,6 +189,8 @@ pm::DecodingUnit::DecodingUnit(
         my_partition_count  = my_obs_count * (int)graph.p_per_obs_patch;
         my_partition_task_ids.reserve((size_t)my_partition_count);
         num_task_roots_for_shots = my_obs_count;
+        num_extraction_units_for_shots = my_obs_count *
+            (((int)graph.p_per_obs_patch + config_parallel::L - 1) / config_parallel::L);
     } else {
 #ifdef USE_SHMEM
         const int p_base   = (int)graph.num_partitions / n_pes;
@@ -196,6 +202,8 @@ pm::DecodingUnit::DecodingUnit(
         my_partition_count = graph.num_partitions;
 #endif
         my_partition_task_ids.reserve(my_partition_count);
+        num_extraction_units_for_shots =
+            (my_partition_count + config_parallel::L - 1) / config_parallel::L;
     }
     // my_partition_task_ids isn't populated yet at this point for either strategy (OBS fills it in
     // from build_tasks_for_obs_patch_partitioning, ROUND from build_tasks_for_round_partitioning, both
@@ -214,7 +222,7 @@ pm::DecodingUnit::DecodingUnit(
         std::cout << "DEBUG: Reading shots \n" << std::flush;
     }
     shot_buffer->read_all_shots_and_create_IO_resources(
-        graph.node_part_id, (int)num_threads, num_task_roots_for_shots);
+        graph.node_part_id, (int)num_threads, num_task_roots_for_shots, num_extraction_units_for_shots);
 #ifdef USE_SHMEM
     // --- Allocate buffer for GraphFillRegion arenas ---
     // Sized globally (graph.num_partitions, not num_solvers_per_buffer/my_partition_count): the
@@ -1954,7 +1962,7 @@ void pm::DecodingUnit::back_divide_walk(
         divide_vb(shot, shot_container_id, shot_id, link, tid, link, t_out);
         Task* left = link->left_child;
         Task* closed_unit = left->is_extraction_unit_connector ? left->right_child : left;
-        shot_buffer->post_extraction_job(shot_id, ExtractionJob{shot_container_id, closed_unit}, t_out);
+        shot_buffer->post_extraction_job(shot_id, shot_container_id, closed_unit, t_out);
     }
 }
 
@@ -2031,7 +2039,7 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
 
 void pm::DecodingUnit::post_hoc_chunk_and_post(Task* node, ShotContainer& shot, int shot_container_id, size_t shot_id, int tid, std::ofstream* t_out) {
     if (node->is_extraction_unit_root) {
-        shot_buffer->post_extraction_job(shot_id, ExtractionJob{shot_container_id, node}, t_out);
+        shot_buffer->post_extraction_job(shot_id, shot_container_id, node, t_out);
         return;
     }
     // node->is_extraction_unit_connector: divide its own vb inline first -- this is what makes both
@@ -2080,23 +2088,20 @@ void pm::DecodingUnit::decode_shots() {
         SCOREP_USER_REGION_DEFINE(cross_rank_fusion);
         SCOREP_USER_REGION_DEFINE(solution_extraction);
         SCOREP_USER_REGION_DEFINE(shot_decode);
-        SCOREP_USER_REGION_DEFINE(shot_spin_wait);
         SCOREP_USER_REGION_DEFINE(shot_iteration);
+        // Narrower than local_decoding (which spans the whole per-shot climb): one region per
+        // process_timeline_until_completion call, split by leaf vs. fusion since their cost
+        // profiles differ a lot -- lets an OTF2 trace give the full per-call duration
+        // distribution (not just a mean) for leaf-decode-time variance characterization.
+        SCOREP_USER_REGION_DEFINE(leaf_decode);
+        SCOREP_USER_REGION_DEFINE(fusion_decode);
+        // Visits count of this region in a Score-P profile directly answers "how often does
+        // sibling-stealing actually engage" -- no separate counter needed.
+        SCOREP_USER_REGION_DEFINE(sibling_steal);
 #endif
         const int tid = omp_get_thread_num();
 #ifdef ENABLE_SHOT_BUFFERS
         const int num_shot_containers = NUM_BUFFERS_PER_UNIT;
-        // Idle-helper participation gate (see this-is-a-broader-purrfect-crystal.md Design §11 and
-        // i-see-here-s-the-delegated-pelican.md): bounds how many threads ever spin on the extraction
-        // queue at once to roughly the number of extraction units that could ever exist, so idle
-        // threads for a small job don't pay any contention cost at all. Strided (not a tid < N
-        // prefix) so helper duty doesn't concentrate on the low-tid threads that also own the next
-        // shot's earliest static-leaf partitions. Pure function of already-fixed values (num_threads,
-        // graph.num_partitions, config_parallel::L) -- identical, deterministic result on every thread.
-        const int num_extraction_units =
-            ((int)graph.num_partitions + config_parallel::L - 1) / config_parallel::L;  // ceil
-        const int helper_stride = std::max(1, (int)num_threads / std::max(1, num_extraction_units));
-        if (DEBUG && tid == 0) std::cout << "helper_stride: " << helper_stride << std::endl;
 #else
         const int num_shot_containers = 1;
 #endif
@@ -2257,6 +2262,13 @@ void pm::DecodingUnit::decode_shots() {
                         solver.flooder.vb_offsets = { K_vb * patch };
                     }
 #endif // ENABLE_DRAW_FLAGS
+#ifdef SCOREP_USER_ENABLE
+                    if (t->is_fusion) {
+                        SCOREP_USER_REGION_BEGIN(fusion_decode, "Fusion Decode", SCOREP_USER_REGION_TYPE_COMMON);
+                    } else {
+                        SCOREP_USER_REGION_BEGIN(leaf_decode, "Leaf Decode", SCOREP_USER_REGION_TYPE_COMMON);
+                    }
+#endif
                     pm::process_timeline_until_completion(
                         solver,
                         hitsref,
@@ -2265,6 +2277,13 @@ void pm::DecodingUnit::decode_shots() {
 #endif
                         true,
                         tid);
+#ifdef SCOREP_USER_ENABLE
+                    if (t->is_fusion) {
+                        SCOREP_USER_REGION_END(fusion_decode);
+                    } else {
+                        SCOREP_USER_REGION_END(leaf_decode);
+                    }
+#endif
                     if (DEBUG) t_out << "  solved " << (t->is_fusion ? "f" : "p") << t->part << std::endl << std::flush;
                     t->mark_solved();
                     // Process any attached special tasks (seams/CRTs) in order, then t's own deferred
@@ -2407,7 +2426,7 @@ void pm::DecodingUnit::decode_shots() {
                         Task* closed_unit = left->is_extraction_unit_connector
                             ? left->right_child   // Fk, k>1: U(k-1), just closed on its right
                             : left;                // F1: U0, left_child IS the unit itself
-                        shot_buffer->post_extraction_job(shot_id, ExtractionJob{(int)shot_container_id, closed_unit}, &t_out);
+                        shot_buffer->post_extraction_job(shot_id, (int)shot_container_id, closed_unit, &t_out);
                     }
                     if (t->parent != nullptr) {
                         Task* local_parent = t->parent;
@@ -2418,7 +2437,16 @@ void pm::DecodingUnit::decode_shots() {
                         // Try to steal sibling or descendent of sibling
                         if (!stolen && !sibling->is_fusion) {
                             stolen = sibling->try_to_steal(shot_buffer_round);
-                            if (stolen) sibling->wait_until_previous_extraction_done(shot_buffer_round);
+                            if (stolen) {
+#ifdef SCOREP_USER_ENABLE
+                                // Zero-duration marker -- only the Visits count (Score-P profile
+                                // mode) matters here, to characterize how often sibling-stealing
+                                // actually engages.
+                                SCOREP_USER_REGION_BEGIN(sibling_steal, "Sibling Steal", SCOREP_USER_REGION_TYPE_COMMON);
+                                SCOREP_USER_REGION_END(sibling_steal);
+#endif
+                                sibling->wait_until_previous_extraction_done(shot_buffer_round);
+                            }
                             t = sibling;
                         }
                     } else {
@@ -2453,10 +2481,10 @@ void pm::DecodingUnit::decode_shots() {
                         } else if (root_task->is_extraction_unit_connector) {
                             // Divide+post root connector's right_child (final unit)
                             shot_buffer->post_extraction_job(
-                                shot_id, ExtractionJob{(int)shot_container_id, root_task->right_child}, &t_out);
+                                shot_id, (int)shot_container_id, root_task->right_child, &t_out);
                         } else {
                             // Divide+post root task (degenerative one unit case)
-                            shot_buffer->post_extraction_job(shot_id, ExtractionJob{(int)shot_container_id, root_task}, &t_out);
+                            shot_buffer->post_extraction_job(shot_id, (int)shot_container_id, root_task, &t_out);
                         }
 #ifdef SCOREP_USER_ENABLE
                         SCOREP_USER_REGION_END(solution_extraction);
@@ -2470,55 +2498,20 @@ void pm::DecodingUnit::decode_shots() {
                         i_solved_last_root = true;
                     }
                 }
-#ifdef ENABLE_SHOT_BUFFERS
-                // This thread's own static leaf stride is exhausted without ever reaching a local
-                // root this shot -- help drain the extraction queue instead of idling until the
-                // shot completes (real parallel extraction, not just the single root-reaching
-                // thread's own serial drain; also a stress test for extraction-job independence).
-                // Not attempted for NUM_BUFFERS_PER_UNIT > 1: there, an idle thread has a genuine
-                // choice (keep helping this shot vs. advance into the next shot's data) that this
-                // mechanism doesn't address -- see profiling-reveals-...milner.md §7's
-                // active_workers/floor mechanism for that, separate future work.
-                //
-                // Plain busy-spin, not .wait()/.notify() -- deliberately: a spin loop always re-reads
-                // the current value, so there's no "asleep" state to miss a wakeup from (see
-                // i-see-here-s-the-delegated-pelican.md for the three wait/notify bugs this replaces).
-                // Gated to a strided subset of threads (tid % helper_stride == 0) so the number of
-                // threads simultaneously spinning on these shared atomics is bounded by how many
-                // extraction units could ever exist, not by how many threads happen to be idle --
-                // profiling showed naive spinning on a shared atomic scales badly at high thread
-                // counts. Strided (not a contiguous tid < N prefix) so helper duty doesn't
-                // concentrate on the low-tid threads that also own the next shot's earliest
-                // partitions -- most threads never enter this loop at all and are immediately free
-                // to move on to their own next shot.
-                if (tid % helper_stride == 0) {
-                    while (true) {
-                        if (ExtractionJob* job = shot_buffer->try_claim_extraction_job(shot_id)) {
-                            process_extraction_job(shot, shot_id, *job, tid, &t_out);
-                            continue;
-                        }
-                        // No more generation/staleness check needed here (the old design's
-                        // comment about a container getting recycled for a newer round out from
-                        // under a lagging thread no longer applies): each shot_id owns its own
-                        // dedicated extraction queue in io_resources[shot_id] permanently -- it is
-                        // never reused for a different shot, so there is no resource here that can
-                        // go stale. Bail once this shot's whole tree has resolved (no more jobs
-                        // will ever be posted for it after that point).
-                        if (shot_buffer->all_roots_done(shot_id)) {
-                            break;
-                        }
-                    }
-                }
-#else
-                // Drain this shot's entire extraction queue before checking completion.
-                // num_task_roots is always 1, so exactly one thread reaches this point per shot,
-                // and every job-posting site above runs on this same thread's own climb/CRT-
-                // handling path strictly before this loop -- nothing can post a new job for this
-                // shot after the drain starts.
+                // This thread's own work for the shot (decode climb, and any roots it just solved
+                // above) is done -- fall through into the shared extraction queue. Every thread
+                // does this, every shot, unconditionally: try_claim_extraction_job now claims a
+                // slot via a single fetch_add and, unless every one of this shot's
+                // num_extraction_units slots has already been claimed, spins on that slot's own
+                // ready flag until the job that will eventually land there is posted (see
+                // ShotIOResource::try_claim_extraction_job) -- so a thread that finishes early
+                // doesn't miss jobs posted moments later by a still-climbing thread elsewhere, and
+                // no thread ever needs to single-handedly drain a whole late burst by itself. Once
+                // this returns nullptr, every slot for this shot has been claimed (though maybe not
+                // yet finished processing -- see the pending_extraction_jobs waits below).
                 while (ExtractionJob* job = shot_buffer->try_claim_extraction_job(shot_id)) {
                     process_extraction_job(shot, shot_id, *job, tid, &t_out);
                 }
-#endif
                 // report_done tells the other PE "my local window buffer is free for your next shot's
                 // send_solution_to_remote_pe to reuse" -- must not fire until every job this shot
                 // posted (back_divide_walk, t's own divide+post) has actually been *processed*, not

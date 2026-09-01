@@ -10,11 +10,12 @@
 
 if [ $# -lt 2 ]
   then
-    echo "Args: [nthreads] [M]"
+    echo "Args: [nthreads] [M] [extra_flags]"
     exit 1
 else
     nthreads=$1
     M=$2
+    extra_flags=$3
 fi
 
 source ~/.bash_profile
@@ -37,7 +38,8 @@ tag=threads${nthreads}
     --out predicted_obs_flips.01 \
     --out_format 01 \
     --rounds_per_partition $M \
-    --use_threads
+    --use_threads \
+    $extra_flags
 if [ $? -ne 0 ]; then
     echo "vtune_profile.sh failed for $tag" >&2
     exit 1
