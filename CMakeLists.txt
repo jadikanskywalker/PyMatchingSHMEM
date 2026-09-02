@@ -119,6 +119,23 @@ set(PYTHON_API_FILES
 
 add_executable(pymatching src/main.cc ${SOURCE_FILES_NO_MAIN})
 
+# Opt-in Score-P instrumentation for pymatching's own sources only -- set via
+# -DPYMATCHING_COMPILER_LAUNCHER="scorep;--user;--compiler;--thread=omp:opari2" (or similar) at
+# configure time. Deliberately a per-target property, not the global CMAKE_<LANG>_COMPILER_LAUNCHER
+# cache variable: the latter would also wrap libstim's compile (a vendored FetchContent dependency),
+# and OPARI2's OpenMP-pragma preprocessing pass crashes ("unbalanced pragma/directive nesting") on
+# at least one stim source file (diagram/gltf.cc) -- unrelated to whether that file is actually
+# instrumented, since --instrument-filter only affects the --compiler method, not OPARI2's separate
+# preprocessing step. Left unset, this is a no-op for normal builds.
+if (PYMATCHING_COMPILER_LAUNCHER)
+    set_target_properties(pymatching PROPERTIES
+        CXX_COMPILER_LAUNCHER "${PYMATCHING_COMPILER_LAUNCHER}"
+        C_COMPILER_LAUNCHER "${PYMATCHING_COMPILER_LAUNCHER}"
+        CXX_LINKER_LAUNCHER "${PYMATCHING_COMPILER_LAUNCHER}"
+        C_LINKER_LAUNCHER "${PYMATCHING_COMPILER_LAUNCHER}"
+    )
+endif()
+
 target_compile_options(pymatching PRIVATE ${ARCH_OPT})
 if (NOT (MSVC))
     target_link_options(pymatching PRIVATE -pthread ${ARCH_OPT})
