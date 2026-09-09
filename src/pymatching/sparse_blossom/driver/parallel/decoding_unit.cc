@@ -1333,7 +1333,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
                 }
                 if (!valid) {
                     if (DEBUG) t_out << "      SHATTERING blossom_root\n" << std::flush;
-                    res += solver.shatter_blossom_and_extract_matches(blossom_root);
+                    res += solver.shatter_blossom_and_extract_matches(blossom_root, &t);
                 } else {
                     for (const auto& child_edge : discovered_child_edges) {
                         if (child_edges_counter < p_k * child_edges_nelems_per_solver) {
@@ -1348,12 +1348,6 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
             }
         }
     }
-
-    // The validation pass above can shatter a region still referenced in t's own (by now, via
-    // CrossRankTask::setup(), genuinely populated) regions_matched_to_virtual_boundary -- the one
-    // shatter in the whole CRT path with no divide_vb call of its own to fold this into (divide_vb
-    // handles it for every other shatter site). See prune_stale_regions_matched_to_vb's own comment.
-    prune_stale_regions_matched_to_vb(&t);
 
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_END(solution_isolation);
@@ -1510,7 +1504,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
             auto& node_state = solver.flooder.graph.nodes[i].state(shot_container_id);
             // Only shatter if it hasn't been shattered yet (region_that_arrived is still set)
             if (node_state.region_that_arrived) {
-                solver.shatter_blossom_and_extract_matches(node_state.region_that_arrived_top);
+                solver.shatter_blossom_and_extract_matches(node_state.region_that_arrived_top, &t);
             }
         }
     }
@@ -1876,14 +1870,6 @@ void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t s
 }
 #endif
 
-void pm::DecodingUnit::prune_stale_regions_matched_to_vb(TaskBase* t) {
-    auto& list = t->regions_matched_to_virtual_boundary;
-    list.erase(
-        std::remove_if(list.begin(), list.end(),
-            [](pm::GraphFillRegion* r) { return !r->allocated; }),
-        list.end());
-}
-
 void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, size_t shot_id, TaskBase* range_task, int tid, TaskBase* prune_target, std::ofstream* t_out) {
     int vb_id = range_task->part;
     if (DEBUG && t_out) {
@@ -1908,7 +1894,7 @@ void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, siz
         // No synchronization needed: this thread owns solver exclusively here (see Design §10).
         for (size_t i = vb_bounds.first; i <= vb_bounds.second; ++i) {
             auto* region = graph.graph_ptr->nodes[i].state(shot_container_id).region_that_arrived_top;
-            if (region) solver.shatter_blossom_and_extract_match_edges(region, solver.flooder.match_edges);
+            if (region) solver.shatter_blossom_and_extract_match_edges(region, solver.flooder.match_edges, prune_target);
         }
         solver.prepare_for_extraction(range_task);
         if (DEBUG && t_out) {
@@ -1926,20 +1912,18 @@ void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, siz
         pm::MatchingResult local_res{};
         for (size_t i = vb_bounds.first; i <= vb_bounds.second; ++i) {
             auto* region = graph.graph_ptr->nodes[i].state(shot_container_id).region_that_arrived_top;
-            if (region) local_res += solver.shatter_blossom_and_extract_matches(region);
+            if (region) local_res += solver.shatter_blossom_and_extract_matches(region, prune_target);
         }
         shot_buffer->thread_results(shot_id)[tid] += local_res;
     }
     // A blossom shattered here can span farther than this vb and destroy a region still referenced
     // in prune_target->regions_matched_to_virtual_boundary (kept there for a LATER setup() call --
-    // the next checkpoint up the chain, or a chained special task -- to consume). GraphFillRegion::
-    // allocated (set/cleared solely by the owning arena's own alloc/del) makes this a plain liveness
-    // check, not an explicitly-collected destroyed-list intersection. prune_target == nullptr (post-
-    // hoc chunking, where the whole tree is already fully solved and no future setup() will ever read
-    // that list again) skips this entirely.
-    if (prune_target) {
-        prune_stale_regions_matched_to_vb(prune_target);
-    }
+    // the next checkpoint up the chain, or a chained special task -- to consume). Nothing to do
+    // here anymore: shatter_blossom_and_extract_matches/_match_edges now remove a vb-matched region
+    // from prune_target's own list at the exact moment they delete it (see their shared
+    // remove_from_regions_matched_to_virtual_boundary helper), so the list can no longer go stale
+    // in the first place -- prune_target==nullptr (post-hoc chunking) already made this a no-op
+    // there too, via the same nullptr check inside that helper.
 }
 
 // Walks start's own left_child chain backward, collecting every deferred connector (is_extraction_

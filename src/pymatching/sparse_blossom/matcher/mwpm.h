@@ -94,19 +94,33 @@ struct Mwpm {
     // but must NOT re-include the CRT's own seam id, since that seam was already divided -- the
     // local window on this side and the received window on the other side are extracted separately.
     void prepare_for_extraction(TaskBase* task, bool set_vb_to_part = true);
-    // Liveness of a possibly-stale GraphFillRegion* after a shatter is now tracked directly on the
-    // region itself (GraphFillRegion::allocated, maintained solely by Arena/SHMEMArena's own
-    // alloc_unconstructed()/del()) -- callers that need to prune a stale-pointer list after a shatter
-    // (DecodingUnit::divide_vb, DecodingUnit::send_solution_to_remote_pe) just check ->allocated
-    // afterward instead of threading an explicit "what got destroyed this call" list through here.
+    // Removes region from task->regions_matched_to_virtual_boundary if present (swap-with-back +
+    // pop_back -- the same removal handle_tree_hitting_virtual_boundary_match already does when a
+    // vb match gets superseded by a region-region match; this is the shared implementation both use).
+    // No-op if task is nullptr (the serial, non-parallel mwpm_decoding.cc path, which has no
+    // TaskBase/regions_matched_to_virtual_boundary concept at all) or region isn't present (e.g.
+    // already removed by handle_tree_hitting_virtual_boundary_match earlier this shot).
+    static void remove_from_regions_matched_to_virtual_boundary(TaskBase* task, GraphFillRegion* region);
+    // A region shattered here that's matched to a virtual boundary (region->match.edge.loc_to !=
+    // nullptr -- the same convention DecodingUnit::send_solution_to_remote_pe already uses) must be
+    // pruned from prune_target->regions_matched_to_virtual_boundary at the exact moment it's deleted
+    // below: that list is populated during growth (handle_tree_hitting_virtual_boundary) and was
+    // otherwise only ever pruned on the "matched to another region instead" path
+    // (handle_tree_hitting_virtual_boundary_match) -- this closes the missing removal for the
+    // ordinary extraction-time deletion path (the old workaround for that gap,
+    // DecodingUnit::prune_stale_regions_matched_to_vb, is removed now that this makes the list never
+    // go stale in the first place). prune_target is the caller's own already-correct target
+    // (divide_vb's prune_target, send_solution_to_remote_pe's t) -- deliberately NOT Mwpm::task,
+    // which is only kept current by prepare_for_task() (called exclusively from the climb loop) and
+    // would be stale at every one of these call sites.
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_matches(
-        GraphFillRegion* region, MatchingResult& res);
-    MatchingResult shatter_blossom_and_extract_matches(GraphFillRegion* region);
+        GraphFillRegion* region, MatchingResult& res, TaskBase* prune_target = nullptr);
+    MatchingResult shatter_blossom_and_extract_matches(GraphFillRegion* region, TaskBase* prune_target = nullptr);
 
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_match_edges(
-        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges);
+        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges, TaskBase* prune_target = nullptr);
     void shatter_blossom_and_extract_match_edges(
-        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges);
+        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges, TaskBase* prune_target = nullptr);
     void extract_paths_from_match_edges(
         const std::vector<CompressedEdge>& match_edges, uint8_t* obs_begin_ptr, pm::total_weight_int& weight);
 
