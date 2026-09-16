@@ -41,10 +41,23 @@ struct SHMEMArena {
 
     int num_overflows_tracker{0};
 
+    // Set true only for a remote-partition shadow arena (decoding_unit.cc's remote_arenas):
+    // get_solution_from_remote_pe's bulk shmem_ctx_putmem_signal_nbi overwrites this arena's whole
+    // shmem_buffer slab -- taken AND free slots alike -- with the sending PE's raw GraphFillRegion
+    // bytes, including that PE's own constructed/destructed counters and (for a free slot the
+    // reconstruction loop never touches) foreign, un-freeable vector data pointers. A slot's
+    // constructed field is therefore not trustworthy on this kind of arena, so
+    // alloc_default_constructed() below must always placement-new rather than take the reset()
+    // reuse path. A genuinely local partition's own region_arena is never the target of another
+    // PE's put (PEs own disjoint partition ranges), so this stays false there and reset() reuse
+    // remains safe and cheap.
+    bool is_remote_shadow{false};
+
     SHMEMArena() : shmem_buffer(nullptr), shmem_buffer_size(0), allocated(), available(), shmem_bitmap() {
     }
-    SHMEMArena(T* shmem_buffer_, size_t shmem_buffer_size_)
-        : shmem_buffer(shmem_buffer_), shmem_buffer_size(shmem_buffer_size_), allocated(), available() {
+    SHMEMArena(T* shmem_buffer_, size_t shmem_buffer_size_, bool is_remote_shadow_ = false)
+        : shmem_buffer(shmem_buffer_), shmem_buffer_size(shmem_buffer_size_), allocated(), available(),
+          is_remote_shadow(is_remote_shadow_) {
         shmem_bitmap.resize(shmem_buffer_size/64, std::numeric_limits<uint64_t>::max());
         // Could set 0's to support SHMEM_ARENA_BUFFER_NELEMS not a multiple of 64
         // shmem_malloc (like malloc, unlike calloc) makes no zeroing guarantee -- a type with
@@ -61,7 +74,8 @@ struct SHMEMArena {
           shmem_bitmap(std::move(other.shmem_bitmap)),
           shmem_buffer_size(other.shmem_buffer_size),
           allocated(std::move(other.allocated)),
-          available(std::move(other.available)) {
+          available(std::move(other.available)),
+          is_remote_shadow(other.is_remote_shadow) {
     }
 
     T* alloc_unconstructed() {
@@ -101,11 +115,16 @@ struct SHMEMArena {
             // constructed yet" regardless of which of the two backing stores this slot came from.
             // A slot that's been used before is only ever reset() here, right before real reuse --
             // del() itself leaves every field untouched (see del()'s own comment).
-            if (result->constructed == 0) {
-                new (result) T();
-            } else {
+            //
+            // is_remote_shadow forces placement-new unconditionally instead: see its own comment
+            // above for why constructed can't be trusted on this kind of arena (a free slot's
+            // counter -- and its vector members' data pointers -- can be silently overwritten by
+            // another PE's raw put between one alloc and the next).
+            if (!is_remote_shadow && result->constructed != 0) {
                 result->reset();
                 result->constructed++;
+            } else {
+                new (result) T();
             }
         } else {
             new (result) T();

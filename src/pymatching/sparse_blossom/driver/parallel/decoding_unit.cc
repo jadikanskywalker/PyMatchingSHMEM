@@ -1116,7 +1116,7 @@ void pm::DecodingUnit::build_solvers() {
     for (size_t idx = 0; idx < num_shot_containers; ++idx) {
         for (int p = 0; p < (int)graph.num_partitions; ++p) {
             if (p >= my_partitions_start && p < my_partitions_start + my_partition_count) continue;
-            remote_arenas.emplace_back(get_regions_ptr(idx, p), regions_nelems_per_solver);
+            remote_arenas.emplace_back(get_regions_ptr(idx, p), regions_nelems_per_solver, /*is_remote_shadow=*/true);
         }
     }
 #endif
@@ -1159,10 +1159,15 @@ bool check_pointers_for_self_and_all_descendents(
     std::pair<pm::GraphFillRegion*, pm::GraphFillRegion*> region_range,
     std::pair<pm::DetectorNode*, pm::DetectorNode*> p_node_range,
     std::pair<pm::DetectorNode*, pm::DetectorNode*> vb_node_range,
-    std::vector<pm::BlossomChild>* discovered_edges) {
+    std::vector<pm::BlossomChild>* discovered_edges,
+    std::ofstream &t_out, pm::DetectorNode* node_base) {
     if (!ptr_in_range(root, region_range)) return false;
     for (pm::DetectorNode* node : root->shell_area) {
-        if (!ptr_in_range(node, p_node_range) && !ptr_in_range(node, vb_node_range)) return false;
+        if (!ptr_in_range(node, p_node_range) && !ptr_in_range(node, vb_node_range)) {
+            if (DEBUG) t_out << "      region " << root << " shell_area node " << node - node_base
+                             << "  out of range" <<  std::endl;
+            return false;
+        }
     }
     for (pm::RegionEdge edge : root->blossom_children) {
         if (!check_pointers_for_self_and_all_descendents(
@@ -1170,7 +1175,8 @@ bool check_pointers_for_self_and_all_descendents(
                 region_range,
                 p_node_range,
                 vb_node_range,
-                discovered_edges)) {
+                discovered_edges,
+                t_out, node_base)) {
             return false;
         }
         discovered_edges->push_back(pm::BlossomChild{(size_t)(root - region_range.first), edge});
@@ -1312,7 +1318,8 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
                         region_range,
                         p_node_range,
                         vb_node_range,
-                        &discovered_child_edges);
+                        &discovered_child_edges,
+                        t_out, graph.graph_ptr->nodes.data());
                     if (DEBUG && !valid) t_out << "      blossom_root (" << blossom_root << ") not valid, shell_area.size(): " << blossom_root->shell_area.size() << std::endl
                                                << std::flush;
 
@@ -1327,13 +1334,18 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
                                 region_range,
                                 p_node_range,
                                 vb_node_range,
-                                &discovered_child_edges);
+                                &discovered_child_edges,
+                                t_out, graph.graph_ptr->nodes.data());
                         } else {
                             valid = false;
                         }
                         if (DEBUG && !valid) t_out << "      blossom_root.match.region (" << blossom_root->match.region << ") not valid" << std::endl << std::flush; 
                     } else if (valid && blossom_root->match.edge.loc_to != nullptr) { // region matched to vb
-                        valid = false;
+                        if (ptr_in_range(blossom_root->match.edge.loc_to, vb_node_range)) {
+                            if (DEBUG) t_out << "      blossom_root matched to seam vb" << std::endl;
+                        } else {
+                            valid = false;
+                        }
                     }
                 }
                 if (!valid) {
