@@ -14,6 +14,7 @@
 #ifndef PYMATCHING2_SHMEM_ARENA_H
 #define PYMATCHING2_SHMEM_ARENA_H
 
+#include <cstring>
 #include <iostream>
 #include <limits>
 
@@ -46,6 +47,13 @@ struct SHMEMArena {
         : shmem_buffer(shmem_buffer_), shmem_buffer_size(shmem_buffer_size_), allocated(), available() {
         shmem_bitmap.resize(shmem_buffer_size/64, std::numeric_limits<uint64_t>::max());
         // Could set 0's to support SHMEM_ARENA_BUFFER_NELEMS not a multiple of 64
+        // shmem_malloc (like malloc, unlike calloc) makes no zeroing guarantee -- a type with
+        // constructed/destructed counters (see graph_fill_region.h) needs every slot in this whole
+        // buffer zeroed before its first-ever placement-new, for the same reason Arena::
+        // alloc_unconstructed() uses calloc instead of malloc for its own heap fallback below. This
+        // constructor runs exactly once per (PE, shot_container, partition) slice for the buffer's
+        // entire lifetime, so this is the one place to do it.
+        std::memset(shmem_buffer, 0, shmem_buffer_size * sizeof(T));
     }
     SHMEMArena(const SHMEMArena&) = delete;
     SHMEMArena(SHMEMArena&& other)
@@ -71,48 +79,68 @@ struct SHMEMArena {
             // std::cout << "ERROR: Fallback to heap" << std::endl
             //           << "  Thread: " << omp_get_thread_num() << "    PE: " << shmem_my_pe() << std::endl;
             if (available.empty()) {
-                T* p = (T*)malloc(sizeof(T));
+                // calloc, not malloc: see arena.h's own alloc_unconstructed() for why -- a type with
+                // constructed/destructed counters needs a brand-new slot zeroed before its first-ever
+                // placement-new.
+                T* p = (T*)calloc(1, sizeof(T));
                 allocated.push_back(p);
                 available.push_back(p);
             }
             result = available.back();
             available.pop_back();
         }
-        if constexpr (requires (T t) { t.allocated; }) {
-            result->allocated = true;
-        }
         return result;
     }
 
     T* alloc_default_constructed() {
         T* result = alloc_unconstructed();
-        new (result) T();
-        if constexpr (requires (T t) { t.allocated; }) {
-            result->allocated = true;
+        if constexpr (requires (T t) { t.reset(); t.constructed; }) {
+            // Mirrors arena.h's own alloc_default_constructed() exactly -- see its comment. Every
+            // slot in shmem_buffer is zeroed once up front (this arena's own constructor), and the
+            // heap-fallback path callocs, so constructed==0 reliably means "never actually
+            // constructed yet" regardless of which of the two backing stores this slot came from.
+            // A slot that's been used before is only ever reset() here, right before real reuse --
+            // del() itself leaves every field untouched (see del()'s own comment).
+            if (result->constructed == 0) {
+                new (result) T();
+            } else {
+                result->reset();
+                result->constructed++;
+            }
+        } else {
+            new (result) T();
         }
         return result;
     }
 
     void del(T* p) {
-        // Mark stale before destroying -- see arena.h's own del() for why (write must land while the
-        // object is still formally alive, and before anything else could observe it as reused).
-        if constexpr (requires (T t) { t.allocated; }) {
-            // Atomic check-and-clear: a plain "if (!p->allocated) ...; p->allocated = false;" has a
-            // TOCTOU gap that a genuine concurrent double-del() (two threads racing to del() the same
-            // region) sails straight through -- both read allocated==true before either writes false,
-            // so neither trips a naive check. __atomic_exchange_n makes the read-and-clear one step,
-            // so exactly one caller can ever observe was_allocated==true for a given transition.
-            bool was_allocated = __atomic_exchange_n(&p->allocated, false, __ATOMIC_ACQ_REL);
-            if (!was_allocated) {
-                if (DEBUG) {
-                    // Lost the race (or this is a same-thread double-del()): p is already gone -- do
-                    // NOT destruct/free it again, that's exactly what corrupts the heap.
-                    std::cout << "ERROR: T" << omp_get_thread_num() << " called SHMEMArena::del() on deleted pointer p=" << p << std::endl << std::flush;
+        if (DEBUG) {
+            // A genuinely live object always has constructed == destructed + 1 (exactly one more
+            // construction than destruction so far) -- see arena.h's own del() for the full rationale
+            // (this mirrors it exactly). Not atomic, unlike the __atomic_exchange_n check this
+            // replaced: a genuine concurrent double-del() can still slip both threads past a plain
+            // read here, same as arena.h's own version -- this is a diagnostic, not a fix for the
+            // underlying race.
+            if constexpr (requires (T t) { t.constructed; t.destructed; }) {
+                if (p->constructed != p->destructed + 1) {
+                    std::cout << "ERROR: T" << omp_get_thread_num() << " called SHMEMArena::del() on p=" << p
+                               << " with constructed=" << p->constructed
+                               << " destructed=" << p->destructed
+                               << " (expected constructed == destructed + 1)"
+                               << std::endl << std::flush;
+                    return;
                 }
-                return;
             }
         }
-        p->~T();
+        if constexpr (requires (T t) { t.destructed; }) {
+            // Deliberately do NOT reset() or destruct here -- see arena.h's own del() for why: leaves
+            // every field as its real last-known state for debug printing, in case this slot gets
+            // stranded (del()'d but never recycled). Only alloc_default_constructed() ever calls
+            // reset(), right before the slot is about to be reused for real.
+            p->destructed++;
+        } else {
+            p->~T();
+        }
         if (p >= shmem_buffer && p < shmem_buffer + shmem_buffer_size) {
             size_t idx = p - shmem_buffer;
             shmem_bitmap[idx/64] |= (1ULL << (idx%64));  // set bit to 1 (free)

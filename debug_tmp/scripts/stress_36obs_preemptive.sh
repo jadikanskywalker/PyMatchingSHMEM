@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=stress_36obs_preemptive
-#SBATCH --output=debug_tmp/out/stress_36obs_preemptive-%j.out
-#SBATCH --error=debug_tmp/out/stress_36obs_preemptive-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/stress_36obs_preemptive-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/stress_36obs_preemptive-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=02:00:00
 #SBATCH --nodes=1

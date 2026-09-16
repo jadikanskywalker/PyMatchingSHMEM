@@ -27,7 +27,29 @@ GraphFillRegion::GraphFillRegion()
       shrink_event_tracker(),
       owner_arena(nullptr),
       rotating_buffer_idx(-1)
-{}
+{
+    // Deliberately not in the initializer list above -- see constructed/destructed's own comment in
+    // graph_fill_region.h for why they must survive untouched across a placement-new on a recycled
+    // Arena slot, with only this increment marking the actual construction.
+    constructed = 1;
+    destructed = 0;
+}
+
+void GraphFillRegion::reset() {
+    // Mirrors GraphFillRegion()'s own initializer list exactly, plus explicitly clearing the members
+    // that constructor never needed to touch (a fresh object's vectors/match start empty already;
+    // this one's don't).
+    shell_area.clear();
+    blossom_children.clear();
+    match.clear();
+    shrink_event_tracker.clear();
+    blossom_parent = nullptr;
+    blossom_parent_top = this;
+    alt_tree_node = nullptr;
+    radius = pm::VaryingCT((0 << 2) + 1);
+    owner_arena = nullptr;
+    rotating_buffer_idx = -1;
+}
 
 GraphFillRegion::GraphFillRegion(GraphFillRegion &&other)
     : blossom_parent(other.blossom_parent),
@@ -39,9 +61,11 @@ GraphFillRegion::GraphFillRegion(GraphFillRegion &&other)
       blossom_children(std::move(other.blossom_children)),
       shell_area(std::move(other.shell_area)),
       owner_arena(other.owner_arena),
-      rotating_buffer_idx(other.rotating_buffer_idx),
-      allocated(other.allocated)
-{}
+      rotating_buffer_idx(other.rotating_buffer_idx)
+{
+    constructed = 1;
+    destructed = 0;
+}
 
 bool GraphFillRegion::tree_equal(const GraphFillRegion &other) const {
     if (alt_tree_node != other.alt_tree_node || radius != other.radius ||

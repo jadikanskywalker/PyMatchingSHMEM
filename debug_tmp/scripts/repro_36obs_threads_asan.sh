@@ -5,8 +5,8 @@
 #SBATCH --nodes=1
 #SBATCH --exclusive
 #SBATCH --mem=512GB
-#SBATCH --output=debug_tmp/out/repro_36obs_asan-%j.out
-#SBATCH --error=debug_tmp/out/repro_36obs_asan-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/repro_36obs_asan-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/repro_36obs_asan-%j.err
 
 # Args: [mode]  -- "cached" (default, uses --graph_cache_path, no --draw_frames since that's
 # incompatible with a graph loaded from cache) or "uncached" (parses the DEM fresh every run,

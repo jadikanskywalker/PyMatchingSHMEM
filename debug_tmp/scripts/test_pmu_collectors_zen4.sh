@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=test_pmu_zen4
-#SBATCH --output=debug_tmp/out/test_pmu_zen4-%j.out
-#SBATCH --error=debug_tmp/out/test_pmu_zen4-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/test_pmu_zen4-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/test_pmu_zen4-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=00:15:00
 #SBATCH --nodes=1

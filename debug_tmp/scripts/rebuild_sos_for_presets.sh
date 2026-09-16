@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=rebuild_sos_for_presets
-#SBATCH --output=debug_tmp/out/rebuild_sos_for_presets-%j.out
-#SBATCH --error=debug_tmp/out/rebuild_sos_for_presets-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/rebuild_sos_for_presets-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/rebuild_sos_for_presets-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=00:30:00
 #SBATCH --nodes=1

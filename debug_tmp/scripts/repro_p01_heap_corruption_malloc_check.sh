@@ -1,27 +1,27 @@
 #!/bin/bash
-#SBATCH --job-name=repro_p01_heap_corruption
-#SBATCH --output=debug_tmp/out/sbatch/repro_p01_heap_corruption-%j.out
-#SBATCH --error=debug_tmp/out/sbatch/repro_p01_heap_corruption-%j.err
+#SBATCH --job-name=repro_p01_heap_corruption_malloc_check
+#SBATCH --output=debug_tmp/out/sbatch/repro_p01_heap_corruption_malloc_check-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/repro_p01_heap_corruption_malloc_check-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=01:00:00
 #SBATCH --nodes=1
 #SBATCH --exclusive
 #SBATCH --mem=64G
 
-# Repro attempt for the glibc heap-corruption abort seen in the p=0.01 Score-P profile-mode sweep
-# (16/32/64 threads all aborted with different malloc-corruption signatures; 8 threads succeeded).
-# Uses the plain ASan-instrumented build_threads (no Score-P instrumentation at all), against the
-# exact same p=0.01 DEM/detection-events already generated for that sweep, to determine whether
-# this is a real pre-existing bug in the decoder or something specific to the Score-P build.
+# Same repro as repro_p01_heap_corruption.sh, plus glibc's own MALLOC_CHECK_=3 alongside ASan.
+# MALLOC_CHECK_=3 makes glibc abort with its own diagnostic the instant it detects corrupted heap
+# metadata (double-free, invalid free, heap overflow) in its own allocator bookkeeping.
 
 source ~/.bash_profile
 conda activate pymatching
+
+export MALLOC_CHECK_=3
 
 threads_build=~/PyMatchingSHMEM/build_threads/pymatching
 dem=~/PyMatchingSHMEM/debug_tmp/out/scorep_variance/p01/error_model.dem
 det=~/PyMatchingSHMEM/debug_tmp/out/scorep_variance/p01/detection_events_1000.b8
 
-outdir=~/PyMatchingSHMEM/debug_tmp/out/repro_p01_heap_corruption
+outdir=~/PyMatchingSHMEM/debug_tmp/out/repro_p01_heap_corruption_malloc_check
 mkdir -p $outdir
 cd $outdir
 

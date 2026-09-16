@@ -224,26 +224,28 @@ void pm::process_timeline_until_completion(
 }
 
 pm::MatchingResult pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
-    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events) {
+    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, std::ofstream* t_out) {
     const int rotating_buffer_idx = mwpm.flooder.rotating_buffer_idx;
     pm::MatchingResult res;
     for (auto& i : detection_events) {
         if (mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived) {
             if (!mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived_top)
                 throw std::invalid_argument("Thread " + std::to_string(omp_get_thread_num()) + ": extracting solution, node has region_that_arrived but not region_that_arrived_top!");
-            res += mwpm.shatter_blossom_and_extract_matches(mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived_top);
+            res += mwpm.shatter_blossom_and_extract_matches(
+                mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived_top, nullptr, t_out);
         }
     }
     return res;
 }
 
 void pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(
-    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events) {
+    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, std::ofstream* t_out) {
     const int rotating_buffer_idx = mwpm.flooder.rotating_buffer_idx;
     for (auto& i : detection_events) {
         if (mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived)
             mwpm.shatter_blossom_and_extract_match_edges(
-                mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived_top, mwpm.flooder.match_edges);
+                mwpm.flooder.graph.nodes[i].state(rotating_buffer_idx).region_that_arrived_top,
+                mwpm.flooder.match_edges, nullptr, t_out);
     }
 }
 

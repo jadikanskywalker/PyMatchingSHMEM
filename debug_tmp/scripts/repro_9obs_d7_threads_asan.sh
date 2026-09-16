@@ -5,8 +5,8 @@
 #SBATCH --nodes=1
 #SBATCH --exclusive
 #SBATCH --mem=64GB
-#SBATCH --output=debug_tmp/out/repro_9obs_d7_asan-%j.out
-#SBATCH --error=debug_tmp/out/repro_9obs_d7_asan-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/repro_9obs_d7_asan-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/repro_9obs_d7_asan-%j.err
 
 source ~/.bash_profile
 conda activate pymatching

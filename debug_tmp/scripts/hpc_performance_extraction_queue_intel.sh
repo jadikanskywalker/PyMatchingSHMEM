@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=hpc_perf_extraction_queue_intel
-#SBATCH --output=debug_tmp/out/hpc_perf_extraction_queue_intel-%j.out
-#SBATCH --error=debug_tmp/out/hpc_perf_extraction_queue_intel-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/hpc_perf_extraction_queue_intel-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/hpc_perf_extraction_queue_intel-%j.err
 #SBATCH --partition=h100
 #SBATCH --time=00:30:00
 #SBATCH --nodes=1

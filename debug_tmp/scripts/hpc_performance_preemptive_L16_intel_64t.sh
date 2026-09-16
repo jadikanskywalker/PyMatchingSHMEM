@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=hpc_perf_preemptive_L16_intel_64t
-#SBATCH --output=debug_tmp/out/hpc_perf_preemptive_L16_intel_64t-%j.out
-#SBATCH --error=debug_tmp/out/hpc_perf_preemptive_L16_intel_64t-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/hpc_perf_preemptive_L16_intel_64t-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/hpc_perf_preemptive_L16_intel_64t-%j.err
 #SBATCH --partition=h100
 #SBATCH --time=00:30:00
 #SBATCH --nodes=1

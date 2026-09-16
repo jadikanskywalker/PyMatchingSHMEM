@@ -106,6 +106,10 @@ struct DecodingUnit {
 
     std::vector<size_t> my_partition_task_ids;
 
+    // USE_SHMEM: Used for shmem region sizing
+    // Else: Used to reserve available vector for GraphFillRegion Arena, preventing any concurrent
+    // available.push_back()'s from triggering internal buffer growth and causing seg faults
+    size_t regions_nelems_per_solver;
 #ifdef USE_SHMEM
     
     int pid;
@@ -120,7 +124,6 @@ struct DecodingUnit {
     FusionSummary* task_fusion_summary_ptr { nullptr }; // fusion summary for each fusion task
     // Info used for symmetric memory accesses
     size_t nodes_nelems_per_buffer;
-    size_t regions_nelems_per_solver;
     size_t child_edges_nelems_per_solver;
     size_t task_fusion_summary_size_per_task;
     size_t regions_matched_to_vb_nelems;
@@ -267,6 +270,15 @@ struct DecodingUnit {
     // the solver/prune_target so divide timing can be traced end-to-end (see this-is-a-broader-
     // purrfect-crystal.md).
     void divide_vb(ShotContainer& shot, int shot_container_id, size_t shot_id, TaskBase* range_task, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
+
+    // Reinserted as a belt-and-suspenders diagnostic alongside Mwpm::remove_from_regions_matched_to_
+    // virtual_boundary's at-deletion pruning (see de1cf763): a post-hoc scan for any region left in
+    // t->regions_matched_to_virtual_boundary whose GraphFillRegion::allocated is now false -- i.e. a
+    // region that was deleted WITHOUT the inline prune catching it. If this ever fires, the at-deletion
+    // fix has a gap somewhere, and whatever consumes t's stale list next (a later setup() call) is
+    // exactly what's segfaulting inside Mwpm::unmatch_virtual_boundaries_between_partitions. caller:
+    // a short label identifying which of the two call sites below found the stale entry.
+    void prune_stale_regions_matched_to_vb(TaskBase* t, const char* caller, std::ofstream* t_out = nullptr);
 
     // Walk backward through start's own left_child chain, dividing+posting every deferred
     // (is_extraction_unit_connector && defer_division) link found, stopping at the first non-deferred

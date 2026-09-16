@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=test_65obs_no_seams
-#SBATCH --output=debug_tmp/out/test_65obs_no_seams-%j.out
-#SBATCH --error=debug_tmp/out/test_65obs_no_seams-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/test_65obs_no_seams-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/test_65obs_no_seams-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=00:30:00
 #SBATCH --nodes=1

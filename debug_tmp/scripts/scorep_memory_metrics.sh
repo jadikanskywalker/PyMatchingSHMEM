@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=scorep_memory_metrics
-#SBATCH --output=debug_tmp/out/scorep_memory_metrics-%j.out
-#SBATCH --error=debug_tmp/out/scorep_memory_metrics-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/scorep_memory_metrics-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/scorep_memory_metrics-%j.err
 #SBATCH --partition=h100
 #SBATCH --time=01:00:00
 #SBATCH --nodes=1

@@ -72,16 +72,38 @@ struct GraphFillRegion {
 
     int rotating_buffer_idx = 0;
 
-    // Liveness flag, set/cleared only by the owning arena's alloc_unconstructed()/del() (see arena.h,
-    // shmem_arena.h) -- lets any code holding a possibly-stale GraphFillRegion* determine whether it's
-    // still the same live region without threading an explicit "what did I just destroy" list through
-    // every shatter path. Costs zero bytes: sits in the struct's own existing tail padding (confirmed
-    // via a compiled offsetof probe -- rotating_buffer_idx ends at offset 140, struct size is 144).
-    bool allocated = false;
+    // Cumulative construct/destruct counts for whichever memory slot this object currently occupies.
+    // GraphFillRegion()'s body sets constructed=1, destructed=0 on a genuine construction (a brand-new
+    // slot, or a move-construction -- see below); Arena::del() increments `destructed` directly, and
+    // Arena::alloc_default_constructed() increments `constructed` directly when reusing an
+    // already-constructed slot (see arena.h -- del() deliberately does NOT reset()/destruct, only
+    // alloc_default_constructed() does, right before real reuse, so a stranded region -- del()'d but
+    // never recycled, e.g. lost from available by the concurrent-push_back race this exists to catch --
+    // keeps every field at its real last-known state for debug printing instead of a blanked one).
+    // Deliberately absent from every constructor's initializer list and given no default member
+    // initializer, so a placement-new on a recycled slot leaves whatever count was already sitting
+    // there untouched until the constructor body's own write -- the counts are tied to the memory
+    // slot's whole Arena-driven recycling lifetime, not any one object's. A freshly malloc'd
+    // (never-yet-constructed) slot needs both at a well-defined 0, which is why Arena::
+    // alloc_unconstructed() zeroes new memory via calloc instead of malloc. A genuinely live object has
+    // constructed == destructed + 1; Arena::del()/~Arena() check this immediately before acting, so a
+    // repeat/lost construct-destruct pairing is caught at the point of failure instead of inferred
+    // later from a lost available.push_back().
+    int constructed;
+    int destructed;
 
     GraphFillRegion();
     GraphFillRegion(GraphFillRegion&&);
     GraphFillRegion(const GraphFillRegion&) = delete;
+
+    // Diagnostic alternative to actually destructing+later-reconstructing a recycled Arena slot:
+    // clears every vector/pointer field back to the same state the default constructor establishes,
+    // WITHOUT ending this object's C++ lifetime and WITHOUT touching constructed/destructed itself --
+    // Arena::alloc_default_constructed() calls this (then increments `constructed` itself) only when
+    // actually about to reuse an already-constructed slot; Arena::del() never calls this at all (see
+    // its own comment in arena.h). A region is therefore never actually destructed mid-run; only
+    // ~Arena()'s own final teardown ever calls the real (compiler-generated) destructor.
+    void reset();
     bool tree_equal(const pm::GraphFillRegion& other) const;
 
     void add_match(pm::GraphFillRegion* match, const pm::CompressedEdge& edge);

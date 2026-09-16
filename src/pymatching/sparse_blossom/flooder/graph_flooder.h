@@ -84,13 +84,16 @@ struct GraphFlooder {
     GraphFlooder();
 
     // Construct with a shared graph pointer (shared across solvers)
+    // region_arena_reserve_size: per-solver GraphFillRegion arena size (see REGION_ARENA_BUFFER_FACTOR)
+    // -- the shmem_buffer/bitmap size for USE_SHMEM's SHMEMArena, or Arena::available's pre-reserved
+    // capacity for the plain-threads build (closes off concurrent-push_back reallocation on it).
     explicit GraphFlooder(
         std::shared_ptr<MatchingGraph> graph,
         int solver_set_idx
 #ifdef USE_SHMEM
-        , GraphFillRegion* shmem_buffer,
-        size_t shmem_buffer_size
+        , GraphFillRegion* shmem_buffer
 #endif
+        , size_t region_arena_reserve_size
 #ifdef ENABLE_DRAW_FLAGS
         , const std::vector<int>* node_part_id = nullptr
 #endif

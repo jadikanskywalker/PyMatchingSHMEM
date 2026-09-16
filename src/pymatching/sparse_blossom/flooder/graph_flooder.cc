@@ -41,9 +41,9 @@ GraphFlooder::GraphFlooder(
     std::shared_ptr<MatchingGraph> graph,
     int solver_set_idx
 #ifdef USE_SHMEM
-    , GraphFillRegion* shmem_buffer,
-    size_t shmem_buffer_size
+    , GraphFillRegion* shmem_buffer
 #endif
+    , size_t region_arena_reserve_size
 #ifdef ENABLE_DRAW_FLAGS
     , const std::vector<int>* node_part_id
 #endif
@@ -53,7 +53,9 @@ GraphFlooder::GraphFlooder(
       negative_weight_sum(0)
 #ifdef USE_SHMEM
       , rotating_buffer_idx(solver_set_idx),
-      region_arena(shmem_buffer, shmem_buffer_size)
+      region_arena(shmem_buffer, region_arena_reserve_size)
+#else
+      , region_arena(region_arena_reserve_size)
 #endif
 #ifdef ENABLE_DRAW_FLAGS
       , node_part_id_ptr(node_part_id)
@@ -379,6 +381,7 @@ GraphFillRegion* GraphFlooder::create_blossom(std::vector<RegionEdge>& contained
     // Arena::del() safe to call from any thread without synchronizing `available` -- see
     // this-is-a-broader-purrfect-crystal.md for the full argument.
     auto* target_arena = contained_regions[0].region->owner_arena;
+    // auto* target_arena = &region_arena;
     auto blossom_region = target_arena->alloc_default_constructed();
     blossom_region->owner_arena = target_arena;
     blossom_region->rotating_buffer_idx = rotating_buffer_idx;

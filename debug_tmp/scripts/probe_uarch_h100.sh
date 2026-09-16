@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=probe_uarch_h100
-#SBATCH --output=debug_tmp/out/probe_uarch_h100-%j.out
-#SBATCH --error=debug_tmp/out/probe_uarch_h100-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/probe_uarch_h100-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/probe_uarch_h100-%j.err
 #SBATCH --partition=h100
 #SBATCH --time=00:15:00
 #SBATCH --nodes=1

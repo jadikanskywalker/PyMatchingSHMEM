@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=verify_dense_arena
-#SBATCH --output=debug_tmp/out/verify_dense_arena-%j.out
-#SBATCH --error=debug_tmp/out/verify_dense_arena-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/verify_dense_arena-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/verify_dense_arena-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=00:30:00
 #SBATCH --nodes=1

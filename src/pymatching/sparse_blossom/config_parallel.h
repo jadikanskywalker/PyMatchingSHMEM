@@ -2,7 +2,7 @@
 
 #include <limits>
 
-#define DEBUG 0 // set for full debugging
+#define DEBUG 1 // set for full debugging
 #if !DEBUG
 #define BARE_DEBUG 0 // set for per shot prints when DEBUG == 0
 #else
@@ -18,10 +18,13 @@
 
 // #define PROFILE_OMP_BARRIERS
 
+// Per-solver GraphFillRegion arena size, shared by both the SHMEM build (shmem_buffer/bitmap size,
+// rounded up to a multiple of 64) and the plain-threads build (Arena::available's reserved capacity --
+// see build_solvers()) = num_nodes_per_partition * REGION_ARENA_BUFFER_FACTOR.
+// 2 would ensure no heap overflow/growth in absolute worst case, can reduce for smaller p.
+#define REGION_ARENA_BUFFER_FACTOR 1
+
 #ifdef USE_SHMEM
-// per solver region buffer size in SHMEM = num_nodes_per_partition * SHMEM_ARENA_BUFFER_FACTOR rounded up to a multiple of 64.
-// 2 would ensure no heap overflow in absolute worst case, can reduce for smaller p
-#define SHMEM_ARENA_BUFFER_FACTOR 1 
 // region_matched_to_vb buffer size in SHMEM = num_nodes_per_round (eg., d for repetition_code, d^2 for surface_code) * SHMEM_INTERSECTION_BUFFER_FACTOR
 #define SHMEM_INTERSECTION_BUFFER_FACTOR 2
 #endif

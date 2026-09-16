@@ -64,10 +64,15 @@ void process_timeline_until_completion(
 #endif
     bool parallel = false,
     int tid = -1);
+// t_out: optional per-thread debug stream, forwarded into Mwpm::shatter_blossom_and_extract_matches/
+// _match_edges (see their own comment) -- nullptr (the default) for the serial, non-parallel call
+// sites below, which have no such stream; DecodingUnit::accumulate_hits passes its caller's real one
+// (process_extraction_job's/extract_crt_received_window's own t_out) through here, since this is the
+// only place those two paths ever shatter a region.
 MatchingResult shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
-    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events);
+    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, std::ofstream* t_out = nullptr);
 void shatter_blossoms_for_all_detection_events_and_extract_match_edges(
-    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events);
+    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, std::ofstream* t_out = nullptr);
 
 void fill_bit_vector_from_obs_mask(pm::obs_int obs_mask, uint8_t* obs_begin_ptr, size_t num_observables);
 obs_int bit_vector_to_obs_mask(const std::vector<uint8_t>& bit_vector);

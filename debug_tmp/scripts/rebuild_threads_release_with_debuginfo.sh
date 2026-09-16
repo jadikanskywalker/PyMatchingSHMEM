@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=rebuild_threads_release_g
-#SBATCH --output=debug_tmp/out/rebuild_threads_release_g-%j.out
-#SBATCH --error=debug_tmp/out/rebuild_threads_release_g-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/rebuild_threads_release_g-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/rebuild_threads_release_g-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=00:30:00
 #SBATCH --nodes=1

@@ -14,7 +14,9 @@
 
 #include "pymatching/sparse_blossom/matcher/mwpm.h"
 
+#include <omp.h>
 #include <set>
+#include <sstream>
 
 #include "pymatching/sparse_blossom/flooder/graph_fill_region.h"
 #include "pymatching/sparse_blossom/matcher/alternating_tree.h"
@@ -98,12 +100,10 @@ void Mwpm::handle_tree_hitting_boundary_match(
 }
 
 void Mwpm::remove_from_regions_matched_to_virtual_boundary(TaskBase* task, GraphFillRegion* region) {
-    if (!task) return;
-    auto& list = task->regions_matched_to_virtual_boundary;
-    for (size_t i = 0; i < list.size(); ++i) {
-        if (list[i] == region) {
-            list[i] = list.back();
-            list.pop_back();
+    for (size_t i = 0; i < task->regions_matched_to_virtual_boundary.size(); ++i) {
+        if (task->regions_matched_to_virtual_boundary[i] == region) {
+            task->regions_matched_to_virtual_boundary[i] = task->regions_matched_to_virtual_boundary.back();
+            task->regions_matched_to_virtual_boundary.pop_back();
             return;
         }
     }
@@ -374,7 +374,7 @@ void Mwpm::unmatch_virtual_boundaries_between_partitions() {
 }
 
 GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_matches(
-    GraphFillRegion *region, MatchingResult &res, TaskBase *prune_target) {
+    GraphFillRegion *region, MatchingResult &res, TaskBase *prune_target, std::ofstream *t_out) {
     for (auto &r : region->blossom_children) {
         r.region->clear_blossom_parent_ignoring_wrapped_radius();
     }
@@ -393,13 +393,14 @@ GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_matches(
         auto &re1 = region->blossom_children[(index + i + 1) % num_children];
         auto &re2 = region->blossom_children[(index + i + 2) % num_children];
         re1.region->add_match(re2.region, re1.edge);
-        res += shatter_blossom_and_extract_matches(re1.region, prune_target);
+        res += shatter_blossom_and_extract_matches(re1.region, prune_target, t_out);
     }
     region->owner_arena->del(region);
     return subblossom;
 }
 
-MatchingResult Mwpm::shatter_blossom_and_extract_matches(GraphFillRegion *region, TaskBase *prune_target) {
+MatchingResult Mwpm::shatter_blossom_and_extract_matches(
+    GraphFillRegion *region, TaskBase *prune_target, std::ofstream *t_out) {
     region->cleanup_shell_area();
 
     // First handle base cases (no subblossoms)
@@ -421,9 +422,33 @@ MatchingResult Mwpm::shatter_blossom_and_extract_matches(GraphFillRegion *region
         // convention DecodingUnit::send_solution_to_remote_pe already uses).
         // No shattering required, so just return MatchingResult from this match.
         MatchingResult res = {region->match.edge.obs_mask, region->radius.y_intercept()};
-        if (region->match.edge.loc_to != nullptr) {
-            remove_from_regions_matched_to_virtual_boundary(prune_target, region);
-        }
+        // if (region->match.edge.loc_to != nullptr) {
+        //     if (DEBUG && t_out) {
+        //         std::ostringstream out_message;
+        //         out_message << "T" << omp_get_thread_num()
+        //                     << ": shatter_blossom_extract_matches detected shattered region "
+        //                     << region << " matched to a vb";
+        //         if (prune_target) {
+        //             const char* type_name = "Task";
+        //             if (prune_target->type == TaskBase::TaskType::LocalSeamTask) type_name = "LocalSeamTask";
+        //             else if (prune_target->type == TaskBase::TaskType::CrossRankTask) type_name = "CrossRankTask";
+        //             out_message << " prune_target=" << prune_target
+        //                         << " type=" << type_name
+        //                         << " part=" << prune_target->part
+        //                         << " is_fusion=" << prune_target->is_fusion
+        //                         << " vb_marker=" << prune_target->vb_marker
+        //                         << " vb_left=" << prune_target->vb_left
+        //                         << " vb_right=" << prune_target->vb_right
+        //                         << " solver=" << prune_target->solver;
+        //         } else {
+        //             out_message << " prune_target=nullptr";
+        //         }
+        //         *t_out << out_message.str() << std::endl << std::flush;
+        //     }
+        //     if (prune_target) {
+        //         remove_from_regions_matched_to_virtual_boundary(prune_target, region);
+        //     }
+        // }
         region->owner_arena->del(region);
         return res;
     }
@@ -431,15 +456,16 @@ MatchingResult Mwpm::shatter_blossom_and_extract_matches(GraphFillRegion *region
     // Pair up and shatter subblossoms into matches
     MatchingResult res{0, 0};
     if (!region->blossom_children.empty())
-        region = pair_and_shatter_subblossoms_and_extract_matches(region, res, prune_target);
+        region = pair_and_shatter_subblossoms_and_extract_matches(region, res, prune_target, t_out);
     if (region->match.region && !region->match.region->blossom_children.empty())
-        pair_and_shatter_subblossoms_and_extract_matches(region->match.region, res, prune_target);
-    res += shatter_blossom_and_extract_matches(region, prune_target);
+        pair_and_shatter_subblossoms_and_extract_matches(region->match.region, res, prune_target, t_out);
+    res += shatter_blossom_and_extract_matches(region, prune_target, t_out);
     return res;
 }
 
 GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_match_edges(
-    GraphFillRegion *region, std::vector<CompressedEdge> &match_edges, TaskBase *prune_target) {
+    GraphFillRegion *region, std::vector<CompressedEdge> &match_edges, TaskBase *prune_target,
+    std::ofstream *t_out) {
     for (auto &r : region->blossom_children) {
         r.region->clear_blossom_parent_ignoring_wrapped_radius();
     }
@@ -457,14 +483,15 @@ GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_match_edges(
         auto &re1 = region->blossom_children[(index + i + 1) % num_children];
         auto &re2 = region->blossom_children[(index + i + 2) % num_children];
         re1.region->add_match(re2.region, re1.edge);
-        shatter_blossom_and_extract_match_edges(re1.region, match_edges, prune_target);
+        shatter_blossom_and_extract_match_edges(re1.region, match_edges, prune_target, t_out);
     }
     region->owner_arena->del(region);
     return subblossom;
 }
 
 void Mwpm::shatter_blossom_and_extract_match_edges(
-    GraphFillRegion *region, std::vector<CompressedEdge> &match_edges, TaskBase *prune_target) {
+    GraphFillRegion *region, std::vector<CompressedEdge> &match_edges, TaskBase *prune_target,
+    std::ofstream *t_out) {
     region->cleanup_shell_area();
 
     // First handle base cases (no subblossoms)
@@ -483,19 +510,43 @@ void Mwpm::shatter_blossom_and_extract_match_edges(
         // shatter_blossom_and_extract_matches for the vb-pruning rationale.
         // No shattering required, so just return MatchingResult from this match.
         match_edges.push_back(region->match.edge);
-        if (region->match.edge.loc_to != nullptr) {
-            remove_from_regions_matched_to_virtual_boundary(prune_target, region);
-        }
+        // if (region->match.edge.loc_to != nullptr) {
+        //     if (DEBUG && t_out) {
+        //         std::ostringstream out_message;
+        //         out_message << "T" << omp_get_thread_num()
+        //                     << ": shatter_blossom_extract_match_edges detected shattered region "
+        //                     << region << " matched to a vb";
+        //         if (prune_target) {
+        //             const char* type_name = "Task";
+        //             if (prune_target->type == TaskBase::TaskType::LocalSeamTask) type_name = "LocalSeamTask";
+        //             else if (prune_target->type == TaskBase::TaskType::CrossRankTask) type_name = "CrossRankTask";
+        //             out_message << " prune_target=" << prune_target
+        //                         << " type=" << type_name
+        //                         << " part=" << prune_target->part
+        //                         << " is_fusion=" << prune_target->is_fusion
+        //                         << " vb_marker=" << prune_target->vb_marker
+        //                         << " vb_left=" << prune_target->vb_left
+        //                         << " vb_right=" << prune_target->vb_right
+        //                         << " solver=" << prune_target->solver;
+        //         } else {
+        //             out_message << " prune_target=nullptr";
+        //         }
+        //         *t_out << out_message.str() << std::endl << std::flush;
+        //     }
+        //     if (prune_target) {
+        //         remove_from_regions_matched_to_virtual_boundary(prune_target, region);
+        //     }
+        // }
         region->owner_arena->del(region);
         return;
     }
 
     // Pair up and shatter subblossoms into matches
     if (!region->blossom_children.empty())
-        region = pair_and_shatter_subblossoms_and_extract_match_edges(region, match_edges, prune_target);
+        region = pair_and_shatter_subblossoms_and_extract_match_edges(region, match_edges, prune_target, t_out);
     if (region->match.region && !region->match.region->blossom_children.empty())
-        pair_and_shatter_subblossoms_and_extract_match_edges(region->match.region, match_edges, prune_target);
-    shatter_blossom_and_extract_match_edges(region, match_edges, prune_target);
+        pair_and_shatter_subblossoms_and_extract_match_edges(region->match.region, match_edges, prune_target, t_out);
+    shatter_blossom_and_extract_match_edges(region, match_edges, prune_target, t_out);
     return;
 }
 

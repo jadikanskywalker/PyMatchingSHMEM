@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=regen_flamegraphs
-#SBATCH --output=debug_tmp/out/regen_flamegraphs-%j.out
-#SBATCH --error=debug_tmp/out/regen_flamegraphs-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/regen_flamegraphs-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/regen_flamegraphs-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=00:20:00
 #SBATCH --nodes=1

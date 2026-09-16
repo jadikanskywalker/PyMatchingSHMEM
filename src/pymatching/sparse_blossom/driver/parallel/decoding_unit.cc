@@ -88,6 +88,15 @@ pm::DecodingUnit::DecodingUnit(
     if (needs_search_flooder) {
         search_graph_ptr = user_graph.to_shared_search_graph(num_distinct_weights);
     }
+    // Per-solver GraphFillRegion arena size (see REGION_ARENA_BUFFER_FACTOR's own comment) -- computed
+    // unconditionally (not just for USE_SHMEM) since build_solvers() now also uses it to pre-reserve
+    // Arena::available's capacity for the plain-threads build, closing off concurrent-push_back
+    // reallocation on that vector.
+    regions_nelems_per_solver = graph.node_part_id.size() / graph.num_partitions * REGION_ARENA_BUFFER_FACTOR;
+    if (regions_nelems_per_solver % 64 > 0) {
+        regions_nelems_per_solver =
+            (regions_nelems_per_solver / 64 + 1) * 64;  // make multiple of 64
+    }
 #ifdef USE_SHMEM
     // Bound k
     int p_per_pe = graph.num_partitions / n_pes;
@@ -116,12 +125,7 @@ pm::DecodingUnit::DecodingUnit(
     }
     // --- Allocate sychronization & summary memory ---
     task_status_ptr = static_cast<uint64_t*>(shmem_align(sizeof(uint64_t), num_cross_rank_fusions * SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION * num_shot_containers * sizeof(uint64_t)));
-    regions_nelems_per_solver = graph.node_part_id.size() / graph.num_partitions * SHMEM_ARENA_BUFFER_FACTOR;
-    if (regions_nelems_per_solver % 64 > 0) {
-        regions_nelems_per_solver =
-            (regions_nelems_per_solver / 64 + 1) * 64;  // make multiple of 64
-    }
-    // regions_nelems_per_solver / 64 gives number of uint64_t for bitmap
+    // regions_nelems_per_solver (computed unconditionally above) / 64 gives number of uint64_t for bitmap
     child_edges_nelems_per_solver = regions_nelems_per_solver; // Could reduce this
     regions_matched_to_vb_nelems = graph.node_part_id.size() / graph.num_rounds * SHMEM_INTERSECTION_BUFFER_FACTOR;
     child_edges_ptr = static_cast<BlossomChild*>(shmem_malloc(child_edges_nelems_per_solver * graph.num_partitions * num_shot_containers * sizeof(BlossomChild)));
@@ -1079,9 +1083,9 @@ void pm::DecodingUnit::build_solvers() {
                 idx
 #ifdef USE_SHMEM
                 ,
-                get_regions_ptr(idx, global_partition),
-                regions_nelems_per_solver
+                get_regions_ptr(idx, global_partition)
 #endif
+                , regions_nelems_per_solver
 #ifdef ENABLE_DRAW_FLAGS
                 , &graph.node_part_id
 #endif
@@ -1132,11 +1136,12 @@ namespace {
 // Shatter+extract one hits list, handling extended-vs-bit-packed accumulation identically
 // everywhere it's needed (process_extraction_job's tree walk, extract_crt_received_window).
 // divide_vb's per-region variant is separate since it operates on regions directly, not hit lists.
-void accumulate_hits(pm::Mwpm& solver, const std::vector<uint64_t>& hits, bool extended, pm::MatchingResult& local_res) {
+void accumulate_hits(pm::Mwpm& solver, const std::vector<uint64_t>& hits, bool extended, pm::MatchingResult& local_res,
+                      std::ofstream* t_out = nullptr) {
     if (extended) {
-        pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(solver, hits);
+        pm::shatter_blossoms_for_all_detection_events_and_extract_match_edges(solver, hits, t_out);
     } else {
-        local_res += pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(solver, hits);
+        local_res += pm::shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(solver, hits, t_out);
     }
 }
 }  // namespace
@@ -1333,7 +1338,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
                 }
                 if (!valid) {
                     if (DEBUG) t_out << "      SHATTERING blossom_root\n" << std::flush;
-                    res += solver.shatter_blossom_and_extract_matches(blossom_root, &t);
+                    res += solver.shatter_blossom_and_extract_matches(blossom_root, &t, &t_out);
                 } else {
                     for (const auto& child_edge : discovered_child_edges) {
                         if (child_edges_counter < p_k * child_edges_nelems_per_solver) {
@@ -1348,6 +1353,15 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
             }
         }
     }
+
+    // Reinserted diagnostic (see prune_stale_regions_matched_to_vb's own comment): the validation
+    // pass above can shatter a region still referenced in t's own (by now, via CrossRankTask::
+    // setup(), genuinely populated) regions_matched_to_virtual_boundary -- the one shatter in the
+    // whole CRT path with no divide_vb call of its own to fold this into (divide_vb handles it for
+    // every other shatter site). The inline prune inside shatter_blossom_and_extract_matches should
+    // already have caught this via the &t passed above; this is a redundant post-hoc check that
+    // should find nothing if that fix is working.
+    prune_stale_regions_matched_to_vb(&t, "send_solution_to_remote_pe (validation pass)", &t_out);
 
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_END(solution_isolation);
@@ -1504,7 +1518,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
             auto& node_state = solver.flooder.graph.nodes[i].state(shot_container_id);
             // Only shatter if it hasn't been shattered yet (region_that_arrived is still set)
             if (node_state.region_that_arrived) {
-                solver.shatter_blossom_and_extract_matches(node_state.region_that_arrived_top, &t);
+                solver.shatter_blossom_and_extract_matches(node_state.region_that_arrived_top, &t, &t_out);
             }
         }
     }
@@ -1835,8 +1849,8 @@ void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t s
     bool extended = shot_buffer->num_observables > sizeof(pm::obs_int) * 8;
     pm::MatchingResult local_res{};
     auto do_walk = [&]() {
-        for (int p = p_lo; p <= p_hi; ++p) accumulate_hits(solver, shot_buffer->hits(shot_id, false, p), extended, local_res);
-        for (int vb = vb_lo; vb <= vb_hi; ++vb) accumulate_hits(solver, shot_buffer->hits(shot_id, true, vb), extended, local_res);
+        for (int p = p_lo; p <= p_hi; ++p) accumulate_hits(solver, shot_buffer->hits(shot_id, false, p), extended, local_res, t_out);
+        for (int vb = vb_lo; vb <= vb_hi; ++vb) accumulate_hits(solver, shot_buffer->hits(shot_id, true, vb), extended, local_res, t_out);
     };
     if (extended) {
         // Race fix (docs/decentralized_shot_sync_design.md-adjacent finding, this session):
@@ -1870,6 +1884,39 @@ void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t s
 }
 #endif
 
+void pm::DecodingUnit::prune_stale_regions_matched_to_vb(TaskBase* t, const char* caller, std::ofstream* t_out) {
+    auto& list = t->regions_matched_to_virtual_boundary;
+    list.erase(
+        std::remove_if(list.begin(), list.end(),
+            [&](pm::GraphFillRegion* r) {
+                if (r->constructed == r->destructed + 1) return false;
+                if (!t_out) return true;
+                const char* type_name = "Task";
+                if (t->type == TaskBase::TaskType::LocalSeamTask) type_name = "LocalSeamTask";
+                else if (t->type == TaskBase::TaskType::CrossRankTask) type_name = "CrossRankTask";
+                // *t_out << "T" << omp_get_thread_num()
+                //           << " ERROR: prune_stale_regions_matched_to_vb caught a stale region -- the "
+                //           << "at-deletion prune (remove_from_regions_matched_to_virtual_boundary) "
+                //           << "missed it, so this is why unmatch_virtual_boundaries_between_partitions "
+                //           << "is segfaulting downstream."
+                //           << " caller=" << caller
+                //           << " stale_region=" << r
+                //           << " constructed=" << r->constructed
+                //           << " destructed=" << r->destructed
+                //           << " task=" << t
+                //           << " task_type=" << type_name
+                //           << " part=" << t->part
+                //           << " is_fusion=" << t->is_fusion
+                //           << " vb_marker=" << t->vb_marker
+                //           << " vb_left=" << t->vb_left
+                //           << " vb_right=" << t->vb_right
+                //           << " solver=" << t->solver
+                //           << std::endl << std::flush;
+                return true;
+            }),
+        list.end());
+}
+
 void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, size_t shot_id, TaskBase* range_task, int tid, TaskBase* prune_target, std::ofstream* t_out) {
     int vb_id = range_task->part;
     if (DEBUG && t_out) {
@@ -1894,7 +1941,7 @@ void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, siz
         // No synchronization needed: this thread owns solver exclusively here (see Design §10).
         for (size_t i = vb_bounds.first; i <= vb_bounds.second; ++i) {
             auto* region = graph.graph_ptr->nodes[i].state(shot_container_id).region_that_arrived_top;
-            if (region) solver.shatter_blossom_and_extract_match_edges(region, solver.flooder.match_edges, prune_target);
+            if (region) solver.shatter_blossom_and_extract_match_edges(region, solver.flooder.match_edges, prune_target, t_out);
         }
         solver.prepare_for_extraction(range_task);
         if (DEBUG && t_out) {
@@ -1912,18 +1959,22 @@ void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, siz
         pm::MatchingResult local_res{};
         for (size_t i = vb_bounds.first; i <= vb_bounds.second; ++i) {
             auto* region = graph.graph_ptr->nodes[i].state(shot_container_id).region_that_arrived_top;
-            if (region) local_res += solver.shatter_blossom_and_extract_matches(region, prune_target);
+            if (region) local_res += solver.shatter_blossom_and_extract_matches(region, prune_target, t_out);
         }
         shot_buffer->thread_results(shot_id)[tid] += local_res;
     }
     // A blossom shattered here can span farther than this vb and destroy a region still referenced
     // in prune_target->regions_matched_to_virtual_boundary (kept there for a LATER setup() call --
-    // the next checkpoint up the chain, or a chained special task -- to consume). Nothing to do
-    // here anymore: shatter_blossom_and_extract_matches/_match_edges now remove a vb-matched region
-    // from prune_target's own list at the exact moment they delete it (see their shared
-    // remove_from_regions_matched_to_virtual_boundary helper), so the list can no longer go stale
-    // in the first place -- prune_target==nullptr (post-hoc chunking) already made this a no-op
-    // there too, via the same nullptr check inside that helper.
+    // the next checkpoint up the chain, or a chained special task -- to consume). shatter_blossom_
+    // and_extract_matches/_match_edges above already remove a vb-matched region from prune_target's
+    // own list at the exact moment they delete it (see their shared remove_from_regions_matched_to_
+    // virtual_boundary helper), so this scan should find nothing -- reinserted as a belt-and-
+    // suspenders diagnostic (see prune_stale_regions_matched_to_vb's own comment) in case that fix
+    // has a gap. prune_target==nullptr (post-hoc chunking, no future setup() will ever read that
+    // list again) is a no-op both here and inside the helper.
+    if (prune_target) {
+        prune_stale_regions_matched_to_vb(prune_target, "divide_vb", t_out);
+    }
 }
 
 // Walks start's own left_child chain backward, collecting every deferred connector (is_extraction_
@@ -1969,31 +2020,28 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
     // extraction-unit chunking (config_parallel::L > 1), not just a single partition.
     std::vector<Task*> leaves;
 
-    auto do_walk = [&]() {
-        std::vector<Task*> to_visit = {root};
-        while (!to_visit.empty()) {
-            Task* curr = to_visit.back(); to_visit.pop_back();
-            if (!curr->is_fusion) {
-                accumulate_hits(solver, shot_buffer->hits(shot_id, false, curr->part), extended, local_res);
-                leaves.push_back(curr);
-            } else {
-                // Internal (non-checkpoint) fusion vb -- still the simpler hits-list approach for
-                // now (tracked separately as a correctness gap, same as divide_vb's approach fixes
-                // for checkpoint/split-point boundaries specifically).
-                accumulate_hits(solver, shot_buffer->hits(shot_id, true, curr->part), extended, local_res);
-                // left_child/right_child are TaskBase* (a preemptive-OBS chain-link's child can be a
-                // CrossRankTask -- see decoding_task.h), but this walk only ever runs on non-preemptive/
-                // ROUND subtrees, which never attach a CRT as a child (CRTs there sit above a subtree
-                // root via CrossRankTask's own parent-chain walk instead) -- always genuinely Task* here.
-                if (curr->left_child) to_visit.push_back(static_cast<Task*>(curr->left_child));
-                if (curr->right_child && curr->right_child != curr->left_child)
-                    to_visit.push_back(static_cast<Task*>(curr->right_child));
-            }
+    std::vector<Task*> to_visit = {root};
+    while (!to_visit.empty()) {
+        Task* curr = to_visit.back(); to_visit.pop_back();
+        if (!curr->is_fusion) {
+            accumulate_hits(solver, shot_buffer->hits(shot_id, false, curr->part), extended, local_res, t_out);
+            leaves.push_back(curr);
+        } else {
+            // Internal (non-checkpoint) fusion vb -- still the simpler hits-list approach for
+            // now (tracked separately as a correctness gap, same as divide_vb's approach fixes
+            // for checkpoint/split-point boundaries specifically).
+            accumulate_hits(solver, shot_buffer->hits(shot_id, true, curr->part), extended, local_res, t_out);
+            // left_child/right_child are TaskBase* (a preemptive-OBS chain-link's child can be a
+            // CrossRankTask -- see decoding_task.h), but this walk only ever runs on non-preemptive/
+            // ROUND subtrees, which never attach a CRT as a child (CRTs there sit above a subtree
+            // root via CrossRankTask's own parent-chain walk instead) -- always genuinely Task* here.
+            if (curr->left_child) to_visit.push_back(static_cast<Task*>(curr->left_child));
+            if (curr->right_child && curr->right_child != curr->left_child)
+                to_visit.push_back(static_cast<Task*>(curr->right_child));
         }
-    };
+    }
 
     if (extended) {
-        do_walk();
         solver.prepare_for_extraction(root);
         if (DEBUG && t_out) {
             *t_out << "    PROCESS_JOB tid=" << tid << " search_flooder vb=" << solver.search_flooder.vb
@@ -2010,13 +2058,31 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
         solver.extract_paths_from_match_edges(solver.flooder.match_edges, ext_res.obs_crossed.data(), ext_res.weight);
         solver.flooder.match_edges.clear();
     } else {
-        do_walk();
         shot_buffer->thread_results(shot_id)[tid] += local_res;  // each thread only ever writes its own slot -- no race
     }
     // This subtree's partition leaves are now fully extracted -- their buffers are free to reuse
     // for the next shot (docs/decentralized_shot_sync_design.md §6).
     for (Task* leaf : leaves) {
         leaf->mark_extraction_done();
+    }
+    if (DEBUG) {
+        // With config_parallel::L == 1, each partition is its own extraction unit, so this job's
+        // subtree root is exactly one leaf -- do_walk()/accumulate_hits() above should have shattered
+        // and del()'d every region this leaf's own solver created for this shot, returning them all to
+        // available. A lost available.push_back() (the concurrent-vector-growth race) would show up
+        // here as available undercounting relative to allocated -- unlike checking before this leaf's
+        // own decode step (which can't distinguish a real leak from regions simply not extracted yet),
+        // this point is exactly where the two should already be equal.
+        size_t region_arena_allocated = solver.flooder.region_arena.allocated.size();
+        size_t region_arena_available = solver.flooder.region_arena.available.size();
+        if (region_arena_allocated != region_arena_available) {
+            std::cout << "WARNING: after process_extraction_job root=" << root
+                       << " part=" << root->part << " is_fusion=" << root->is_fusion
+                       << " solver=" << root->solver
+                       << " region_arena.allocated.size()=" << region_arena_allocated
+                       << " region_arena.available.size()=" << region_arena_available
+                       << std::endl << std::flush;
+        }
     }
     shot_buffer->mark_extraction_job_finished(shot_id);
 }

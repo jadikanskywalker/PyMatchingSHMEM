@@ -9,12 +9,12 @@
 
 if [ $# -le 8 ]
   then
-    echo "Args: [ntasks] [sockets] [ntasks_per_socket] [nthreads] [M] [k] [graph_cache] [det] [flips]"
+    echo "Args: [ntasks] [sockets] [ntasks_per_node] [nthreads] [M] [k] [graph_cache] [det] [flips]"
     exit 1
 else
     ntasks=$1
     sockets=$2
-    ntasks_per_socket=$3
+    ntasks_per_node=$3
     nthreads=$4
     M=$5
     k=$6
@@ -23,7 +23,7 @@ else
     flips=$9
 fi
 
-suffix=M${M}_ntasks${ntasks}_sockets${sockets}_ntps${ntasks_per_socket}_nthreads${nthreads}_k${k}_${SLURM_JOB_ID}
+suffix=M${M}_ntasks${ntasks}_sockets${sockets}_ntps${ntasks_per_node}_nthreads${nthreads}_k${k}_${SLURM_JOB_ID}
 out=out_$suffix
 
 mkdir $out
@@ -54,11 +54,25 @@ export OMP_PROC_BIND=true
 
 threads_per_task=$nthreads
 
+# Nodes here are dual-socket, 128 cores/socket. A task with more than 128 threads necessarily
+# spans both sockets. map-by's PE=<N> clause itself mandates per-core binding (rejects any
+# --bind-to but "core"/"hwt" -- "PE=<list> mapping directive cannot be combined with a binding
+# directive other than core or hwt"), and --bind-to core alone rejects binding a single rank
+# across packages ("failed to map... CPUs in more than one package") -- so PE= has to be dropped
+# entirely for these, not just re-bound, leaving MPI's own placement unconstrained within the
+# node and letting OMP_PLACES/OMP_PROC_BIND above do the actual in-process thread pinning.
+map_by=ppr:$ntasks_per_node:node:PE=$threads_per_task
+bind_to=core
+if [ $threads_per_task -gt 128 ]; then
+    map_by=ppr:$ntasks_per_node:node
+    bind_to=none
+fi
+
 start_parallel=$(date +%s)
 oshrun  \
     -n $ntasks \
-    --map-by ppr:$ntasks_per_socket:package:PE=$threads_per_task \
-    --bind-to core \
+    --map-by $map_by \
+    --bind-to $bind_to \
     --report-bindings \
     ~/PyMatchingSHMEM/scripts/pe_output_wrapper.sh \
     ~/PyMatchingSHMEM/build_sos/pymatching predict \
@@ -79,7 +93,7 @@ oshrun  \
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
 
-echo "  NTasks=$ntasks Sockets=$sockets NTPSocket=$ntasks_per_socket Threads=$nthreads: $parallel_time seconds" >> ../bench.out
+echo "  NTasks=$ntasks Sockets=$sockets NTPNode=$ntasks_per_node Threads=$nthreads: $parallel_time seconds" >> ../bench.out
 
 python3 ~/PyMatchingSHMEM/scripts/combine_results.py $preds $ntasks
 

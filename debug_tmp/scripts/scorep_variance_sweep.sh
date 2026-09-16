@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=scorep_variance_sweep
-#SBATCH --output=debug_tmp/out/scorep_variance_sweep-%j.out
-#SBATCH --error=debug_tmp/out/scorep_variance_sweep-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/scorep_variance_sweep-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/scorep_variance_sweep-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=00:30:00
 #SBATCH --nodes=1

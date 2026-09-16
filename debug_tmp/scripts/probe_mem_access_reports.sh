@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=probe_mem_access_reports
-#SBATCH --output=debug_tmp/out/probe_mem_access_reports-%j.out
-#SBATCH --error=debug_tmp/out/probe_mem_access_reports-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/probe_mem_access_reports-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/probe_mem_access_reports-%j.err
 #SBATCH --partition=h100
 #SBATCH --time=00:15:00
 #SBATCH --nodes=1

@@ -15,6 +15,8 @@
 #ifndef PYMATCHING2_MWPM_H
 #define PYMATCHING2_MWPM_H
 
+#include <fstream>
+
 #include "pymatching/sparse_blossom/flooder/graph_flooder.h"
 #include "pymatching/sparse_blossom/matcher/alternating_tree.h"
 #include "pymatching/sparse_blossom/search/search_flooder.h"
@@ -113,14 +115,22 @@ struct Mwpm {
     // (divide_vb's prune_target, send_solution_to_remote_pe's t) -- deliberately NOT Mwpm::task,
     // which is only kept current by prepare_for_task() (called exclusively from the climb loop) and
     // would be stale at every one of these call sites.
+    // t_out: optional per-thread debug stream (decode_shots' own already-open one, threaded through
+    // rather than opening a separate stream on the same file -- see the call sites in decoding_unit.cc
+    // for how it's passed down). When DEBUG and non-null, logs a detected vb-matched region here (see
+    // the print inside shatter_blossom_and_extract_matches/_match_edges below).
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_matches(
-        GraphFillRegion* region, MatchingResult& res, TaskBase* prune_target = nullptr);
-    MatchingResult shatter_blossom_and_extract_matches(GraphFillRegion* region, TaskBase* prune_target = nullptr);
+        GraphFillRegion* region, MatchingResult& res, TaskBase* prune_target = nullptr,
+        std::ofstream* t_out = nullptr);
+    MatchingResult shatter_blossom_and_extract_matches(
+        GraphFillRegion* region, TaskBase* prune_target = nullptr, std::ofstream* t_out = nullptr);
 
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_match_edges(
-        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges, TaskBase* prune_target = nullptr);
+        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges, TaskBase* prune_target = nullptr,
+        std::ofstream* t_out = nullptr);
     void shatter_blossom_and_extract_match_edges(
-        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges, TaskBase* prune_target = nullptr);
+        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges, TaskBase* prune_target = nullptr,
+        std::ofstream* t_out = nullptr);
     void extract_paths_from_match_edges(
         const std::vector<CompressedEdge>& match_edges, uint8_t* obs_begin_ptr, pm::total_weight_int& weight);
 
