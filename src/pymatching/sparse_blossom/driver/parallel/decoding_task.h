@@ -600,9 +600,17 @@ public:
     inline void wait_until_done(size_t my_pid, int shot_buffer_round) {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
+        // Named (not just FUNC_BEGIN's auto-generated pm::CrossRankTask::wait_until_done) so
+        // analyze_trace_wall_clock.py's WAIT_REGIONS can match it by its literal display name --
+        // this is the task-status rendezvous wait (blocks until the other PE has posted its
+        // done_shm signal for this shot), one of the pure per-PE ENTER-to-LEAVE cross-PE-cost
+        // proxies that stay meaningful even across nodes with unsynced clocks.
+        SCOREP_USER_REGION_DEFINE(wait_until_done_named);
+        SCOREP_USER_REGION_BEGIN(wait_until_done_named, "wait_until_done", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
         shmem_wait_until(done_shm, SHMEM_CMP_GE, shot_buffer_round + 1);
 #ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(wait_until_done_named);
         SCOREP_USER_FUNC_END();
 #endif
     }

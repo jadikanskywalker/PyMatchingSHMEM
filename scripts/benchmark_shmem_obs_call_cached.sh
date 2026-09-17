@@ -3,13 +3,18 @@
 #SBATCH --output=out/s-%j.out
 #SBATCH --partition=zen4
 #SBATCH --time=08:00:00
+# Known-bad nodes (comma-separated): rpc-96-1's ~/sw/$PLATFORM resolved to a dir without
+# oshrun at job start (2026-09-16, jobs 155973/155978) -- PATH silently missing it isn't
+# fatal to the script (no set -e), so the job "succeeds" with 0/N predictions. Add more
+# node names here, comma-separated, as they're confirmed bad.
+#SBATCH --exclude=rpc-96-1
 
 # Graph-cache variant of benchmark_shmem_obs_call.sh -- see benchmark_shmem_obs_cached.sh for
 # why (presets too large to keep a raw .dem around) and the M-must-match-the-cache caveat.
 
 if [ $# -le 8 ]
   then
-    echo "Args: [ntasks] [sockets] [ntasks_per_node] [nthreads] [M] [k] [graph_cache] [det] [flips]"
+    echo "Args: [ntasks] [sockets] [ntasks_per_node] [nthreads] [M] [k] [graph_cache] [det] [flips] [L (optional, default 16)]"
     exit 1
 else
     ntasks=$1
@@ -21,6 +26,7 @@ else
     graph_cache=$7
     det=$8
     flips=$9
+    L=${10:-16}   # extraction_unit_size
 fi
 
 suffix=M${M}_ntasks${ntasks}_sockets${sockets}_ntps${ntasks_per_node}_nthreads${nthreads}_k${k}_${SLURM_JOB_ID}
@@ -84,7 +90,7 @@ oshrun  \
         --rounds_per_partition $M \
         --cross_rank_fusion_window_size $k \
         --task_division_strategy observable \
-        --extraction_unit_size 4 \
+        --extraction_unit_size $L \
         --extract_preemptively \
         --use_threads \
         --num_repeats 10 \

@@ -3,10 +3,15 @@
 #SBATCH --output=out/s-%j.out
 #SBATCH --partition=zen4
 #SBATCH --time=02:00:00
+# Known-bad nodes (comma-separated): rpc-96-1's ~/sw/$PLATFORM resolved to a dir without
+# oshrun at job start (2026-09-16, jobs 155973/155978) -- PATH silently missing it isn't
+# fatal to the script (no set -e), so the job "succeeds" with 0/N predictions. Add more
+# node names here, comma-separated, as they're confirmed bad.
+#SBATCH --exclude=rpc-96-1
 
 if [ $# -le 8 ]
   then
-    echo "Args: [ntasks] [sockets] [ntasks_per_node] [nthreads] [M] [k] [dem] [det] [flips]"
+    echo "Args: [ntasks] [sockets] [ntasks_per_node] [nthreads] [M] [k] [dem] [det] [flips] [L (optional, default 16)]"
     exit 1
 else
     ntasks=$1
@@ -18,6 +23,7 @@ else
     dem=$7
     det=$8
     flips=$9
+    L=${10:-16}   # extraction_unit_size
 fi
 
 # nodes=$((sockets / 1))
@@ -77,7 +83,7 @@ oshrun  \
         --rounds_per_partition $M \
         --cross_rank_fusion_window_size $k \
         --task_division_strategy observable \
-        --extraction_unit_size 4 \
+        --extraction_unit_size $L \
         --extract_preemptively \
         --use_threads \
         --num_repeats 10 \

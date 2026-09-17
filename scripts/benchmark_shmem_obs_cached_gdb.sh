@@ -25,9 +25,9 @@
 # extract_preemptively, cross_rank_fusion_window_size, and thread/PE counts are NOT part of
 # the cache key and remain free to vary.
 
-if [ $# -le 6 ]
+if [ $# -le 7 ]
   then
-    echo "Args: [surgery_preset] [d] [p_dec] [shots] [rounds] [M] [k] [cache_suffix (optional)] [parent_dir (optional)]"
+    echo "Args: [surgery_preset] [d] [p_dec] [shots] [rounds] [M] [k] [L] [cache_suffix (optional)] [parent_dir (optional)]"
     exit 1
 else
     surgery_preset=$1
@@ -37,7 +37,8 @@ else
     rounds=$5
     M=($6)
     k=$7
-    cache_suffix=$8   # e.g. "_M22" -- gen_128obs_m22.sh/gen_256obs_m22.sh name their graph
+    L=$8               # extraction_unit_size, forwarded to benchmark_shmem_obs_call_cached_gdb.sh
+    cache_suffix=$9   # e.g. "_M22" -- gen_128obs_m22.sh/gen_256obs_m22.sh name their graph
                        # cache graph_<dem_suffix>_M22.cache (det/flips filenames are unaffected,
                        # only the graph cache filename carries this suffix) to distinguish the
                        # M22-aligned cache from the M21 one at a different round count sharing
@@ -49,13 +50,13 @@ conda activate pymatching
 
 dem_suffix=${surgery_preset}_d${d}_p${p_dec}_${rounds}r
 det_suffix=${dem_suffix}_${shots}s
-# parent_dir (9th arg, optional): nests output under a named subfolder, e.g.
+# parent_dir (10th arg, optional): nests output under a named subfolder, e.g.
 # bench_shmem_obs_many_observables, instead of directly under PyMatchingSHMEM/. The
 # benchmark_shmem_obs_call_cached_gdb.sh path above is absolute specifically so this can nest to any
 # depth without breaking the old "../scripts/..." assumption that dirname sits one level under
 # PyMatchingSHMEM/.
-parent_dir=${9:-.}
-dirname=$parent_dir/bench_$det_suffix
+parent_dir=${10:-.}
+dirname=$parent_dir/bench_${det_suffix}_L${L}
 
 mkdir -p $dirname
 
@@ -158,7 +159,7 @@ for ((m=0; m<${#M[@]}; m++ )); do
             --exclusive \
             --mem=$NODE_MEM \
             ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call_cached_gdb.sh \
-                1 1 1 $thisThreads $thisM $k $graph_cache $det $flips
+                1 1 1 $thisThreads $thisM $k $graph_cache $det $flips $L
         done
 
         thisNodes=${shmem_ntasks2_nodes[$i]}
@@ -170,7 +171,7 @@ for ((m=0; m<${#M[@]}; m++ )); do
             --exclusive \
             --mem=$NODE_MEM \
             ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call_cached_gdb.sh \
-                2 $thisSockets $thisNTPN $thisThreads $thisM $k $graph_cache $det $flips
+                2 $thisSockets $thisNTPN $thisThreads $thisM $k $graph_cache $det $flips $L
         done
 
         thisNodes=${shmem_ntasks4_nodes[$i]}
@@ -182,7 +183,7 @@ for ((m=0; m<${#M[@]}; m++ )); do
             --exclusive \
             --mem=$NODE_MEM \
             ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call_cached_gdb.sh \
-                4 $thisSockets $thisNTPN $thisThreads $thisM $k $graph_cache $det $flips
+                4 $thisSockets $thisNTPN $thisThreads $thisM $k $graph_cache $det $flips $L
         done
 
         thisNodes=${shmem_ntasks8_nodes[$i]}
@@ -194,7 +195,7 @@ for ((m=0; m<${#M[@]}; m++ )); do
             --exclusive \
             --mem=$NODE_MEM \
             ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call_cached_gdb.sh \
-                8 $thisSockets $thisNTPN $thisThreads $thisM $k $graph_cache $det $flips
+                8 $thisSockets $thisNTPN $thisThreads $thisM $k $graph_cache $det $flips $L
         done
 
         # thisNodes=${shmem_ntasks8_nodes[$i]}

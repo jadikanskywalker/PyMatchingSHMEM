@@ -177,13 +177,16 @@ pm::DecodingUnit::DecodingUnit(
         const int my_obs_start = 0;
         const int my_obs_count =  graph.num_obs_patches;
 #endif
-        // A PE owning 2+ local observables joined by a local seam needs a thread free to
-        // independently reach each side -- the loser of LocalSeamTask::try_to_steal spin-waits in
-        // place rather than yielding, so a PE with fewer threads than local observables can deadlock.
-        if (max_threads < my_obs_count) {
-            throw std::invalid_argument("max_threads (" + std::to_string(max_threads) +
-                ") is less than my_obs_count (" + std::to_string(my_obs_count) +
-                "); increase OMP_NUM_THREADS to at least the largest number of observables owned by any single PE.");
+        // A PE owning more local observables than threads used to deadlock: the loser of
+        // LocalSeamTask::try_to_steal spin-waited in place, and an observable with zero assigned
+        // threads would never get its leaves stolen at all. decode_shots() now lets a thread own
+        // multiple observables (round-robin, deferring a lost LocalSeamTask instead of blocking)
+        // whenever max_threads < my_obs_count, so this is no longer a hard error -- see
+        // decode_shots()'s owned_obs/OwnedObservable machinery.
+        if (DEBUG && max_threads < my_obs_count) {
+            std::cout << "DEBUG: max_threads (" << max_threads << ") < my_obs_count (" << my_obs_count
+                       << ") -- using multi-observable-per-thread scheduling with deferred LocalSeamTask resume\n"
+                       << std::flush;
         }
         // Global partition id of my own first local partition, and how many I own -- contiguous by
         // construction (obs-major numbering, per-PE contiguous observable ownership). Distinct from
@@ -2178,28 +2181,84 @@ void pm::DecodingUnit::decode_shots() {
             t_out.open(t_out_name);
             std::cout << "T" << tid << " of " << num_threads << std::endl;
         }
-        // Give every locally-owned observable its own dedicated thread(s) -- prevents one
-        // observable's thread getting stuck on a seam wait from starving another's leaf leap.
+        // Give every locally-owned observable its own dedicated thread(s) when threads are
+        // plentiful (today's behavior, unchanged) -- prevents one observable's thread getting stuck
+        // on a seam wait from starving another's leaf leap. When threads are scarcer than local
+        // observables, a thread instead owns multiple whole observables outright and walks them
+        // round-robin, deferring (instead of blocking) a lost LocalSeamTask so it can make progress
+        // on another owned observable while that seam's winner finishes -- see OwnedObservable below.
         const bool obs_partitioned = config_parallel::division_strategy == config_parallel::OBS;
-        int my_obs_idx = 0, local_tid = tid, my_obs_thread_count = num_threads;
-        size_t my_obs_leaf_start = 0, my_obs_leaf_end = my_partition_task_ids.size();
+        struct OwnedObservable {
+            size_t leaf_range_start = 0, leaf_range_end = 0;
+            size_t stride = 1;            // cooperative-split thread count, or 1 for sole ownership
+            size_t next_leaf_cursor = 0;  // reset to leaf_range_start each shot
+            // Resume state -- only ever populated when owned_obs.size() > 1 for this thread.
+            Task* resume_task = nullptr;
+            size_t resume_special_task_index = 0;
+        };
+        std::vector<OwnedObservable> owned_obs;
+        size_t rr_cursor = 0;  // round-robin pointer across owned_obs; unused when owned_obs.size() == 1
         if (obs_partitioned) {
             const int my_obs_count = my_partition_count / (int)graph.p_per_obs_patch;
-            const int threads_per_obs_base = num_threads / my_obs_count;
-            const int threads_rem = num_threads % my_obs_count;
-            const int rem_threads_total = threads_rem * (threads_per_obs_base + 1);
-            if (tid < rem_threads_total) {
-                my_obs_thread_count = threads_per_obs_base + 1;
-                my_obs_idx = tid / my_obs_thread_count;
-                local_tid  = tid % my_obs_thread_count;
+            if (num_threads >= my_obs_count) {
+                // Today's regime, arithmetic unchanged: cooperatively split each observable's
+                // leaves across my_obs_thread_count threads. Always yields exactly one
+                // OwnedObservable per thread.
+                int my_obs_idx, local_tid, my_obs_thread_count;
+                const int threads_per_obs_base = num_threads / my_obs_count;
+                const int threads_rem = num_threads % my_obs_count;
+                const int rem_threads_total = threads_rem * (threads_per_obs_base + 1);
+                if (tid < rem_threads_total) {
+                    my_obs_thread_count = threads_per_obs_base + 1;
+                    my_obs_idx = tid / my_obs_thread_count;
+                    local_tid  = tid % my_obs_thread_count;
+                } else {
+                    my_obs_thread_count = threads_per_obs_base;
+                    const int tid_rest = tid - rem_threads_total;
+                    my_obs_idx = threads_rem + tid_rest / my_obs_thread_count;
+                    local_tid  = tid_rest % my_obs_thread_count;
+                }
+                const size_t leaf_start = (size_t)my_obs_idx * (size_t)graph.p_per_obs_patch;
+                OwnedObservable obs;
+                obs.leaf_range_start = leaf_start + (size_t)local_tid;
+                obs.leaf_range_end   = leaf_start + (size_t)graph.p_per_obs_patch;
+                obs.stride = (size_t)my_obs_thread_count;
+                owned_obs.push_back(obs);
+                if (DEBUG) {
+                    std::cout << "DEBUG: tid=" << tid << " plentiful-thread regime: obs_idx=" << my_obs_idx
+                               << " local_tid=" << local_tid << " leaf_range=[" << obs.leaf_range_start
+                               << "," << obs.leaf_range_end << ") stride=" << obs.stride
+                               << std::endl << std::flush;
+                }
             } else {
-                my_obs_thread_count = threads_per_obs_base;
-                const int tid_rest = tid - rem_threads_total;
-                my_obs_idx = threads_rem + tid_rest / my_obs_thread_count;
-                local_tid  = tid_rest % my_obs_thread_count;
+                // Scarce regime: this thread owns 'my_count' whole observables outright (sole
+                // owner, stride 1), spread as evenly as possible across threads.
+                const int base = my_obs_count / num_threads;
+                const int rem  = my_obs_count % num_threads;
+                const int my_count = base + (tid < rem ? 1 : 0);
+                const int my_start = base * tid + std::min(tid, rem);
+                owned_obs.reserve((size_t)my_count);
+                for (int lo = my_start; lo < my_start + my_count; ++lo) {
+                    OwnedObservable obs;
+                    obs.leaf_range_start = (size_t)lo * (size_t)graph.p_per_obs_patch;
+                    obs.leaf_range_end   = obs.leaf_range_start + (size_t)graph.p_per_obs_patch;
+                    obs.stride = 1;
+                    owned_obs.push_back(obs);
+                }
+                if (DEBUG) {
+                    std::cout << "DEBUG: tid=" << tid << " scarce-thread regime: owns " << my_count
+                               << " whole observable(s) starting at local obs " << my_start
+                               << " (multi-observable round-robin with deferred LocalSeamTask resume)"
+                               << std::endl << std::flush;
+                }
             }
-            my_obs_leaf_start = (size_t)my_obs_idx * (size_t)graph.p_per_obs_patch;
-            my_obs_leaf_end   = my_obs_leaf_start + (size_t)graph.p_per_obs_patch;
+        } else {
+            // ROUND partitioning: unchanged shared range, all threads striding by num_threads.
+            OwnedObservable obs;
+            obs.leaf_range_start = (size_t)tid;
+            obs.leaf_range_end   = my_partition_task_ids.size();
+            obs.stride = (size_t)num_threads;
+            owned_obs.push_back(obs);
         }
         // Start decoding
         size_t shot_container_id = 0;
@@ -2215,10 +2274,10 @@ void pm::DecodingUnit::decode_shots() {
         int shot_id = shot_buffer_round * num_shot_containers;
         const size_t total_shots = shot_buffer->num_shots();
         // Thread-local list of local roots solved during the steal loop.
-        // Cleared at the start of each shot; a thread may solve multiple roots when
-        // it exhausts all its assigned partition leaves (via next_p_id). Universal across build
-        // configs -- round-partitioning always has exactly one true root (num_task_roots == 1), so
-        // in practice at most one thread ends up with a non-empty list per shot.
+        // Cleared at the start of each shot; a thread may solve multiple roots when it exhausts
+        // all leaves across all of its owned_obs. Universal across build configs -- round-
+        // partitioning always has exactly one true root (num_task_roots == 1), so in practice at
+        // most one thread ends up with a non-empty list per shot.
         struct RootInfo { Task* task; };
         std::vector<RootInfo> roots_i_solved;
         bool i_solved_last_root = false;
@@ -2266,34 +2325,12 @@ void pm::DecodingUnit::decode_shots() {
                 SCOREP_USER_REGION_BEGIN(shot_iteration, "Shot Iteration", SCOREP_USER_REGION_TYPE_COMMON);
                 SCOREP_USER_REGION_BEGIN(shot_decode, "Shot Decode", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
-                // Bounds come from the per-thread observable assignment above (or the whole task
-                // set for ROUND partitioning).
-                Task* t = &shot.tasks[my_partition_task_ids[my_obs_leaf_start + local_tid]];
-                size_t next_p_inc = my_obs_thread_count; // cannot inc by two for 1 threads --- does not work for odd
-                size_t next_p_id = my_obs_leaf_start + local_tid + next_p_inc;
-                if (DEBUG) t_out << "solver: " << t->solver << "\n";
-                bool stolen = t->try_to_steal(shot_buffer_round);
-                // Winning the CAS only means this thread now owns the leaf going forward -- it
-                // does NOT by itself mean the leaf's buffer is safe to reuse yet (that's what
-                // made shot_buffer_round being genuinely per-thread-local/racing safe in the old
-                // design's absence: here, different threads really can be on different shots).
-                // Block until this leaf's previous round's extraction has actually finished.
-                // Pure spin, deliberately not .wait()/.notify_all() -- see decoding_task.h.
-                if (stolen) t->wait_until_previous_extraction_done(shot_buffer_round);
-                // This thread's own designated initial leaf can already be claimed by another thread
-                // by the time we get here -- e.g. a faster thread that raced ahead, lost its own
-                // fusion's race, and grabbed this leaf directly via the "steal sibling if it's a raw
-                // leaf" trick below. Unlike that mid-climb case, an initial loss had no fallback here
-                // before: the retry loop mirroring this one (over next_p_id) only lives inside the
-                // while(stolen) body, so it was never reached if the very first steal failed -- this
-                // thread would silently do zero work for the entire shot, every shot, permanently
-                // starving any local seam/CRT whose other side only that thread could ever reach. Retry
-                // with the same next_p_id stride used everywhere else before giving up on this shot.
-                while (!stolen && next_p_id < my_obs_leaf_end) {
-                    t = &shot.tasks[my_partition_task_ids[next_p_id]];
-                    stolen = t->try_to_steal(shot_buffer_round);
-                    if (stolen) t->wait_until_previous_extraction_done(shot_buffer_round);
-                    next_p_id += next_p_inc;
+                // Bounds/stride/resume-state come from the per-thread observable assignment above
+                // (or the whole task set for ROUND partitioning) -- see owned_obs/OwnedObservable.
+                for (auto& obs : owned_obs) {
+                    obs.next_leaf_cursor = obs.leaf_range_start;
+                    obs.resume_task = nullptr;
+                    obs.resume_special_task_index = 0;
                 }
                 roots_i_solved.clear();
                 // Declared per-shot (not per-root): a CRT can now be resolved mid-climb, by a thread
@@ -2306,226 +2343,342 @@ void pm::DecodingUnit::decode_shots() {
 #ifdef SCOREP_USER_ENABLE
                 SCOREP_USER_REGION_BEGIN(local_decoding, "Local Decoding", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
-                while (stolen) {  // Got task
-                    if (DEBUG) t_out << "Thread " << tid << " solving " << (t->is_fusion ? "f" : "p") << t->part << std::endl << std::flush;
-                    auto& hitsref = shot_buffer->hits(shot_id, t->is_fusion, t->part);
-                    // Solve task
-                    t->setup();
-                    if (DEBUG) t_out << "  solver: " << t->solver << "\n";
-                    pm::Mwpm& solver = *t->solver;
-                    solver.prepare_for_task(t, shot_id);
-                    if (DEBUG) t_out << "  solver bounds: " << solver.flooder.vb_left << "(vb_left) " << solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
+                enum class ClimbOutcome { REACHED_ROOT, DEFERRED, NEED_NEXT_LEAF };
+                // Resumable climb: solve t (unless we're resuming a deferred seam, in which case
+                // it's already solved), run its special tasks starting at start_special_idx, then
+                // climb to parent/steal sibling and repeat -- until a root is reached, a
+                // LocalSeamTask is lost with can_defer set (multi-observable owner: defer instead of
+                // blocking, so this thread can make progress on another owned observable), or a
+                // parent/sibling steal fails (caller tries this observable's next leaf).
+                auto advance_task_climb = [&](Task* start_t, size_t start_special_idx, bool t_already_solved,
+                                                bool can_defer, Task*& out_task, size_t& out_special_idx) -> ClimbOutcome {
+                    Task* t = start_t;
+                    bool need_solve = !t_already_solved;
+                    size_t special_start = start_special_idx;
+                    while (true) {
+                        pm::Mwpm& solver = *t->solver;
+                        if (need_solve) {
+                            if (DEBUG) t_out << "Thread " << tid << " solving " << (t->is_fusion ? "f" : "p") << t->part << std::endl << std::flush;
+                            auto& hitsref = shot_buffer->hits(shot_id, t->is_fusion, t->part);
+                            // Solve task
+                            t->setup();
+                            if (DEBUG) t_out << "  solver: " << t->solver << "\n";
+                            solver.prepare_for_task(t, shot_id);
+                            if (DEBUG) t_out << "  solver bounds: " << solver.flooder.vb_left << "(vb_left) " << solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
 #ifdef ENABLE_DRAW_FLAGS
-                    if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
-                        size_t K_p = graph.num_partitions / graph.num_obs_patches;
-                        size_t K_vb = K_p - 1;
-                        size_t patch = (size_t)t->obs_patch_id;
-                        solver.flooder.p_offsets  = { K_p  * patch };
-                        solver.flooder.vb_offsets = { K_vb * patch };
-                    }
+                            if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
+                                size_t K_p = graph.num_partitions / graph.num_obs_patches;
+                                size_t K_vb = K_p - 1;
+                                size_t patch = (size_t)t->obs_patch_id;
+                                solver.flooder.p_offsets  = { K_p  * patch };
+                                solver.flooder.vb_offsets = { K_vb * patch };
+                            }
 #endif // ENABLE_DRAW_FLAGS
 #ifdef SCOREP_USER_ENABLE
-                    if (t->is_fusion) {
-                        SCOREP_USER_REGION_BEGIN(fusion_decode, "Fusion Decode", SCOREP_USER_REGION_TYPE_COMMON);
-                    } else {
-                        SCOREP_USER_REGION_BEGIN(leaf_decode, "Leaf Decode", SCOREP_USER_REGION_TYPE_COMMON);
-                    }
+                            if (t->is_fusion) {
+                                SCOREP_USER_REGION_BEGIN(fusion_decode, "Fusion Decode", SCOREP_USER_REGION_TYPE_COMMON);
+                            } else {
+                                SCOREP_USER_REGION_BEGIN(leaf_decode, "Leaf Decode", SCOREP_USER_REGION_TYPE_COMMON);
+                            }
 #endif
-                    pm::process_timeline_until_completion(
-                        solver,
-                        hitsref,
+                            pm::process_timeline_until_completion(
+                                solver,
+                                hitsref,
 #ifdef ENABLE_DRAW_FLAGS
-                        draw_frames,
+                                draw_frames,
 #endif
-                        true,
-                        tid);
+                                true,
+                                tid);
 #ifdef SCOREP_USER_ENABLE
-                    if (t->is_fusion) {
-                        SCOREP_USER_REGION_END(fusion_decode);
-                    } else {
-                        SCOREP_USER_REGION_END(leaf_decode);
-                    }
+                            if (t->is_fusion) {
+                                SCOREP_USER_REGION_END(fusion_decode);
+                            } else {
+                                SCOREP_USER_REGION_END(leaf_decode);
+                            }
 #endif
-                    if (DEBUG) t_out << "  solved " << (t->is_fusion ? "f" : "p") << t->part << std::endl << std::flush;
-                    t->mark_solved();
-                    // Process any attached special tasks (seams/CRTs) in order, then t's own deferred
-                    // span (if any), then t's own divide+post (if it isn't itself deferred) -- see
-                    // now-its-time-to-jazzy-turing.md Phase three §§2-4.
-                    for (SpecialTask* st : t->special_tasks) {
-                        if (st->is_local_seam_fusion()) {
-                            auto* seam = static_cast<LocalSeamTask*>(st);
-                            if (seam->try_to_steal(0)) {
-                                if (DEBUG) t_out << "Thread " << tid << " solving seam f" << seam->part << std::endl << std::flush;
-                                seam->setup();
-                                pm::Mwpm& seam_solver = *seam->solver;
-                                seam_solver.prepare_for_task(seam, shot_id);
-                                if (DEBUG) t_out << "  solver bounds: " << solver.flooder.vb_left << "(vb_left) " << solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
+                            if (DEBUG) t_out << "  solved " << (t->is_fusion ? "f" : "p") << t->part << std::endl << std::flush;
+                            t->mark_solved();
+                        }
+                        need_solve = true;  // any task reached via parent/sibling climb below always needs solving
+                        // Process any attached special tasks (seams/CRTs) in order, then t's own deferred
+                        // span (if any), then t's own divide+post (if it isn't itself deferred) -- see
+                        // now-its-time-to-jazzy-turing.md Phase three §§2-4.
+                        for (size_t i = special_start; i < t->special_tasks.size(); ++i) {
+                            SpecialTask* st = t->special_tasks[i];
+                            if (st->is_local_seam_fusion()) {
+                                auto* seam = static_cast<LocalSeamTask*>(st);
+                                if (seam->try_to_steal(0)) {
+                                    if (DEBUG) t_out << "Thread " << tid << " solving seam f" << seam->part << std::endl << std::flush;
+                                    seam->setup();
+                                    pm::Mwpm& seam_solver = *seam->solver;
+                                    seam_solver.prepare_for_task(seam, shot_id);
+                                    if (DEBUG) t_out << "  solver bounds: " << solver.flooder.vb_left << "(vb_left) " << solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
 #ifdef ENABLE_DRAW_FLAGS
-                                if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
-                                    size_t K_p = graph.num_partitions / graph.num_obs_patches;
-                                    size_t K_vb = K_p - 1;
-                                    seam_solver.flooder.p_offsets.clear();
-                                    seam_solver.flooder.vb_offsets.clear();
-                                    for (int op : seam->obs_patch_ids) {
-                                        seam_solver.flooder.p_offsets.push_back((size_t)op * K_p);
-                                        seam_solver.flooder.vb_offsets.push_back((size_t)op * K_vb);
+                                    if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
+                                        size_t K_p = graph.num_partitions / graph.num_obs_patches;
+                                        size_t K_vb = K_p - 1;
+                                        seam_solver.flooder.p_offsets.clear();
+                                        seam_solver.flooder.vb_offsets.clear();
+                                        for (int op : seam->obs_patch_ids) {
+                                            seam_solver.flooder.p_offsets.push_back((size_t)op * K_p);
+                                            seam_solver.flooder.vb_offsets.push_back((size_t)op * K_vb);
+                                        }
+                                    }
+#endif
+                                    pm::process_timeline_until_completion(
+                                        seam_solver, shot_buffer->hits(shot_id, true, seam->part),
+#ifdef ENABLE_DRAW_FLAGS
+                                        draw_frames,
+#endif
+                                        true, tid);
+                                    seam->mark_solved();
+                                    divide_vb(shot, (int)shot_container_id, shot_id, seam, tid, seam, &t_out);
+                                    // Round-tagged, not a plain bool -- see decoding_task.h LocalSeamTask::
+                                    // decode_done's own comment for why a stale value would otherwise be
+                                    // possible.
+                                    seam->mark_decode_done(shot_buffer_round);
+                                } else {
+                                    if (!can_defer) {
+                                        if (DEBUG) t_out << "Thread " << tid << " waiting on seam f" << st->part << std::endl << std::flush;
+                                        seam->wait_until_decode_done(shot_buffer_round);
+                                    } else {
+                                        if (DEBUG) t_out << "Thread " << tid << " deferring seam f" << st->part
+                                                          << " -- parking at task=" << t << " special_idx=" << i
+                                                          << ", moving to next owned observable" << std::endl << std::flush;
+                                        out_task = t;
+                                        out_special_idx = i;
+                                        return ClimbOutcome::DEFERRED;
                                     }
                                 }
-#endif
-                                pm::process_timeline_until_completion(
-                                    seam_solver, shot_buffer->hits(shot_id, true, seam->part),
-#ifdef ENABLE_DRAW_FLAGS
-                                    draw_frames,
-#endif
-                                    true, tid);
-                                seam->mark_solved();
-                                divide_vb(shot, (int)shot_container_id, shot_id, seam, tid, seam, &t_out);
-                                // Round-tagged, not a plain bool -- see decoding_task.h LocalSeamTask::
-                                // decode_done's own comment for why a stale value would otherwise be
-                                // possible.
-                                seam->mark_decode_done(shot_buffer_round);
-                            } else {
-                                if (DEBUG) t_out << "Thread " << tid << " waiting on seam f" << st->part << std::endl << std::flush;
-                                seam->wait_until_decode_done(shot_buffer_round);
                             }
-                        }
 #ifdef USE_SHMEM
-                        else if (st->is_cross_rank_fusion()) {
-                            auto* crt = static_cast<CrossRankTask*>(st);
-                            if (DEBUG) t_out << "Trying cross-rank fusion vb=" << crt->part
-                                             << " iamleft=" << crt->iamleft
-                                             << " other_pid=" << crt->other_pid << "\n" << std::flush;
-                            if (BARE_DEBUG) t_out << "    waiting until PE done" << std::endl << std::flush;
-                            crt->wait_until_done(pid, shot_buffer_round-1);
-                            if (crt->try_to_steal(pid)) {
-                                if (BARE_DEBUG) t_out << "  Stole CRT with " << crt->other_pid << std::endl << std::flush;
-                                crt->setup();
-                                auto& crt_solver = *crt->solver;
-                                crt_solver.prepare_for_task(crt, shot_id);
-                                if (DEBUG) t_out << "  solver bounds: " << crt_solver.flooder.vb_left << "(vb_left) " << crt_solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
-#ifdef ENABLE_DRAW_FLAGS
-                                if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
-                                    crt_solver.flooder.p_offsets  = { crt->left_global_offset.first,  crt->right_global_offset.first  };
-                                    crt_solver.flooder.vb_offsets = { crt->left_global_offset.second, crt->right_global_offset.second };
-                                }
-#endif
-                                auto& crt_hitsref = shot_buffer->hits(shot_id, true, crt->part);
-                                get_solution_from_remote_pe(shot_container_id, *crt, t_out, crt_hitsref);
-                                if (BARE_DEBUG) t_out << "  Solving CRT " << crt->part
-                                    << " bounds " << crt_solver.flooder.vb_left << " " << crt_solver.flooder.vb_right << std::endl << std::flush;
-                                pm::process_timeline_until_completion(
-                                    crt_solver,
-                                    crt_hitsref,
-#ifdef ENABLE_DRAW_FLAGS
-                                    draw_frames,
-#endif
-                                    true,
-                                    tid);
-                                crt->mark_solved(pid);
-                                // Extract inline, right here on the resolving thread -- not queued
-                                // (queuing would only add overhead, since this thread is already
-                                // doing the work). Divide crt->part first (now that it's fully
-                                // solved) so the received window can be safely extracted alongside
-                                // it, in the same breath.
-                                divide_vb(shot, (int)shot_container_id, shot_id, crt, tid, /*prune_target=*/crt, &t_out);
-                                extract_crt_received_window(shot, shot_container_id, shot_id, *crt, tid, &t_out);
-#ifdef ENABLE_DRAW_FLAGS
-                                if (draw_frames) draw_frame(crt_solver, pm::MwpmEvent::no_event(), 1001, true, tid);
-#endif
-                            } else {
-                                if (BARE_DEBUG) t_out << "  Sending CRT data to " << crt->other_pid << std::endl;
-                                crt->setup();
-#ifdef ENABLE_DRAW_FLAGS
-                                if (draw_frames) {
-                                    // crt->solver is assigned once at construction, anchored on my own
-                                    // local side of the boundary (see build_tasks_for_obs_patch_
-                                    // partitioning) -- using it directly here is what makes the old bug
-                                    // (using crt->part, a vb/fusion id, as if it were a partition index,
-                                    // aliasing whatever real local task happened to already own that
-                                    // solver) structurally impossible to reintroduce.
-                                    auto& dbg_solver = *crt->solver;
-                                    dbg_solver.prepare_for_task(crt, shot_id);
-                                    if (config_parallel::division_strategy == config_parallel::OBS) {
-                                        dbg_solver.flooder.p_offsets  = { crt->left_global_offset.first,  crt->right_global_offset.first  };
-                                        dbg_solver.flooder.vb_offsets = { crt->left_global_offset.second, crt->right_global_offset.second };
-                                    }
-                                    draw_frame(dbg_solver, pm::MwpmEvent::no_event(), 1000, true, tid);
-                                }
-#endif
-                                send_solution_to_remote_pe(shot_container_id, shot_id, my_result, *crt, t_out);
-                            }
-                            crts_i_handled.push_back(crt);
-                        }
-#endif  // USE_SHMEM
-                    }
-                    if (!t->special_tasks.empty()) {
-                        // Copy-filter (not move -- every seam side's thread reads this same shared
-                        // list) to just t's own observable.
-                        const auto& src = t->special_tasks.back()->regions_matched_to_virtual_boundary;
-                        t->regions_matched_to_virtual_boundary.clear();
-                        if (DEBUG) t_out << "  REGION_FILTER t=" << (t->is_fusion ? "f" : "p") << t->part
-                                          << " t->obs_patch_id=" << t->obs_patch_id << std::endl << std::flush;
-                        for (auto* region : src) {
-                            int region_obs = (region->match.edge.loc_from) ? region->match.edge.loc_from->obs_patch_id : -1;
-                            bool keep = (region_obs == t->obs_patch_id);
-                            if (DEBUG) t_out << "    region=" << region << " node_obs_patch_id=" << region_obs
-                                              << " keep=" << keep << std::endl << std::flush;
-                            if (keep) {
-                                t->regions_matched_to_virtual_boundary.push_back(region);
-                            }
-                        }
-                    }
-                    // Preemptive extraction: when a non-deferred unit connector is completed,
-                    // divide+post_left_child for any deferred connectors and the current connector
-                    if (config_parallel::extract_preemptively && t->is_extraction_unit_connector && !t->defer_division) {
-                        if (!t->special_tasks.empty()) {
-                            // By definition, the connector that terminates a run of deferred
-                            // predecessors will have SpecialTask(s), because they cause the deferrence
-                            back_divide_walk(t, shot, (int)shot_container_id, shot_id, tid, &t_out);
-                        }
-                        divide_vb(shot, (int)shot_container_id, shot_id, t, tid, /*prune_target=*/t, &t_out);
-                        Task* left = t->left_child;
-                        Task* closed_unit = left->is_extraction_unit_connector
-                            ? left->right_child   // Fk, k>1: U(k-1), just closed on its right
-                            : left;                // F1: U0, left_child IS the unit itself
-                        shot_buffer->post_extraction_job(shot_id, (int)shot_container_id, closed_unit, &t_out);
-                    }
-                    if (t->parent != nullptr) {
-                        Task* local_parent = t->parent;
-                        Task* sibling = (local_parent->left_child == t) ? local_parent->right_child : local_parent->left_child;
-                        if (DEBUG) t_out << "    t->parent->part=" << local_parent->part << "  t->parent->solver=" << local_parent->solver << "\n" << std::flush;
-                        stolen = local_parent->try_to_steal(0);
-                        t = local_parent;
-                        // Try to steal sibling or descendent of sibling
-                        if (!stolen && !sibling->is_fusion) {
-                            stolen = sibling->try_to_steal(shot_buffer_round);
-                            if (stolen) {
+                            else if (st->is_cross_rank_fusion()) {
 #ifdef SCOREP_USER_ENABLE
-                                // Zero-duration marker -- only the Visits count (Score-P profile
-                                // mode) matters here, to characterize how often sibling-stealing
-                                // actually engages.
-                                SCOREP_USER_REGION_BEGIN(sibling_steal, "Sibling Steal", SCOREP_USER_REGION_TYPE_COMMON);
-                                SCOREP_USER_REGION_END(sibling_steal);
+                                SCOREP_USER_REGION_BEGIN(cross_rank_fusion, "Cross Rank Phase", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
-                                sibling->wait_until_previous_extraction_done(shot_buffer_round);
+                                auto* crt = static_cast<CrossRankTask*>(st);
+                                if (DEBUG) t_out << "Trying cross-rank fusion vb=" << crt->part
+                                                 << " iamleft=" << crt->iamleft
+                                                 << " other_pid=" << crt->other_pid << "\n" << std::flush;
+                                if (BARE_DEBUG) t_out << "    waiting until PE done" << std::endl << std::flush;
+                                crt->wait_until_done(pid, shot_buffer_round-1);
+                                if (crt->try_to_steal(pid)) {
+                                    if (BARE_DEBUG) t_out << "  Stole CRT with " << crt->other_pid << std::endl << std::flush;
+                                    crt->setup();
+                                    auto& crt_solver = *crt->solver;
+                                    crt_solver.prepare_for_task(crt, shot_id);
+                                    if (DEBUG) t_out << "  solver bounds: " << crt_solver.flooder.vb_left << "(vb_left) " << crt_solver.flooder.vb_right << " (vb_right)" << std::endl << std::flush;
+#ifdef ENABLE_DRAW_FLAGS
+                                    if (draw_frames && config_parallel::division_strategy == config_parallel::OBS) {
+                                        crt_solver.flooder.p_offsets  = { crt->left_global_offset.first,  crt->right_global_offset.first  };
+                                        crt_solver.flooder.vb_offsets = { crt->left_global_offset.second, crt->right_global_offset.second };
+                                    }
+#endif
+                                    auto& crt_hitsref = shot_buffer->hits(shot_id, true, crt->part);
+                                    get_solution_from_remote_pe(shot_container_id, *crt, t_out, crt_hitsref);
+                                    if (BARE_DEBUG) t_out << "  Solving CRT " << crt->part
+                                        << " bounds " << crt_solver.flooder.vb_left << " " << crt_solver.flooder.vb_right << std::endl << std::flush;
+                                    pm::process_timeline_until_completion(
+                                        crt_solver,
+                                        crt_hitsref,
+#ifdef ENABLE_DRAW_FLAGS
+                                        draw_frames,
+#endif
+                                        true,
+                                        tid);
+                                    crt->mark_solved(pid);
+                                    // Extract inline, right here on the resolving thread -- not queued
+                                    // (queuing would only add overhead, since this thread is already
+                                    // doing the work). Divide crt->part first (now that it's fully
+                                    // solved) so the received window can be safely extracted alongside
+                                    // it, in the same breath.
+                                    divide_vb(shot, (int)shot_container_id, shot_id, crt, tid, /*prune_target=*/crt, &t_out);
+                                    extract_crt_received_window(shot, shot_container_id, shot_id, *crt, tid, &t_out);
+#ifdef ENABLE_DRAW_FLAGS
+                                    if (draw_frames) draw_frame(crt_solver, pm::MwpmEvent::no_event(), 1001, true, tid);
+#endif
+                                } else {
+                                    if (BARE_DEBUG) t_out << "  Sending CRT data to " << crt->other_pid << std::endl;
+                                    crt->setup();
+#ifdef ENABLE_DRAW_FLAGS
+                                    if (draw_frames) {
+                                        // crt->solver is assigned once at construction, anchored on my own
+                                        // local side of the boundary (see build_tasks_for_obs_patch_
+                                        // partitioning) -- using it directly here is what makes the old bug
+                                        // (using crt->part, a vb/fusion id, as if it were a partition index,
+                                        // aliasing whatever real local task happened to already own that
+                                        // solver) structurally impossible to reintroduce.
+                                        auto& dbg_solver = *crt->solver;
+                                        dbg_solver.prepare_for_task(crt, shot_id);
+                                        if (config_parallel::division_strategy == config_parallel::OBS) {
+                                            dbg_solver.flooder.p_offsets  = { crt->left_global_offset.first,  crt->right_global_offset.first  };
+                                            dbg_solver.flooder.vb_offsets = { crt->left_global_offset.second, crt->right_global_offset.second };
+                                        }
+                                        draw_frame(dbg_solver, pm::MwpmEvent::no_event(), 1000, true, tid);
+                                    }
+#endif
+                                    send_solution_to_remote_pe(shot_container_id, shot_id, my_result, *crt, t_out);
+                                }
+                                crts_i_handled.push_back(crt);
+#ifdef SCOREP_USER_ENABLE
+                                SCOREP_USER_REGION_END(cross_rank_fusion);
+#endif
                             }
-                            t = sibling;
+#endif  // USE_SHMEM
                         }
-                    } else {
-                        // t is a local tree root -- parent is always nullptr here now (a CrossRankTask
-                        // never sits at anyone's parent under the special-tasks-attach model).
-                        stolen = false;
-                        roots_i_solved.push_back({t});
+                        if (!t->special_tasks.empty()) {
+                            // Copy-filter (not move -- every seam side's thread reads this same shared
+                            // list) to just t's own observable.
+                            const auto& src = t->special_tasks.back()->regions_matched_to_virtual_boundary;
+                            t->regions_matched_to_virtual_boundary.clear();
+                            // if (DEBUG) t_out << "  REGION_FILTER t=" << (t->is_fusion ? "f" : "p") << t->part
+                            //                   << " t->obs_patch_id=" << t->obs_patch_id << std::endl << std::flush;
+                            for (auto* region : src) {
+                                int region_obs = (region->match.edge.loc_from) ? region->match.edge.loc_from->obs_patch_id : -1;
+                                bool keep = (region_obs == t->obs_patch_id);
+                                // if (DEBUG) t_out << "    region=" << region << " node_obs_patch_id=" << region_obs
+                                //                   << " keep=" << keep << std::endl << std::flush;
+                                if (keep) {
+                                    t->regions_matched_to_virtual_boundary.push_back(region);
+                                }
+                            }
+                        }
+                        // Preemptive extraction: when a non-deferred unit connector is completed,
+                        // divide+post_left_child for any deferred connectors and the current connector
+                        if (config_parallel::extract_preemptively && t->is_extraction_unit_connector && !t->defer_division) {
+                            if (!t->special_tasks.empty()) {
+                                // By definition, the connector that terminates a run of deferred
+                                // predecessors will have SpecialTask(s), because they cause the deferrence
+                                back_divide_walk(t, shot, (int)shot_container_id, shot_id, tid, &t_out);
+                            }
+                            divide_vb(shot, (int)shot_container_id, shot_id, t, tid, /*prune_target=*/t, &t_out);
+                            Task* left = t->left_child;
+                            Task* closed_unit = left->is_extraction_unit_connector
+                                ? left->right_child   // Fk, k>1: U(k-1), just closed on its right
+                                : left;                // F1: U0, left_child IS the unit itself
+                            shot_buffer->post_extraction_job(shot_id, (int)shot_container_id, closed_unit, &t_out);
+                        }
+                        if (t->parent != nullptr) {
+                            Task* local_parent = t->parent;
+                            Task* sibling = (local_parent->left_child == t) ? local_parent->right_child : local_parent->left_child;
+                            if (DEBUG) t_out << "    t->parent->part=" << local_parent->part << "  t->parent->solver=" << local_parent->solver << "\n" << std::flush;
+                            bool climbed = local_parent->try_to_steal(0);
+                            Task* next_t = local_parent;
+                            // Try to steal sibling or descendent of sibling
+                            if (!climbed && !sibling->is_fusion) {
+                                climbed = sibling->try_to_steal(shot_buffer_round);
+                                if (climbed) {
+#ifdef SCOREP_USER_ENABLE
+                                    // Zero-duration marker -- only the Visits count (Score-P profile
+                                    // mode) matters here, to characterize how often sibling-stealing
+                                    // actually engages.
+                                    SCOREP_USER_REGION_BEGIN(sibling_steal, "Sibling Steal", SCOREP_USER_REGION_TYPE_COMMON);
+                                    SCOREP_USER_REGION_END(sibling_steal);
+#endif
+                                    sibling->wait_until_previous_extraction_done(shot_buffer_round);
+                                }
+                                next_t = sibling;
+                            }
+                            if (DEBUG) {
+                                t_out << (next_t->is_fusion ? "  f" : "  p") << next_t->part << " stolen = " << climbed
+                                        << std::endl << std::flush;
+                            }
+                            if (!climbed) {
+                                return ClimbOutcome::NEED_NEXT_LEAF;
+                            }
+                            t = next_t;
+                            special_start = 0;
+                            // loop back to top: need_solve is already forced true above
+                        } else {
+                            // t is a local tree root -- parent is always nullptr here now (a CrossRankTask
+                            // never sits at anyone's parent under the special-tasks-attach model).
+                            if (DEBUG) t_out << (t->is_fusion ? "  f" : "  p") << t->part << " stolen = 0 (root reached)" << std::endl << std::flush;
+                            roots_i_solved.push_back({t});
+                            return ClimbOutcome::REACHED_ROOT;
+                        }
                     }
-                    while (!stolen && next_p_id < my_obs_leaf_end) {
-                        t = &shot.tasks[my_partition_task_ids[next_p_id]];
-                        stolen = t->try_to_steal(shot_buffer_round);
-                        if (stolen) t->wait_until_previous_extraction_done(shot_buffer_round);
-                        next_p_id += next_p_inc;
+                };
+                // Attempt one unit of progress on a single owned observable: resume a deferred
+                // LocalSeamTask if one is pending and now ready, otherwise claim this observable's
+                // next unclaimed leaf and climb from it.
+                auto advance_owned_observable = [&](OwnedObservable& obs, bool can_defer) -> bool {
+                    if (obs.resume_task != nullptr) {
+                        auto* seam = static_cast<LocalSeamTask*>(obs.resume_task->special_tasks[obs.resume_special_task_index]);
+                        if (seam->decode_done.load(std::memory_order_acquire) != (int64_t)shot_buffer_round) {
+                            if (DEBUG) t_out << "Thread " << tid << " re-checking deferred seam f" << seam->part
+                                              << " -- still not ready" << std::endl << std::flush;
+                            return false;  // still not ready -- peek only, no blocking call
+                        }
+                        if (DEBUG) t_out << "Thread " << tid << " resuming deferred seam f" << seam->part
+                                          << " at task=" << obs.resume_task
+                                          << " special_idx=" << obs.resume_special_task_index
+                                          << " -- now ready" << std::endl << std::flush;
+                        Task* resumed_t = obs.resume_task;
+                        size_t resumed_idx = obs.resume_special_task_index;
+                        obs.resume_task = nullptr;
+                        Task* out_task; size_t out_idx;
+                        // Resumed task was already fully solved before it deferred; continue its
+                        // special_tasks loop right after the seam that's now confirmed done.
+                        ClimbOutcome outcome = advance_task_climb(resumed_t, resumed_idx + 1, /*t_already_solved=*/true, can_defer, out_task, out_idx);
+                        if (outcome == ClimbOutcome::DEFERRED) {
+                            obs.resume_task = out_task;
+                            obs.resume_special_task_index = out_idx;
+                        }
+                        return true;
                     }
-                    if (DEBUG && t != nullptr) {
-                        t_out << (t->is_fusion ? "  f" : "  p") << t->part << " stolen = " << stolen
-                                << std::endl << std::flush;
+                    if (obs.next_leaf_cursor >= obs.leaf_range_end) return false;
+                    Task* leaf = &shot.tasks[my_partition_task_ids[obs.next_leaf_cursor]];
+                    if (DEBUG) t_out << "solver: " << leaf->solver << "\n";
+                    bool stolen = leaf->try_to_steal(shot_buffer_round);
+                    obs.next_leaf_cursor += obs.stride;
+                    if (!stolen) return false;
+                    // Winning the CAS only means this thread now owns the leaf going forward -- it
+                    // does NOT by itself mean the leaf's buffer is safe to reuse yet (that's what
+                    // made shot_buffer_round being genuinely per-thread-local/racing safe in the old
+                    // design's absence: here, different threads really can be on different shots).
+                    // Block until this leaf's previous round's extraction has actually finished.
+                    // Pure spin, deliberately not .wait()/.notify_all() -- see decoding_task.h.
+                    leaf->wait_until_previous_extraction_done(shot_buffer_round);
+                    Task* out_task; size_t out_idx;
+                    ClimbOutcome outcome = advance_task_climb(leaf, 0, /*t_already_solved=*/false, can_defer, out_task, out_idx);
+                    if (outcome == ClimbOutcome::DEFERRED) {
+                        obs.resume_task = out_task;
+                        obs.resume_special_task_index = out_idx;
+                    }
+                    return true;
+                };
+                if (owned_obs.size() == 1) {
+                    // Degenerates to exactly today's single-observable walk: repeatedly claim+climb
+                    // until this observable's leaf range is exhausted. can_defer is false here, so a
+                    // lost LocalSeamTask always blocks (as before) and resume_task is never touched.
+                    OwnedObservable& obs = owned_obs[0];
+                    while (obs.next_leaf_cursor < obs.leaf_range_end) {
+                        advance_owned_observable(obs, /*can_defer=*/false);
+                    }
+                } else {
+                    // Multi-observable owner: sweep round-robin across owned observables, skipping
+                    // any that are already fully drained (no pending resume, no leaves left), until
+                    // every one of them has pushed its root for this shot. Deliberately does NOT fall
+                    // through to the shared extraction-job drain below until then -- a thread with
+                    // its own still-deferred observable must not claim a drain slot, since that spin
+                    // has no timeout and the job it maps to may depend on this thread finishing its
+                    // own deferred work first.
+                    std::vector<bool> obs_done(owned_obs.size(), false);
+                    size_t remaining = owned_obs.size();
+                    while (remaining > 0) {
+                        size_t oi = rr_cursor;
+                        rr_cursor = (rr_cursor + 1) % owned_obs.size();
+                        if (obs_done[oi]) continue;
+                        advance_owned_observable(owned_obs[oi], /*can_defer=*/true);
+                        if (owned_obs[oi].resume_task == nullptr &&
+                            owned_obs[oi].next_leaf_cursor >= owned_obs[oi].leaf_range_end) {
+                            obs_done[oi] = true;
+                            --remaining;
+                        }
+                    }
+                    if (DEBUG) {
+                        t_out << "Thread " << tid << " finished all " << owned_obs.size()
+                              << " owned observables for shot " << shot_id << std::endl << std::flush;
                     }
                 }
 #ifdef SCOREP_USER_ENABLE

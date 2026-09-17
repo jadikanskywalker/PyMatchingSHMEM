@@ -8,9 +8,9 @@
 #SBATCH --exclusive
 #SBATCH --mem=256GB
 
-if [ $# -le 6 ]
+if [ $# -le 7 ]
   then
-    echo "Args: [surgery_preset] [d] [p_dec] [shots] [rounds] [M] [k] [parent_dir (optional)]"
+    echo "Args: [surgery_preset] [d] [p_dec] [shots] [rounds] [M] [k] [L] [parent_dir (optional)]"
     exit 1
 else
     surgery_preset=$1
@@ -20,7 +20,8 @@ else
     rounds=$5
     M=($6)
     k=$7
-    parent_dir=${8:-.}   # e.g. bench_shmem_obs_many_observables, to keep output alongside the
+    L=$8                  # extraction_unit_size, forwarded to benchmark_shmem_obs_call.sh
+    parent_dir=${9:-.}   # e.g. bench_shmem_obs_many_observables, to keep output alongside the
                           # cached-graph presets' runs -- see benchmark_shmem_obs_cached.sh
 fi
 
@@ -29,7 +30,7 @@ conda activate pymatching
 
 dem_suffix=${surgery_preset}_d${d}_p${p_dec}_${rounds}r
 det_suffix=${dem_suffix}_${shots}s
-dirname=$parent_dir/bench_$det_suffix
+dirname=$parent_dir/bench_${det_suffix}_L${L}
 
 mkdir -p $dirname
 
@@ -106,7 +107,7 @@ for ((m=0; m<${#M[@]}; m++ )); do
             --exclusive \
             --mem=$NODE_MEM \
             ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call.sh \
-                1 1 1 $thisThreads $thisM $k $dem $det $flips
+                1 1 1 $thisThreads $thisM $k $dem $det $flips $L
         done
 
         thisNodes=${shmem_ntasks2_nodes[$i]}
@@ -118,7 +119,7 @@ for ((m=0; m<${#M[@]}; m++ )); do
             --exclusive \
             --mem=$NODE_MEM \
             ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call.sh \
-                2 $thisSockets $thisNTPN $thisThreads $thisM $k $dem $det $flips
+                2 $thisSockets $thisNTPN $thisThreads $thisM $k $dem $det $flips $L
         done
 
         thisNodes=${shmem_ntasks4_nodes[$i]}
@@ -130,7 +131,7 @@ for ((m=0; m<${#M[@]}; m++ )); do
             --exclusive \
             --mem=$NODE_MEM \
             ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call.sh \
-                4 $thisSockets $thisNTPN $thisThreads $thisM $k $dem $det $flips
+                4 $thisSockets $thisNTPN $thisThreads $thisM $k $dem $det $flips $L
         done
 
         thisNodes=${shmem_ntasks8_nodes[$i]}
@@ -142,7 +143,7 @@ for ((m=0; m<${#M[@]}; m++ )); do
             --exclusive \
             --mem=$NODE_MEM \
             ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call.sh \
-                8 $thisSockets $thisNTPN $thisThreads $thisM $k $dem $det $flips
+                8 $thisSockets $thisNTPN $thisThreads $thisM $k $dem $det $flips $L
         done
     done
 done
