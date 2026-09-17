@@ -1187,7 +1187,7 @@ bool check_pointers_for_self_and_all_descendents(
     return true;
 }
 
-void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size_t shot_id, pm::MatchingResult& res, CrossRankTask &t, std::ofstream &t_out) {
+void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size_t shot_id, pm::MatchingResult& res, CrossRankTask &t, Task &owner_task, int tid, std::ofstream &t_out) {
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_DEFINE(sender_wait);
     SCOREP_USER_REGION_DEFINE(solution_isolation);
@@ -1218,6 +1218,8 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
         p_end   = t.vb_right + (int)my_p_offset;
         p_k = p_end - p_start + 1;
     }
+
+    bool extended = shot_buffer->num_observables > sizeof(pm::obs_int) * 8;
 
     if (DEBUG)
         t_out << "    sending (p_start" << p_start << ", p_k=" << p_k << ", p_end=" << p_end << ") to " << other_pid << std::endl;
@@ -1353,7 +1355,15 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
                 }
                 if (!valid) {
                     if (DEBUG) t_out << "      SHATTERING blossom_root\n" << std::flush;
-                    res += solver.shatter_blossom_and_extract_matches(blossom_root, &t, &t_out);
+                    // Extended (>64 obs) decode accumulates via match-edge paths, not obs_mask -- see
+                    // divide_vb's identical extended/non-extended split. res (thread_results' obs_mask
+                    // slot) is never read by the final combine when extended, so writing only there
+                    // would silently drop this shattered region's contribution.
+                    if (extended) {
+                        solver.shatter_blossom_and_extract_match_edges(blossom_root, solver.flooder.match_edges, &t, &t_out);
+                    } else {
+                        res += solver.shatter_blossom_and_extract_matches(blossom_root, &t, &t_out);
+                    }
                 } else {
                     for (const auto& child_edge : discovered_child_edges) {
                         if (child_edges_counter < p_k * child_edges_nelems_per_solver) {
@@ -1377,6 +1387,22 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
     // already have caught this via the &t passed above; this is a redundant post-hoc check that
     // should find nothing if that fix is working.
     prune_stale_regions_matched_to_vb(&t, "send_solution_to_remote_pe (validation pass)", &t_out);
+
+    if (extended && !solver.flooder.match_edges.empty()) {
+        // Mirrors divide_vb's extended path: bound the Dijkstra search using the OWNING task's vb
+        // range, not t's (the CrossRankTask's own, narrower window) -- a region only reaches this
+        // shatter branch because it broke outside t's window in the first place, so it can
+        // legitimately span into owner_task's wider range; bounding on t here would make
+        // extract_paths_from_match_edges reject a path this shatter just produced.
+        solver.prepare_for_extraction(&owner_task);
+        if (DEBUG) t_out << "    send_solution_to_remote_pe search_flooder vb=" << solver.search_flooder.vb
+                          << " vb_left=" << solver.search_flooder.vb_left
+                          << " vb_right=" << solver.search_flooder.vb_right
+                          << " match_edges=" << solver.flooder.match_edges.size() << std::endl << std::flush;
+        auto& ext_res = shot_buffer->thread_extended_results(shot_id)[tid];
+        solver.extract_paths_from_match_edges(solver.flooder.match_edges, ext_res.obs_crossed.data(), ext_res.weight);
+        solver.flooder.match_edges.clear();
+    }
 
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_END(solution_isolation);
@@ -2517,7 +2543,7 @@ void pm::DecodingUnit::decode_shots() {
                                         draw_frame(dbg_solver, pm::MwpmEvent::no_event(), 1000, true, tid);
                                     }
 #endif
-                                    send_solution_to_remote_pe(shot_container_id, shot_id, my_result, *crt, t_out);
+                                    send_solution_to_remote_pe(shot_container_id, shot_id, my_result, *crt, *t, tid, t_out);
                                 }
                                 crts_i_handled.push_back(crt);
 #ifdef SCOREP_USER_ENABLE

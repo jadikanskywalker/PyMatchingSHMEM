@@ -233,7 +233,7 @@ struct DecodingUnit {
 
     // Decoding Functions
 #ifdef USE_SHMEM
-    void send_solution_to_remote_pe(size_t shot_container_id, size_t shot_id, pm::MatchingResult& res, CrossRankTask &task, std::ofstream &t_out);
+    void send_solution_to_remote_pe(size_t shot_container_id, size_t shot_id, pm::MatchingResult& res, CrossRankTask &task, Task &owner_task, int tid, std::ofstream &t_out);
     bool get_solution_from_remote_pe(size_t shot_container_id, CrossRankTask &task, std::ofstream &t_out, std::vector<uint64_t>& hitsref); // returns whether solving is necessary
     // Extracts a cross-rank fusion's received window immediately, inline on the resolving thread.
     // Assumes crt->part's own vb has already been divided (see divide_vb) by the caller.
