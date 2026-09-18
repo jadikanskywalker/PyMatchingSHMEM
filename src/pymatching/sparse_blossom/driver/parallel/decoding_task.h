@@ -575,16 +575,42 @@ public:
 
 
     /* Sychronization Methods */
-    // Should be called on PE who solved fusion
-    void mark_solved(size_t my_pid) override {
+    // Resets status_shm as soon as this shot's race is resolved -- called by the winner immediately
+    // after try_to_steal() returns true, before solving even starts. Neither this nor
+    // mark_signal_consumed() below gates anything: the only thing that gates the next shot's entry
+    // is wait_until_done()/done_shm, which only advances once report_done() fires (still after
+    // divide_vb/extract_crt_received_window) -- so resetting these fields early is inert until then,
+    // just lets the CRT tree-slot mark itself "spent" sooner instead of waiting until after solving.
+    inline void mark_race_resolved(size_t my_pid) {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
 #endif
         shmem_ctx_uint64_atomic_set(context_shm, status_shm, 0, (iamleft) ? my_pid : other_pid);
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_END();
+#endif
+    }
+
+    // Resets my own signal_shm as soon as this shot's 4 puts have all landed -- called by the winner
+    // immediately after get_solution_from_remote_pe() confirms signal_shm==4, before solving, so this
+    // slot is ready for the next shot's incoming puts as early as possible.
+    inline void mark_signal_consumed(size_t my_pid) {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_BEGIN();
+#endif
         shmem_ctx_uint64_atomic_set(context_shm, signal_shm, 0, my_pid); // reset my signal
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_END();
 #endif
+    }
+
+    // Should be called on PE who solved fusion -- kept for TaskBase's pure-virtual interface.
+    // decode_shots() no longer calls this for CrossRankTask; it calls the two split, earlier resets
+    // above instead (see the CRT synchronization plan). Delegates to them so this still behaves
+    // correctly if anything else ever calls mark_solved() polymorphically.
+    void mark_solved(size_t my_pid) override {
+        mark_race_resolved(my_pid);
+        mark_signal_consumed(my_pid);
     }
 
     inline void report_done(int shot_buffer_round) {

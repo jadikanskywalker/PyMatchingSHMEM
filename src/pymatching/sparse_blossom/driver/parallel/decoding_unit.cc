@@ -2510,6 +2510,10 @@ void pm::DecodingUnit::decode_shots() {
                                 crt->wait_until_done(pid, shot_buffer_round-1);
                                 if (crt->try_to_steal(pid)) {
                                     if (BARE_DEBUG) t_out << "  Stole CRT with " << crt->other_pid << std::endl << std::flush;
+                                    // Reset status_shm now, right after winning -- nothing consumes
+                                    // it again until next shot's try_to_steal, which stays gated by
+                                    // wait_until_done()/done_shm regardless (see CRT sync plan).
+                                    crt->mark_race_resolved(pid);
                                     crt->setup();
                                     auto& crt_solver = *crt->solver;
                                     crt_solver.prepare_for_task(crt, shot_id);
@@ -2522,6 +2526,10 @@ void pm::DecodingUnit::decode_shots() {
 #endif
                                     auto& crt_hitsref = shot_buffer->hits(shot_id, true, crt->part);
                                     get_solution_from_remote_pe(shot_container_id, *crt, t_out, crt_hitsref);
+                                    // Reset my own signal_shm now, right after confirming all 4 puts
+                                    // landed -- ready for the next shot's incoming puts as early as
+                                    // possible, well before solving/dividing/extracting this shot.
+                                    crt->mark_signal_consumed(pid);
                                     if (BARE_DEBUG) t_out << "  Solving CRT " << crt->part
                                         << " bounds " << crt_solver.flooder.vb_left << " " << crt_solver.flooder.vb_right << std::endl << std::flush;
                                     pm::process_timeline_until_completion(
@@ -2532,7 +2540,9 @@ void pm::DecodingUnit::decode_shots() {
 #endif
                                         true,
                                         tid);
-                                    crt->mark_solved(pid);
+                                    // status_shm/signal_shm already reset earlier (mark_race_resolved/
+                                    // mark_signal_consumed above) -- no combined mark_solved() call
+                                    // needed here anymore.
                                     // Extract inline, right here on the resolving thread -- not queued
                                     // (queuing would only add overhead, since this thread is already
                                     // doing the work). Divide crt->part first (now that it's fully
@@ -2540,6 +2550,8 @@ void pm::DecodingUnit::decode_shots() {
                                     // it, in the same breath.
                                     divide_vb(shot, (int)shot_container_id, shot_id, crt, tid, /*prune_target=*/crt, &t_out);
                                     extract_crt_received_window(shot, shot_container_id, shot_id, *crt, tid, &t_out);
+                                    // now that received window is clear, I can mark extraction done
+                                    crt->report_done(shot_buffer_round);
 #ifdef ENABLE_DRAW_FLAGS
                                     if (draw_frames) draw_frame(crt_solver, pm::MwpmEvent::no_event(), 1001, true, tid);
 #endif
@@ -2564,6 +2576,11 @@ void pm::DecodingUnit::decode_shots() {
                                     }
 #endif
                                     send_solution_to_remote_pe(shot_container_id, shot_id, my_result, *crt, *t, tid, t_out);
+                                    // Loser also needs its own done_shm touched every round, or a PE
+                                    // that wins this CRT once can never re-enter its race again (the
+                                    // winner's report_done above only ever targets other_pid, never
+                                    // its own done_shm) -- see project plan for the full trace.
+                                    crt->report_done(shot_buffer_round);
                                 }
                                 crts_i_handled.push_back(crt);
 #ifdef SCOREP_USER_ENABLE
@@ -2773,21 +2790,21 @@ void pm::DecodingUnit::decode_shots() {
                 while (ExtractionJob* job = shot_buffer->try_claim_extraction_job(shot_id)) {
                     process_extraction_job(shot, shot_id, *job, tid, &t_out);
                 }
-                // report_done tells the other PE "my local window buffer is free for your next shot's
-                // send_solution_to_remote_pe to reuse" -- must not fire until every job this shot
-                // posted (back_divide_walk, t's own divide+post) has actually been *processed*, not
-                // just posted, or the other PE could race ahead into next shot's send while this
-                // shot's own extraction is still reading/writing the same regions. Every thread with a
-                // non-empty crts_i_handled needs its own explicit wait here -- it can't rely on being
-                // the "last root" thread (only one thread ever is) or on the queue-drain loop above
-                // (SHMEM's idle-helper exits on root-completion, not job-completion).
-#ifdef USE_SHMEM
-                if (!crts_i_handled.empty()) {
-                    while (shot_buffer->pending_extraction_jobs(shot_id) != 0) {}
-                    if (BARE_DEBUG) t_out << "    reporting done" << std::endl << std::flush;
-                    for (auto* crt : crts_i_handled) crt->report_done(shot_buffer_round);
-                }
-#endif
+//                 // report_done tells the other PE "my local window buffer is free for your next shot's
+//                 // send_solution_to_remote_pe to reuse" -- must not fire until every job this shot
+//                 // posted (back_divide_walk, t's own divide+post) has actually been *processed*, not
+//                 // just posted, or the other PE could race ahead into next shot's send while this
+//                 // shot's own extraction is still reading/writing the same regions. Every thread with a
+//                 // non-empty crts_i_handled needs its own explicit wait here -- it can't rely on being
+//                 // the "last root" thread (only one thread ever is) or on the queue-drain loop above
+//                 // (SHMEM's idle-helper exits on root-completion, not job-completion).
+// #ifdef USE_SHMEM
+//                 if (!crts_i_handled.empty()) {
+//                     while (shot_buffer->pending_extraction_jobs(shot_id) != 0) {}
+//                     if (BARE_DEBUG) t_out << "    reporting done" << std::endl << std::flush;
+//                     for (auto* crt : crts_i_handled) crt->report_done(shot_buffer_round);
+//                 }
+// #endif
                 if (i_solved_last_root) {
                     i_solved_last_root = false;
                     // Idle-helper threads (above) may still be concurrently draining -- the loop just

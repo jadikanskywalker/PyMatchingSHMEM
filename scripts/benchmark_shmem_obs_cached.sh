@@ -72,9 +72,9 @@ if [ ! -d out ]
     mkdir out
 fi
 
-graph_cache=~/PyMatchingSHMEM/testdems/graph_${dem_suffix}${cache_suffix}.cache
-det=~/PyMatchingSHMEM/testdems/detection_events_$det_suffix.b8
-flips=~/PyMatchingSHMEM/testdems/actual_obs_flips_$det_suffix.01
+graph_cache=$WORK/testdems/graph_${dem_suffix}${cache_suffix}.cache
+det=$WORK/testdems/detection_events_$det_suffix.b8
+flips=$WORK/testdems/actual_obs_flips_$det_suffix.01
 echo $graph_cache
 echo $det
 echo $flips

@@ -4,7 +4,7 @@
 #SBATCH --error=run.err
 #SBATCH --partition=zen4
 #SBATCH --time=03:00:00
-#SBATCH --nodes=1
+#SBATCH --nodes=2
 #SBATCH --ntasks=4
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=1000GB
