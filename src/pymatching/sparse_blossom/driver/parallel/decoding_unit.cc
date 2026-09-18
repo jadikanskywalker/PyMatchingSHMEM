@@ -743,6 +743,26 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
     };
 #endif
 
+    // Deterministic attach order: seams whose two observables share the same owning PE attach as
+    // LocalSeamTask before seams spanning two different PEs (CrossRankTask), stable within each
+    // class. This is a global PE-ownership property of the seam (the same test the CRT branch
+    // already applies to its remote side via other_pid_for) -- deliberately NOT
+    // seam_ownership[s].oi_local/oj_local, which only says whether an observable is in *this*
+    // PE's own range and says nothing about whether the seam's other observable shares a PE with
+    // it otherwise. Only the ATTACH-LOOP visitation order changes -- seam_infos/seam_ownership
+    // keep their original indices and content; every lookup in the loop bodies still uses s.
+#ifdef USE_SHMEM
+    auto seam_is_same_pe = [&](int s) {
+        return other_pid_for(seam_infos[s].oi) == other_pid_for(seam_infos[s].oj);
+    };
+#else
+    auto seam_is_same_pe = [&](int) { return true; };  // single process: every seam is same-PE
+#endif
+    std::vector<int> seam_attach_order;
+    seam_attach_order.reserve(num_seams);
+    for (int s = 0; s < num_seams; ++s) if (seam_is_same_pe(s)) seam_attach_order.push_back(s);
+    for (int s = 0; s < num_seams; ++s) if (!seam_is_same_pe(s)) seam_attach_order.push_back(s);
+
 #ifdef ENABLE_SHOT_BUFFERS
     const int num_shot_containers = NUM_BUFFERS_PER_UNIT;
 #else
@@ -793,7 +813,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             // Roots never merge under the special-tasks-attach model -- obs_roots[lo] stays this
             // observable's own tree root for the whole function's lifetime, so seams/CRTs attach
             // directly against it (no union-find over a group_root[] indirection needed anymore).
-            for (int s = 0; s < num_seams; ++s) {
+            for (int s : seam_attach_order) {
                 const auto& si = seam_infos[s];
                 const int loi = si.oi - my_obs_start, loj = si.oj - my_obs_start;
                 const bool oi_local = seam_ownership[s].oi_local, oj_local = seam_ownership[s].oj_local;
@@ -949,7 +969,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
             // values at the same unit index for a local-local seam (same L/K_p/leaf numbering and
             // identical defer_division patterns on both sides, per Phase 1 Design §1's symmetry), so
             // either side can be read -- use oi's.
-            for (int s = 0; s < num_seams; ++s) {
+            for (int s : seam_attach_order) {
                 const auto& si = seam_infos[s];
                 const bool oi_local = seam_ownership[s].oi_local, oj_local = seam_ownership[s].oj_local;
                 if (oi_local && oj_local) {
