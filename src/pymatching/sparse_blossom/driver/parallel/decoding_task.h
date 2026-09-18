@@ -575,17 +575,54 @@ public:
 
 
     /* Sychronization Methods */
-    // Resets status_shm as soon as this shot's race is resolved -- called by the winner immediately
-    // after try_to_steal() returns true, before solving even starts. Neither this nor
-    // mark_signal_consumed() below gates anything: the only thing that gates the next shot's entry
-    // is wait_until_done()/done_shm, which only advances once report_done() fires (still after
-    // divide_vb/extract_crt_received_window) -- so resetting these fields early is inert until then,
-    // just lets the CRT tree-slot mark itself "spent" sooner instead of waiting until after solving.
+    // Resets ONLY the right PE's own copy of status_shm -- remote if the winner is left, local if the
+    // winner is right. Called by the winner (whichever side it is) immediately after try_to_steal()
+    // returns true, before solving even starts.
+    //
+    // Left's own copy is NEVER reset here (or anywhere, ever, for the life of the run) -- see
+    // try_to_steal()/wait_until_ready_to_race() below for why. A prior version of this method reset
+    // BOTH copies every round, which (combined with a reset-to-0-every-round left copy) caused a real,
+    // reproduced bug: one PE racing multiple *shots* ahead of the other (not just mid-round timing --
+    // this codebase's decentralized shot sync allows real multi-shot drift) could have its vote for
+    // shot i+1 land in a slot the other side still read as "not yet started for shot i", corrupting
+    // the FusionSummary/region reconstruction in get_solution_from_remote_pe. The fix makes left's own
+    // copy a monotonically increasing, never-reset counter instead, so its absolute value alone always
+    // unambiguously identifies which shot's race it represents -- no more stale-vs-legitimate ambiguity.
+    //
+    // Neither this nor mark_signal_consumed() below gates the *send* path: that's still
+    // wait_until_done()/done_shm, gating only the loser's send (see decode_shots()). This reset only
+    // ever gates the right PE's own half of wait_until_ready_to_race().
     inline void mark_race_resolved(size_t my_pid) {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
 #endif
-        shmem_ctx_uint64_atomic_set(context_shm, status_shm, 0, (iamleft) ? my_pid : other_pid);
+        shmem_ctx_uint64_atomic_set(context_shm, status_shm, 0, (iamleft) ? other_pid : my_pid);
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_END();
+#endif
+    }
+
+    // Cheap local-memory race-entry gate, replacing wait_until_done()/done_shm as the thing both
+    // roles wait on before attempting try_to_steal() again. Role assignment never touches payload
+    // data, so it's safe to let it proceed as soon as this PE's own gate condition is satisfied --
+    // independent of whether the winner's own extract/report_done pipeline has fully finished.
+    // shmem_wait_until on a local SHMEM-writable field mirrors wait_until_done's own pattern just
+    // below (SOS's own busy-poll, no syscall).
+    //
+    // Left and right need DIFFERENT conditions, and left's needs the actual shot index (found the hard
+    // way, twice): right's own copy is a clean, single-purpose "I attempted this round" marker, reset
+    // to 0 by whoever wins, so ==0 is unambiguous. Left's own copy IS the shared race-determination
+    // slot (see try_to_steal() below) -- a monotonically increasing counter, never reset, where the
+    // absolute value 2*shot_buffer_round is exactly the point at which shot (shot_buffer_round - 1)'s
+    // race has been fully, unambiguously resolved by both sides (see try_to_steal()'s own comment for
+    // the induction argument). Use shot_buffer_round here, not shot_id -- they're only numerically
+    // identical while ENABLE_SHOT_BUFFERS is off; report_done()/wait_until_done() already use
+    // shot_buffer_round for the same reason.
+    inline void wait_until_ready_to_race(int shot_buffer_round) {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_FUNC_BEGIN();
+#endif
+        
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_END();
 #endif
@@ -641,31 +678,47 @@ public:
 #endif
     }
 
-    bool try_to_steal(size_t my_pid
-        // , std::ostream* t_out = nullptr
-    ) override {
+    // Kept only to satisfy TaskBase's pure-virtual interface (mirrors mark_solved()'s own precedent
+    // just above) -- every real call site goes through a concrete CrossRankTask*, and CRT's own race
+    // needs shot_buffer_round too, so decode_shots() always calls the 2-arg overload below instead.
+    bool try_to_steal(size_t val) override {
+        throw std::logic_error("CrossRankTask::try_to_steal(size_t): call try_to_steal(my_pid, shot_buffer_round) instead");
+    }
+
+    // Left's own copy of status_shm is a monotonically increasing counter, incremented by 1 by BOTH
+    // sides every shot, NEVER reset (see mark_race_resolved()'s own comment for why the old
+    // reset-every-shot OR-based scheme was unsound). For shot k (0-indexed), the counter reaches
+    // 2k+1 on whichever side's own fetch_add is the SECOND to land for that shot -- that side wins.
+    //
+    // Induction argument for why this can never be "lapped" the way the old scheme was: neither side
+    // can even ATTEMPT shot k's vote until wait_until_ready_to_race(k) passes, which for left requires
+    // status_shm >= 2k, and for right requires its own local marker == 0 (reset only by shot (k-1)'s
+    // winner, which is only known -- synchronously, via this fetch_add's own return value -- at the
+    // exact instant status_shm reaches 2k). So neither side's vote for shot k can land before shot
+    // k-1's pair of votes has fully landed, by construction -- unlike the old bit-reset scheme, there
+    // is no window where a value looks "clean" without actually meaning "ready for the next shot".
+    bool try_to_steal(size_t my_pid, int shot_buffer_round) {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
 #endif
-        uint64_t old, news;
+        uint64_t old;
         if (iamleft) {
-            old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 1, my_pid);
-            news = old | 1;
+            shmem_wait_until(status_shm, SHMEM_CMP_GE, (uint64_t)(2 * shot_buffer_round));
+            old = shmem_ctx_uint64_atomic_fetch_add(context_shm, status_shm, 1, my_pid);
         } else {
-            old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 2, other_pid);
-            news = old | 2;
+            shmem_wait_until(status_shm, SHMEM_CMP_EQ, 0);
+            // Local marker on my own copy first ("I attempted this round") -- consumed only by
+            // wait_until_ready_to_race()'s own-copy spin gate, decoupled from the real
+            // winner-determination fetch_add below (unchanged target: left's copy). Self first, same
+            // ordering discipline as mark_race_resolved.
+            shmem_ctx_uint64_atomic_set(context_shm, status_shm, 1, my_pid);
+            old = shmem_ctx_uint64_atomic_fetch_add(context_shm, status_shm, 1, other_pid);
         }
-        if (news == 3) {
+        bool won = (old == 2 * (uint64_t)shot_buffer_round + 1);
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_END();
 #endif
-            return old != 3;
-        } else {
-#ifdef SCOREP_USER_ENABLE
-        SCOREP_USER_FUNC_END();
-#endif
-            return false;
-        }
+        return won;
     }
 
     void reset() override {

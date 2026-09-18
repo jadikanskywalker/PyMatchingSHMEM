@@ -2506,13 +2506,17 @@ void pm::DecodingUnit::decode_shots() {
                                 if (DEBUG) t_out << "Trying cross-rank fusion vb=" << crt->part
                                                  << " iamleft=" << crt->iamleft
                                                  << " other_pid=" << crt->other_pid << "\n" << std::flush;
-                                if (BARE_DEBUG) t_out << "    waiting until PE done" << std::endl << std::flush;
-                                crt->wait_until_done(pid, shot_buffer_round-1);
-                                if (crt->try_to_steal(pid)) {
+                                // Cheap local race-entry gate (Phase 2 of the CRT sync plan) --
+                                // replaces the old unconditional wait_until_done()/done_shm wait
+                                // here; that wait now only happens in the loser branch below, right
+                                // before this PE actually sends (the only place it's load-bearing).
+                                if (BARE_DEBUG) t_out << "    waiting until ready to race" << std::endl << std::flush;
+                                // crt->wait_until_ready_to_race(shot_buffer_round);
+                                if (crt->try_to_steal(pid, shot_buffer_round)) {
                                     if (BARE_DEBUG) t_out << "  Stole CRT with " << crt->other_pid << std::endl << std::flush;
-                                    // Reset status_shm now, right after winning -- nothing consumes
-                                    // it again until next shot's try_to_steal, which stays gated by
-                                    // wait_until_done()/done_shm regardless (see CRT sync plan).
+                                    // Reset status_shm now, right after winning -- unblocks both
+                                    // sides' wait_until_ready_to_race() for the next shot immediately,
+                                    // independent of the send-readiness gate below.
                                     crt->mark_race_resolved(pid);
                                     crt->setup();
                                     auto& crt_solver = *crt->solver;
@@ -2575,6 +2579,13 @@ void pm::DecodingUnit::decode_shots() {
                                         draw_frame(dbg_solver, pm::MwpmEvent::no_event(), 1000, true, tid);
                                     }
 #endif
+                                    // Only the loser needs done_shm at all: this is the send-safety
+                                    // gate (has the receiver of MY last send finished consuming it,
+                                    // so my shadow buffers are safe to overwrite again) -- checked
+                                    // right here, immediately before actually sending, not at the top
+                                    // of the CRT branch anymore (race-entry no longer depends on it).
+                                    if (BARE_DEBUG) t_out << "    waiting until PE done" << std::endl << std::flush;
+                                    crt->wait_until_done(pid, shot_buffer_round-1);
                                     send_solution_to_remote_pe(shot_container_id, shot_id, my_result, *crt, *t, tid, t_out);
                                     // Loser also needs its own done_shm touched every round, or a PE
                                     // that wins this CRT once can never re-enter its race again (the
