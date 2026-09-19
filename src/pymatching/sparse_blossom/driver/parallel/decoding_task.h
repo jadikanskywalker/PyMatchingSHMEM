@@ -592,15 +592,15 @@ public:
     // Neither this nor mark_signal_consumed() below gates the *send* path: that's still
     // wait_until_done()/done_shm, gating only the loser's send (see decode_shots()). This reset only
     // ever gates the right PE's own half of wait_until_ready_to_race().
-    inline void mark_race_resolved(size_t my_pid) {
-#ifdef SCOREP_USER_ENABLE
-        SCOREP_USER_FUNC_BEGIN();
-#endif
-        shmem_ctx_uint64_atomic_set(context_shm, status_shm, 0, (iamleft) ? other_pid : my_pid);
-#ifdef SCOREP_USER_ENABLE
-        SCOREP_USER_FUNC_END();
-#endif
-    }
+//     inline void mark_race_resolved(size_t my_pid) {
+// #ifdef SCOREP_USER_ENABLE
+//         SCOREP_USER_FUNC_BEGIN();
+// #endif
+//         shmem_ctx_uint64_atomic_set(context_shm, status_shm, 0, (iamleft) ? other_pid : my_pid);
+// #ifdef SCOREP_USER_ENABLE
+//         SCOREP_USER_FUNC_END();
+// #endif
+//     }
 
     // Cheap local-memory race-entry gate, replacing wait_until_done()/done_shm as the thing both
     // roles wait on before attempting try_to_steal() again. Role assignment never touches payload
@@ -618,15 +618,15 @@ public:
     // the induction argument). Use shot_buffer_round here, not shot_id -- they're only numerically
     // identical while ENABLE_SHOT_BUFFERS is off; report_done()/wait_until_done() already use
     // shot_buffer_round for the same reason.
-    inline void wait_until_ready_to_race(int shot_buffer_round) {
-#ifdef SCOREP_USER_ENABLE
-        SCOREP_USER_FUNC_BEGIN();
-#endif
+//     inline void wait_until_ready_to_race(int shot_buffer_round) {
+// #ifdef SCOREP_USER_ENABLE
+//         SCOREP_USER_FUNC_BEGIN();
+// #endif
         
-#ifdef SCOREP_USER_ENABLE
-        SCOREP_USER_FUNC_END();
-#endif
-    }
+// #ifdef SCOREP_USER_ENABLE
+//         SCOREP_USER_FUNC_END();
+// #endif
+    // }
 
     // Resets my own signal_shm as soon as this shot's 4 puts have all landed -- called by the winner
     // immediately after get_solution_from_remote_pe() confirms signal_shm==4, before solving, so this
@@ -646,7 +646,6 @@ public:
     // above instead (see the CRT synchronization plan). Delegates to them so this still behaves
     // correctly if anything else ever calls mark_solved() polymorphically.
     void mark_solved(size_t my_pid) override {
-        mark_race_resolved(my_pid);
         mark_signal_consumed(my_pid);
     }
 
@@ -706,15 +705,18 @@ public:
             shmem_wait_until(status_shm, SHMEM_CMP_GE, (uint64_t)(2 * shot_buffer_round));
             old = shmem_ctx_uint64_atomic_fetch_add(context_shm, status_shm, 1, my_pid);
         } else {
-            shmem_wait_until(status_shm, SHMEM_CMP_EQ, 0);
+            shmem_wait_until(status_shm, SHMEM_CMP_EQ, shot_buffer_round);
             // Local marker on my own copy first ("I attempted this round") -- consumed only by
             // wait_until_ready_to_race()'s own-copy spin gate, decoupled from the real
             // winner-determination fetch_add below (unchanged target: left's copy). Self first, same
             // ordering discipline as mark_race_resolved.
-            shmem_ctx_uint64_atomic_set(context_shm, status_shm, 1, my_pid);
+            // shmem_ctx_uint64_atomic_set(context_shm, status_shm, 1, my_pid);
             old = shmem_ctx_uint64_atomic_fetch_add(context_shm, status_shm, 1, other_pid);
         }
         bool won = (old == 2 * (uint64_t)shot_buffer_round + 1);
+        if (won) {
+            shmem_ctx_uint64_atomic_inc(context_shm, status_shm, (iamleft) ? other_pid : my_pid);
+        }
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_END();
 #endif

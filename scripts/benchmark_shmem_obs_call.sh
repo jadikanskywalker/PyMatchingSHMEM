@@ -39,6 +39,11 @@ cd $out
 log=log_shmem.out
 preds=../preds/preds_$suffix.01
 
+if [ ! -d preds ]
+  then
+    mkdir preds
+fi
+
 echo "Job ID: $SLURM_JOB_ID" >> $log
 
 source ~/.bash_profile

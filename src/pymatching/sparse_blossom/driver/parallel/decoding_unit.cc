@@ -2514,10 +2514,6 @@ void pm::DecodingUnit::decode_shots() {
                                 // crt->wait_until_ready_to_race(shot_buffer_round);
                                 if (crt->try_to_steal(pid, shot_buffer_round)) {
                                     if (BARE_DEBUG) t_out << "  Stole CRT with " << crt->other_pid << std::endl << std::flush;
-                                    // Reset status_shm now, right after winning -- unblocks both
-                                    // sides' wait_until_ready_to_race() for the next shot immediately,
-                                    // independent of the send-readiness gate below.
-                                    crt->mark_race_resolved(pid);
                                     crt->setup();
                                     auto& crt_solver = *crt->solver;
                                     crt_solver.prepare_for_task(crt, shot_id);
