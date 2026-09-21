@@ -628,25 +628,14 @@ public:
 // #endif
     // }
 
-    // Resets my own signal_shm as soon as this shot's 4 puts have all landed -- called by the winner
-    // immediately after get_solution_from_remote_pe() confirms signal_shm==4, before solving, so this
-    // slot is ready for the next shot's incoming puts as early as possible.
-    inline void mark_signal_consumed(size_t my_pid) {
-#ifdef SCOREP_USER_ENABLE
-        SCOREP_USER_FUNC_BEGIN();
-#endif
-        shmem_ctx_uint64_atomic_set(context_shm, signal_shm, 0, my_pid); // reset my signal
-#ifdef SCOREP_USER_ENABLE
-        SCOREP_USER_FUNC_END();
-#endif
-    }
-
-    // Should be called on PE who solved fusion -- kept for TaskBase's pure-virtual interface.
-    // decode_shots() no longer calls this for CrossRankTask; it calls the two split, earlier resets
-    // above instead (see the CRT synchronization plan). Delegates to them so this still behaves
-    // correctly if anything else ever calls mark_solved() polymorphically.
+    // Kept only to satisfy TaskBase's pure-virtual interface (mirrors try_to_steal(size_t)'s own
+    // precedent above) -- signal_shm is now a never-reset monotonic counter (Phase 4 of the CRT
+    // sync plan: the sender's own send_solution_to_remote_pe does the only increments it needs),
+    // so there's nothing left for a CRT-specific mark_solved() to do. Every real call site
+    // branches on is_cross_rank_fusion() before ever calling mark_solved(), so this is never
+    // actually reached.
     void mark_solved(size_t my_pid) override {
-        mark_signal_consumed(my_pid);
+        throw std::logic_error("CrossRankTask::mark_solved: signal_shm is never reset; this should never be called");
     }
 
     inline void report_done(int shot_buffer_round) {

@@ -210,19 +210,30 @@ python3 ../scripts/combine_results.py predicted_obs_flips__shmem.01 $n
 
 # Check work
 echo SHMEM
-echo correct predictions:
-paste -d " " predicted_obs_flips__shmem.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
-echo wrong predictions:
-paste -d " " predicted_obs_flips__shmem.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
+total_bits=$(awk '{ n += length($0) } END { print n }' actual_obs_flips.01)
+paste -d "" predicted_obs_flips__shmem.01 actual_obs_flips.01 | awk -v total="$total_bits" '
+{
+    n = length($0) / 2
+    for (i = 1; i <= n; i++) {
+        if (substr($0, i, 1) == substr($0, n + i, 1)) correct++
+        else wrong++
+    }
+}
+END {
+    print "correct predictions:"
+    print correct + 0 "/" total
+    print "wrong predictions:"
+    print wrong + 0 "/" total
+}'
 
-echo
-echo Shots with differring predictions:
-awk 'NR==FNR{a[NR]=$0; n=NR; next} {
-  if (FNR>n || $0!=a[FNR]) { print FNR-1; out=1 }
-} END {
-  if (n>FNR) { for (i=FNR+1;i<=n;i++) { print i-1; out=1 } }
-  if (!out) print "no differences"
-}' predicted_obs_flips__threads.01 predicted_obs_flips__shmem.01
+# echo
+# echo Shots with differring predictions:
+# awk 'NR==FNR{a[NR]=$0; n=NR; next} {
+#   if (FNR>n || $0!=a[FNR]) { print FNR-1; out=1 }
+# } END {
+#   if (n>FNR) { for (i=FNR+1;i<=n;i++) { print i-1; out=1 } }
+#   if (!out) print "no differences"
+# }' predicted_obs_flips__threads.01 predicted_obs_flips__shmem.01
 
 rm hostfile.txt
 cd ..

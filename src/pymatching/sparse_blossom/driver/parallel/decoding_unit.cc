@@ -1212,6 +1212,8 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
     SCOREP_USER_REGION_DEFINE(sender_wait);
     SCOREP_USER_REGION_DEFINE(solution_isolation);
     SCOREP_USER_REGION_DEFINE(putmems);
+    SCOREP_USER_REGION_DEFINE(send_fence);
+    SCOREP_USER_REGION_DEFINE(send_signal);
     SCOREP_USER_REGION_DEFINE(shatter);
 #endif
 #ifdef SCOREP_USER_ENABLE
@@ -1446,26 +1448,22 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
               << "      Node Fields Base: " << node_fields_base << std::endl
               << "      Nelems: " << nodes_nelems_total << std::endl << std::flush;
     }
-    shmem_ctx_putmem_signal_nbi(t.context_shm, 
-                                node_fields_base, 
-                                node_fields_base, 
-                                nodes_nelems_total * sizeof(DetectorNodeEphemeralFields), 
-                                t.signal_shm, 
-                                1, SHMEM_SIGNAL_ADD, 
-                                other_pid);
+    shmem_ctx_putmem_nbi(t.context_shm,
+                         node_fields_base,
+                         node_fields_base,
+                         nodes_nelems_total * sizeof(DetectorNodeEphemeralFields),
+                         other_pid);
 
     if (DEBUG) {
         t_out << "    sending GraphFillRegions" << std::endl
               << "      Regions Base: " << regions_start_ptr << std::endl
               << "      Nelems: " << p_k * regions_nelems_per_solver << std::endl << std::flush;
     }
-    shmem_ctx_putmem_signal_nbi(t.context_shm, 
-                                regions_start_ptr, 
-                                regions_start_ptr, 
-                                regions_total_bytes, 
-                                t.signal_shm, 
-                                1, SHMEM_SIGNAL_ADD, 
-                                other_pid);
+    shmem_ctx_putmem_nbi(t.context_shm,
+                         regions_start_ptr,
+                         regions_start_ptr,
+                         regions_total_bytes,
+                         other_pid);
 
     // Send BlossomChild array
     //   Sent as one block from the base of partition_start
@@ -1475,13 +1473,11 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
               << "      Size: " << child_edges_counter * sizeof(BlossomChild) << std::endl
               << "      Nelems: " << child_edges_counter << std::endl << std::flush;
     }
-    shmem_ctx_putmem_signal_nbi(t.context_shm, 
-                                child_edges_buff_base, 
-                                child_edges_buff_base, 
-                                child_edges_counter * sizeof(BlossomChild), 
-                                t.signal_shm, 
-                                1, SHMEM_SIGNAL_ADD, 
-                                other_pid);
+    shmem_ctx_putmem_nbi(t.context_shm,
+                         child_edges_buff_base,
+                         child_edges_buff_base,
+                         child_edges_counter * sizeof(BlossomChild),
+                         other_pid);
     fusion_summary_base->blossom_children_size = child_edges_counter;
 
     // Validate & copy regions_to_unmatch, skipping any that were shattered during solution isolation.
@@ -1538,17 +1534,40 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
               << "      Blossom Children Size: " << fusion_summary_base->blossom_children_size << std::endl
               << "      Bitmap Size Bytes: " << total_bitmap_bytes << std::endl << std::flush;
     }
-    shmem_ctx_putmem_signal_nbi(t.context_shm, 
-                                fusion_summary_base, 
-                                fusion_summary_base, 
-                                summary_payload_size, 
-                                t.signal_shm, 
-                                1, SHMEM_SIGNAL_ADD, 
-                                other_pid);
+    shmem_ctx_putmem_nbi(t.context_shm,
+                         fusion_summary_base,
+                         fusion_summary_base,
+                         summary_payload_size,
+                         other_pid);
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_END(putmems);
 #endif
-    
+
+    // Order the 4 plain puts above ahead of the signal below on the wire, without paying for a
+    // full quiet here -- see transport_ofi.h's own shmem_transport_put_signal_nbi, which does
+    // exactly put+fence+atomic per call today; batching all 4 puts under one fence+atomic instead
+    // of 4 is the whole point of this rework.
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_BEGIN(send_fence, "Sender Fence", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+    shmem_ctx_fence(t.context_shm);
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_END(send_fence);
+#endif
+
+    // Self first, same ordering discipline as try_to_steal's winner-increment: my own copy of
+    // signal_shm is durable locally before the receiver's copy (the actual notification) is even
+    // issued. Never reset (see mark_signal_consumed's removal) -- both copies simply advance by 1
+    // every round, in lockstep, since exactly one PE does this pair of increments per round.
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_BEGIN(send_signal, "Sender Signal Atomics", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+    shmem_ctx_uint64_atomic_inc(t.context_shm, t.signal_shm, other_pid);
+    shmem_ctx_uint64_atomic_inc(t.context_shm, t.signal_shm, pid);
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_END(send_signal);
+#endif
+
     std::vector<std::vector<uint64_t>*> hits;
     for (int p_i = p_start; p_i <= p_end; ++p_i) {
         if (DEBUG) t_out << "  p" << p_i << std::flush;
@@ -1600,7 +1619,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
 }
 
 bool pm::DecodingUnit::get_solution_from_remote_pe(
-    size_t shot_container_id, CrossRankTask &t, std::ofstream &t_out,
+    size_t shot_container_id, CrossRankTask &t, int shot_buffer_round, std::ofstream &t_out,
     std::vector<uint64_t> &hitsref) {
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_DEFINE(receiver_wait);
@@ -1653,8 +1672,11 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_BEGIN(receiver_wait, "Receiver Wait Until", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
-    // Wait for signal (4 puts expected)
-    shmem_wait_until(t.signal_shm, SHMEM_CMP_EQ, 4);
+    // signal_shm is now a monotonically increasing, never-reset counter (mirroring status_shm's
+    // own design): the sender's dual atomic_inc (own copy, then receiver's copy) advances both
+    // sides' copies together exactly once per round, regardless of who sends that round -- so
+    // round k's data has landed once my own copy reaches k+1.
+    shmem_wait_until(t.signal_shm, SHMEM_CMP_EQ, (uint64_t)(shot_buffer_round + 1));
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_END(receiver_wait);
 #endif
@@ -2525,11 +2547,10 @@ void pm::DecodingUnit::decode_shots() {
                                     }
 #endif
                                     auto& crt_hitsref = shot_buffer->hits(shot_id, true, crt->part);
-                                    get_solution_from_remote_pe(shot_container_id, *crt, t_out, crt_hitsref);
-                                    // Reset my own signal_shm now, right after confirming all 4 puts
-                                    // landed -- ready for the next shot's incoming puts as early as
-                                    // possible, well before solving/dividing/extracting this shot.
-                                    crt->mark_signal_consumed(pid);
+                                    get_solution_from_remote_pe(shot_container_id, *crt, shot_buffer_round, t_out, crt_hitsref);
+                                    // signal_shm is never reset (Phase 4 of the CRT sync plan) --
+                                    // it's a monotonic counter mirroring status_shm, so there's
+                                    // nothing to consume/reset here anymore.
                                     if (BARE_DEBUG) t_out << "  Solving CRT " << crt->part
                                         << " bounds " << crt_solver.flooder.vb_left << " " << crt_solver.flooder.vb_right << std::endl << std::flush;
                                     pm::process_timeline_until_completion(
@@ -2540,9 +2561,8 @@ void pm::DecodingUnit::decode_shots() {
 #endif
                                         true,
                                         tid);
-                                    // status_shm/signal_shm already reset earlier (mark_race_resolved/
-                                    // mark_signal_consumed above) -- no combined mark_solved() call
-                                    // needed here anymore.
+                                    // status_shm/signal_shm are both never-reset monotonic counters
+                                    // now -- no combined mark_solved() call needed here anymore.
                                     // Extract inline, right here on the resolving thread -- not queued
                                     // (queuing would only add overhead, since this thread is already
                                     // doing the work). Divide crt->part first (now that it's fully
