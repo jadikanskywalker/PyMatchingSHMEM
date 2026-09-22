@@ -105,7 +105,11 @@ struct TaskBase {
     TaskBase(TaskBase&& other) noexcept
         : part(other.part), vb_marker(other.vb_marker),
           vb_left(other.vb_left), vb_right(other.vb_right),
-          is_fusion(other.is_fusion), in_crt_window(other.in_crt_window), type(other.type),
+          is_fusion(other.is_fusion),
+#ifdef USE_SHMEM
+          in_crt_window(other.in_crt_window),
+#endif
+          type(other.type),
           solver(other.solver),
           regions_to_unmatch(std::move(other.regions_to_unmatch)),
           regions_matched_to_virtual_boundary(std::move(other.regions_matched_to_virtual_boundary))
@@ -117,7 +121,9 @@ struct TaskBase {
         vb_left = other.vb_left;
         vb_right = other.vb_right;
         is_fusion = other.is_fusion;
+#ifdef USE_SHMEM
         in_crt_window = other.in_crt_window;
+#endif
         type = other.type;
         solver = other.solver;
         regions_to_unmatch = std::move(other.regions_to_unmatch);
@@ -362,12 +368,8 @@ struct Task : public TaskBase {
     }
 };
 
-// N-ary local convergence -- generalizes the old binary local-seam Task to any number of converging
-// observables sharing one boundary, so a 3+-way convergence is one LocalSeamTask, not a cascade of
-// nested binary seams (which was the actual source of the child_bit-reliability problems worked
-// through earlier -- see now-its-time-to-jazzy-turing.md Phase 2 (REVISED) Context). children starts
-// empty and is populated by each converging Task's own Task::add_special_task(this) call (task-
-// building pass concern, not this file's) rather than being passed in at construction.
+// Generalized to support N observables connected to single seam
+// (probably not needed, but what the heck)
 struct LocalSeamTask : public SpecialTask {
    private:
     // Arrival counter, same fetch_add race as Task::status's own fusion branch, generalized from a
@@ -481,11 +483,7 @@ struct LocalSeamTask : public SpecialTask {
 #ifdef USE_SHMEM
 struct CrossRankTask : public SpecialTask {
 public:
-    // Cross-rank tasks only ever have one local child -- no N-ary generalization needed here the way
-    // LocalSeamTask needed one. TaskBase*, not Task*, for the same reason as LocalSeamTask::children
-    // above: the predecessor is the plain Task if this is the first SpecialTask attached to it, or the
-    // previously-attached SpecialTask if not. Populated via Task::add_special_task(this), not the
-    // constructor.
+    // Cross-rank tasks currently only allowed one child
     TaskBase* child{nullptr};
     bool iamleft;
 
@@ -503,6 +501,10 @@ public:
     // For OBS patch fusions
     std::pair<size_t, size_t> left_global_offset{  0, 0 };   // obsA (lower obs) {p_offset, vb_offset}
     std::pair<size_t, size_t> right_global_offset{ 0, 0 };   // obsB (higher obs) {p_offset, vb_offset}
+
+    // ROUND: fusion task to right of CRT on left or left of CRT on right
+    //   OBS: fusion tasks at local observable's vb_left/vb_right
+    std::vector<Task*> boundary_fusions;
 
     CrossRankTask(
         int vb,

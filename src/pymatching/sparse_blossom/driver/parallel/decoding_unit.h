@@ -284,6 +284,10 @@ struct DecodingUnit {
     // the solver/prune_target so divide timing can be traced end-to-end (see this-is-a-broader-
     // purrfect-crystal.md).
     void divide_vb(ShotContainer& shot, int shot_container_id, size_t shot_id, TaskBase* range_task, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
+    // Core of divide_vb, usable directly with an explicit vb id when no TaskBase exists there --
+    // see definition for the full rationale and set_vb_to_part's meaning. divide_vb itself is a
+    // thin wrapper over this (bounds_source == range_task, set_vb_to_part == true).
+    void divide_vb_core(int shot_container_id, size_t shot_id, int vb_id, TaskBase& bounds_source, bool set_vb_to_part, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
 
     // Reinserted as a belt-and-suspenders diagnostic alongside Mwpm::remove_from_regions_matched_to_
     // virtual_boundary's at-deletion pruning (see de1cf763): a post-hoc scan for any region left in
