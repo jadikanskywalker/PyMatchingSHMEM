@@ -53,14 +53,7 @@ struct TaskBase {
     int vb_right;
     bool is_fusion;
 
-#ifdef USE_SHMEM
-    // Set once at task-construction time (see mark_crt_window in decoding_unit.cc) on every
-    // ordinary Task -- leaf or fusion -- whose own part/vb id falls inside a local CrossRankTask's
-    // send/receive window. Lives here (not just on Task) so divide_vb's TaskBase* parameter can
-    // check it directly; only ever set true on plain Task objects, never on a SpecialTask
-    // (CrossRankTask/LocalSeamTask themselves are never "in" a window, they define one).
-    bool in_crt_window{false};
-#endif
+
 
     // Which concrete kind this task is. Replaces the old is_cross_rank_fusion bool with a 3-way tag --
     // scoped (enum class) so the enumerator names can mirror the actual class names (TaskType::Task,
@@ -99,13 +92,14 @@ struct TaskBase {
     // Convenience accessors replacing the old stored is_cross_rank_fusion field -- method calls now,
     // not field reads, so every existing call site needs the added parens (mechanical, task-building/
     // decode-logic pass concern, not this one).
+    inline bool is_task() const { return type == TaskType::Task; }
     inline bool is_cross_rank_fusion() const { return type == TaskType::CrossRankTask; }
     inline bool is_local_seam_fusion() const { return type == TaskType::LocalSeamTask; }
 
     TaskBase(TaskBase&& other) noexcept
         : part(other.part), vb_marker(other.vb_marker),
           vb_left(other.vb_left), vb_right(other.vb_right),
-          is_fusion(other.is_fusion), in_crt_window(other.in_crt_window), type(other.type),
+          is_fusion(other.is_fusion), type(other.type),
           solver(other.solver),
           regions_to_unmatch(std::move(other.regions_to_unmatch)),
           regions_matched_to_virtual_boundary(std::move(other.regions_matched_to_virtual_boundary))
@@ -117,7 +111,6 @@ struct TaskBase {
         vb_left = other.vb_left;
         vb_right = other.vb_right;
         is_fusion = other.is_fusion;
-        in_crt_window = other.in_crt_window;
         type = other.type;
         solver = other.solver;
         regions_to_unmatch = std::move(other.regions_to_unmatch);
@@ -202,6 +195,14 @@ struct Task : public TaskBase {
     // is unconditional despite its two branches meaning different things.
     alignas(64) std::atomic<int64_t> extraction_done{0};
 
+#ifdef USE_SHMEM
+    // Set to shot_buffer_round whenever task is part of sent window
+    // Reset by finalize_sent_crt_window
+    // divide_vb/process_extraction_job skips tasks marked sent or 
+    // already extracted
+    bool sent_in_crt_window{false};
+#endif
+
     Task(int partition, pm::Mwpm* solver)
         : TaskBase(partition, partition - 1, partition, false, TaskType::Task, solver)
     {
@@ -239,6 +240,7 @@ struct Task : public TaskBase {
         is_extraction_unit_root = other.is_extraction_unit_root;
         defer_division = other.defer_division;
         obs_patch_id = other.obs_patch_id;
+        sent_in_crt_window = other.sent_in_crt_window;
     }
     Task& operator=(Task&& other) noexcept {
         TaskBase::operator=(std::move(other));
@@ -252,6 +254,7 @@ struct Task : public TaskBase {
         is_extraction_unit_root = other.is_extraction_unit_root;
         defer_division = other.defer_division;
         obs_patch_id = other.obs_patch_id;
+        sent_in_crt_window = other.sent_in_crt_window;
         return *this;
     }
 
@@ -491,6 +494,9 @@ public:
 
     size_t other_pid{ 0 };
 
+    // p/vb Tasks inside local window for this CRT
+    std::vector<Task*> tasks_in_local_window;
+
     // SHMEM resources
     uint64_t* status_shm{ nullptr };
     uint64_t* signal_shm{ nullptr };
@@ -585,65 +591,7 @@ public:
 
 
     /* Sychronization Methods */
-    // Resets ONLY the right PE's own copy of status_shm -- remote if the winner is left, local if the
-    // winner is right. Called by the winner (whichever side it is) immediately after try_to_steal()
-    // returns true, before solving even starts.
-    //
-    // Left's own copy is NEVER reset here (or anywhere, ever, for the life of the run) -- see
-    // try_to_steal()/wait_until_ready_to_race() below for why. A prior version of this method reset
-    // BOTH copies every round, which (combined with a reset-to-0-every-round left copy) caused a real,
-    // reproduced bug: one PE racing multiple *shots* ahead of the other (not just mid-round timing --
-    // this codebase's decentralized shot sync allows real multi-shot drift) could have its vote for
-    // shot i+1 land in a slot the other side still read as "not yet started for shot i", corrupting
-    // the FusionSummary/region reconstruction in get_solution_from_remote_pe. The fix makes left's own
-    // copy a monotonically increasing, never-reset counter instead, so its absolute value alone always
-    // unambiguously identifies which shot's race it represents -- no more stale-vs-legitimate ambiguity.
-    //
-    // Neither this nor mark_signal_consumed() below gates the *send* path: that's still
-    // wait_until_done()/done_shm, gating only the loser's send (see decode_shots()). This reset only
-    // ever gates the right PE's own half of wait_until_ready_to_race().
-//     inline void mark_race_resolved(size_t my_pid) {
-// #ifdef SCOREP_USER_ENABLE
-//         SCOREP_USER_FUNC_BEGIN();
-// #endif
-//         shmem_ctx_uint64_atomic_set(context_shm, status_shm, 0, (iamleft) ? other_pid : my_pid);
-// #ifdef SCOREP_USER_ENABLE
-//         SCOREP_USER_FUNC_END();
-// #endif
-//     }
 
-    // Cheap local-memory race-entry gate, replacing wait_until_done()/done_shm as the thing both
-    // roles wait on before attempting try_to_steal() again. Role assignment never touches payload
-    // data, so it's safe to let it proceed as soon as this PE's own gate condition is satisfied --
-    // independent of whether the winner's own extract/report_done pipeline has fully finished.
-    // shmem_wait_until on a local SHMEM-writable field mirrors wait_until_done's own pattern just
-    // below (SOS's own busy-poll, no syscall).
-    //
-    // Left and right need DIFFERENT conditions, and left's needs the actual shot index (found the hard
-    // way, twice): right's own copy is a clean, single-purpose "I attempted this round" marker, reset
-    // to 0 by whoever wins, so ==0 is unambiguous. Left's own copy IS the shared race-determination
-    // slot (see try_to_steal() below) -- a monotonically increasing counter, never reset, where the
-    // absolute value 2*shot_buffer_round is exactly the point at which shot (shot_buffer_round - 1)'s
-    // race has been fully, unambiguously resolved by both sides (see try_to_steal()'s own comment for
-    // the induction argument). Use shot_buffer_round here, not shot_id -- they're only numerically
-    // identical while ENABLE_SHOT_BUFFERS is off; report_done()/wait_until_done() already use
-    // shot_buffer_round for the same reason.
-//     inline void wait_until_ready_to_race(int shot_buffer_round) {
-// #ifdef SCOREP_USER_ENABLE
-//         SCOREP_USER_FUNC_BEGIN();
-// #endif
-        
-// #ifdef SCOREP_USER_ENABLE
-//         SCOREP_USER_FUNC_END();
-// #endif
-    // }
-
-    // Kept only to satisfy TaskBase's pure-virtual interface (mirrors try_to_steal(size_t)'s own
-    // precedent above) -- signal_shm is now a never-reset monotonic counter (Phase 4 of the CRT
-    // sync plan: the sender's own send_solution_to_remote_pe does the only increments it needs),
-    // so there's nothing left for a CRT-specific mark_solved() to do. Every real call site
-    // branches on is_cross_rank_fusion() before ever calling mark_solved(), so this is never
-    // actually reached.
     void mark_solved(size_t my_pid) override {
         throw std::logic_error("CrossRankTask::mark_solved: signal_shm is never reset; this should never be called");
     }
@@ -723,6 +671,19 @@ public:
         SCOREP_USER_FUNC_END();
 #endif
         return won;
+    }
+
+    // Called by sender to mark local window tasks as sent
+    // divide_vb/process_extraction_job will skip these tasks
+    // for the provided shot_buffer_round
+    void mark_sent_local_window() {
+        for (Task *t : tasks_in_local_window)
+            t->sent_in_crt_window = true;
+    }
+
+    void unmark_sent_local_window() {
+        for (Task *t : tasks_in_local_window)
+            t->sent_in_crt_window = false;
     }
 
     void reset() override {

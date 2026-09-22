@@ -361,27 +361,18 @@ std::vector<RangeInfo> build_extraction_units(
 }
 
 #ifdef USE_SHMEM
-// Marks every ordinary Task (leaf or fusion) whose own `part` falls inside a local CrossRankTask's
-// send/receive window -- see the CRT deferred-extraction design (Phase 5). part_lo/part_hi is the
-// window's global partition-id range (leaves); vb_lo/vb_hi is the window's own internal global
-// vb-id range (fusions) -- the same range send_solution_to_remote_pe's own hits loop targets.
-// vb_offset globalizes this Task's local vb_left/vb_right (0 for ROUND, an observable's own global
-// vb offset for OBS). Recurses from wherever the CRT is attached, right_child first: since
-// vb_left/vb_right monotonically bound a subtree's leaf span (pair_up above always builds fusions
-// with lower ids on the left, higher on the right), a node whose own (globalized) vb_right already
-// falls below the window means everything further left is even lower -- nothing left to find, so
-// this runs in O(window size), not O(tree size). Only ever called on a Task* (the CRT's attach
-// point and its Task-typed children) -- SpecialTasks are never part of this walk.
-void mark_crt_window(Task* t, int part_lo, int part_hi, int vb_lo, int vb_hi, int vb_offset) {
+// Gathers every ordinary Task (leaf or fusion) whose own `part` falls inside a local CrossRankTask's
+// send/receive window, returns pointers in gathered vector
+void gather_crt_window(Task* t, int part_lo, int part_hi, int vb_lo, int vb_hi, int vb_offset, std::vector<Task*>& gathered) {
     if (!t || t->vb_right + vb_offset < vb_lo ||
-        t->vb_left + vb_offset > vb_hi) return;
+        t->vb_left + vb_offset > vb_hi) return; // subtree does not contain any in-bounds p/vb
     if (!t->is_fusion) {
-        if (t->part >= part_lo && t->part <= part_hi) t->in_crt_window = true;
+        if (t->part >= part_lo && t->part <= part_hi) gathered.push_back(t);
         return;
     }
-    mark_crt_window(t->right_child, part_lo, part_hi, vb_lo, vb_hi, vb_offset);
-    if (t->part >= vb_lo && t->part <= vb_hi) t->in_crt_window = true;
-    mark_crt_window(t->left_child, part_lo, part_hi, vb_lo, vb_hi, vb_offset);
+    gather_crt_window(t->right_child, part_lo, part_hi, vb_lo, vb_hi, vb_offset, gathered);
+    if (t->part >= vb_lo && t->part <= vb_hi) gathered.push_back(t);
+    gather_crt_window(t->left_child, part_lo, part_hi, vb_lo, vb_hi, vb_offset, gathered);
 }
 #endif
 }  // namespace
@@ -534,12 +525,13 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                 // send_solution_to_remote_pe's ROUND "mine" formula exactly (iamleft=false here).
                 auto& left_crt = shot_buffer->buffer[i].cross_rank_tasks.back();
                 int p_start = vb + 1;
-                mark_crt_window(&shot_buffer->buffer[i].tasks.back(),
+                gather_crt_window(&shot_buffer->buffer[i].tasks.back(),
                                  p_start,
                                  std::min(p_start + config_parallel::k - 1, (int)graph.num_partitions - 1),
                                  left_crt.vb_left + 1,
                                  left_crt.vb_right - 1,
-                                 /*vb_offset=*/0);
+                                 /*vb_offset=*/0,
+                                 left_crt.tasks_in_local_window);
             }
             if (DEBUG) {
                 auto& t = shot_buffer->buffer[i].cross_rank_tasks.back();
@@ -576,12 +568,13 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
             {
                 // Mirrors send_solution_to_remote_pe's ROUND "mine" formula exactly (iamleft=true here).
                 auto& right_crt = shot_buffer->buffer[i].cross_rank_tasks.back();
-                mark_crt_window(&shot_buffer->buffer[i].tasks.back(),
+                gather_crt_window(&shot_buffer->buffer[i].tasks.back(),
                                  std::max(vb - config_parallel::k + 1, 0),
                                  vb,
                                  right_crt.vb_left + 1,
                                  right_crt.vb_right - 1,
-                                 /*vb_offset=*/0);
+                                 /*vb_offset=*/0,
+                                 right_crt.tasks_in_local_window);
             }
             if (DEBUG) {
                 auto& t = shot_buffer->buffer[i].cross_rank_tasks.back();
@@ -896,12 +889,13 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                         // OBS "mine" formula exactly.
                         auto& new_crt = crt.back();
                         auto& my_off = new_crt.iamleft ? new_crt.left_global_offset : new_crt.right_global_offset;
-                        mark_crt_window(local_root,
+                        gather_crt_window(local_root,
                                          new_crt.vb_left + 1 + (int)my_off.first,
                                          new_crt.vb_right + (int)my_off.first,
                                          new_crt.vb_left + 1 + my_off.second,
                                          new_crt.vb_right - 1 + my_off.second,
-                                         (int) my_off.second);
+                                         (int) my_off.second,
+                                         new_crt.tasks_in_local_window);
                     }
                     if (DEBUG) {
                         auto& t = crt.back();
@@ -1078,12 +1072,13 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                         // OBS "mine" formula exactly.
                         auto& new_crt = crt.back();
                         auto& my_off = new_crt.iamleft ? new_crt.left_global_offset : new_crt.right_global_offset;
-                        mark_crt_window(attach,
+                        gather_crt_window(attach,
                                          new_crt.vb_left + 1 + (int)my_off.first,
                                          new_crt.vb_right + (int)my_off.first,
                                          new_crt.vb_left + 1 + my_off.second,
                                          new_crt.vb_right - 1 + my_off.second,
-                                         (int) my_off.second);
+                                         (int) my_off.second,
+                                         new_crt.tasks_in_local_window);
                     }
                 }
 #endif
@@ -1111,7 +1106,6 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                        + "    is_extraction_unit_root: " + std::to_string(t.is_extraction_unit_root)
                        + "  is_extraction_unit_connector: " + std::to_string(t.is_extraction_unit_connector)
                        + "  defer_division: " + std::to_string(t.defer_division)
-                       + "  in_crt_window: " + std::to_string(t.in_crt_window) + "\n"
                        + "    left_child: " + std::format("{:p}",static_cast<void*>(t.left_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.left_child->part) + ")" : "")
                        + "  me: " + std::format("{:p}", static_cast<void*>(&t))
                        + "  right_child: " + std::format("{:p}", static_cast<void*>(t.right_child)) + ((t.right_child) ? "(" + (std::string)(t.right_child->is_fusion ? "f" : "p") + std::to_string(t.right_child->part) + ")" : "") + "\n"
@@ -1124,6 +1118,13 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                            + " vb=" + std::to_string(st->part)
                            + " vb_left=" + std::to_string(st->vb_left)
                            + " vb_right=" + std::to_string(st->vb_right) + ")";
+                           if (st->is_cross_rank_fusion()) {
+                                tasks += "\n    tasks_in_local_window: ";
+                                for (Task *t : ((CrossRankTask*)st)->tasks_in_local_window) {
+                                    tasks += (std::string)(t->is_fusion ? "vb" : "p")
+                                          + std::to_string(t->part) + "  ";
+                                }
+                           };
                 }
                 tasks += "\n";
             }
@@ -1720,6 +1721,7 @@ void pm::DecodingUnit::finalize_sent_crt_window(ShotContainer& shot, size_t shot
     for (int p = p_start; p <= p_end; ++p) {
         shot.tasks[my_partition_task_ids[p - my_partitions_start]].mark_extraction_done();
     }
+    t.unmark_sent_local_window();
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_END(finalize_shatter);
 #endif
@@ -2167,11 +2169,13 @@ void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, siz
     // already saved the equivalent contribution) or by the receiver's extract_local_crt_window --
     // never by the generic pipeline. Skipping here (rather than in every caller) means
     // post_hoc_chunk_and_post/back_divide_walk need no changes of their own.
-    if (range_task->in_crt_window) {
+    if (range_task->is_task() &&
+        (((Task*)range_task)->sent_in_crt_window
+         || ((Task*)range_task)->extraction_done.load(std::memory_order_acq_rel) >= shot_buffer_round)) {
         if (DEBUG && t_out) {
             *t_out << "  DIVIDE_VB tid=" << tid << " vb=" << range_task->part
                    << " range_task=" << static_cast<void*>(range_task)
-                   << " SKIPPED (in_crt_window)" << std::endl << std::flush;
+                   << " SKIPPED (sent_in_crt_window)" << std::endl << std::flush;
         }
         return;
     }
@@ -2286,7 +2290,7 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
         // push their children below, their whole subtree too), leaving mark_extraction_done() to
         // whichever of finalize_sent_crt_window/extract_local_crt_window actually owns them.
         if (!curr->is_fusion) {
-            if (!curr->in_crt_window) {
+            if (!curr->sent_in_crt_window) {
                 accumulate_hits(solver, shot_buffer->hits(shot_id, false, curr->part), extended, local_res, t_out);
                 leaves.push_back(curr);
             } else if (DEBUG && t_out) {
@@ -2297,7 +2301,7 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
             // Internal (non-checkpoint) fusion vb -- still the simpler hits-list approach for
             // now (tracked separately as a correctness gap, same as divide_vb's approach fixes
             // for checkpoint/split-point boundaries specifically).
-            if (!curr->in_crt_window) {
+            if (!curr->sent_in_crt_window) {
                 accumulate_hits(solver, shot_buffer->hits(shot_id, true, curr->part), extended, local_res, t_out);
             } else if (DEBUG && t_out) {
                 *t_out << "     vb=" << curr->part
@@ -2778,7 +2782,7 @@ void pm::DecodingUnit::decode_shots() {
                                     // skips in the generic pipeline, since I might have been the
                                     // sender instead this round) is never touched by anyone else --
                                     // extract and save it myself now.
-                                    extract_local_crt_window(shot, shot_container_id, shot_id, *crt, tid, &t_out);
+                                    // extract_local_crt_window(shot, shot_container_id, shot_id, *crt, tid, &t_out);
 #ifdef SCOREP_USER_ENABLE
                                     SCOREP_USER_REGION_END(receiver_extraction);
 #endif
@@ -2810,6 +2814,7 @@ void pm::DecodingUnit::decode_shots() {
                                     if (BARE_DEBUG) t_out << "    waiting until PE done" << std::endl << std::flush;
                                     crt->wait_until_done(pid, shot_buffer_round-1);
                                     send_solution_to_remote_pe(shot_container_id, shot_id, my_result, *crt, *t, tid, t_out);
+                                    crt->mark_sent_local_window();
                                     // report_extraction_done is deferred -- NOT called here. My own
                                     // local window's regions haven't been freed yet (send_solution_
                                     // to_remote_pe no longer does that synchronously, see Phase 5);
