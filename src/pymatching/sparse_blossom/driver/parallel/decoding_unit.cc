@@ -359,6 +359,31 @@ std::vector<RangeInfo> build_extraction_units(
     }
     return unit_roots;
 }
+
+#ifdef USE_SHMEM
+// Marks every ordinary Task (leaf or fusion) whose own `part` falls inside a local CrossRankTask's
+// send/receive window -- see the CRT deferred-extraction design (Phase 5). part_lo/part_hi is the
+// window's global partition-id range (leaves); vb_lo/vb_hi is the window's own internal global
+// vb-id range (fusions) -- the same range send_solution_to_remote_pe's own hits loop targets.
+// vb_offset globalizes this Task's local vb_left/vb_right (0 for ROUND, an observable's own global
+// vb offset for OBS). Recurses from wherever the CRT is attached, right_child first: since
+// vb_left/vb_right monotonically bound a subtree's leaf span (pair_up above always builds fusions
+// with lower ids on the left, higher on the right), a node whose own (globalized) vb_right already
+// falls below the window means everything further left is even lower -- nothing left to find, so
+// this runs in O(window size), not O(tree size). Only ever called on a Task* (the CRT's attach
+// point and its Task-typed children) -- SpecialTasks are never part of this walk.
+void mark_crt_window(Task* t, int part_lo, int part_hi, int vb_lo, int vb_hi, int vb_offset) {
+    if (!t || t->vb_right + vb_offset < vb_lo ||
+        t->vb_left + vb_offset > vb_hi) return;
+    if (!t->is_fusion) {
+        if (t->part >= part_lo && t->part <= part_hi) t->in_crt_window = true;
+        return;
+    }
+    mark_crt_window(t->right_child, part_lo, part_hi, vb_lo, vb_hi, vb_offset);
+    if (t->part >= vb_lo && t->part <= vb_hi) t->in_crt_window = true;
+    mark_crt_window(t->left_child, part_lo, part_hi, vb_lo, vb_hi, vb_offset);
+}
+#endif
 }  // namespace
 
 // Builds balanced fusion tree assuming round-based partitioning
@@ -503,6 +528,19 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                 solver_for(i, my_partitions_start)
             );
             shot_buffer->buffer[i].tasks.back().add_special_task(&shot_buffer->buffer[i].cross_rank_tasks.back());
+            {
+                // Mark my own window for this CRT (the k partitions send_solution_to_remote_pe
+                // would send if I lose this round -- see mark_crt_window's own comment). Mirrors
+                // send_solution_to_remote_pe's ROUND "mine" formula exactly (iamleft=false here).
+                auto& left_crt = shot_buffer->buffer[i].cross_rank_tasks.back();
+                int p_start = vb + 1;
+                mark_crt_window(&shot_buffer->buffer[i].tasks.back(),
+                                 p_start,
+                                 std::min(p_start + config_parallel::k - 1, (int)graph.num_partitions - 1),
+                                 left_crt.vb_left + 1,
+                                 left_crt.vb_right - 1,
+                                 /*vb_offset=*/0);
+            }
             if (DEBUG) {
                 auto& t = shot_buffer->buffer[i].cross_rank_tasks.back();
                 std::cout << "PE" << pid << " Left cross task:" << std::endl
@@ -535,6 +573,16 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                 solver_for(i, my_partitions_end - 1)
             );
             shot_buffer->buffer[i].tasks.back().add_special_task(&shot_buffer->buffer[i].cross_rank_tasks.back());
+            {
+                // Mirrors send_solution_to_remote_pe's ROUND "mine" formula exactly (iamleft=true here).
+                auto& right_crt = shot_buffer->buffer[i].cross_rank_tasks.back();
+                mark_crt_window(&shot_buffer->buffer[i].tasks.back(),
+                                 std::max(vb - config_parallel::k + 1, 0),
+                                 vb,
+                                 right_crt.vb_left + 1,
+                                 right_crt.vb_right - 1,
+                                 /*vb_offset=*/0);
+            }
             if (DEBUG) {
                 auto& t = shot_buffer->buffer[i].cross_rank_tasks.back();
                 std::cout << "PE" << pid << "  Right cross task:" << std::endl
@@ -843,6 +891,18 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                     crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
                     crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
                     local_root->add_special_task(&crt.back());
+                    {
+                        // Mark my own window for this CRT -- mirrors send_solution_to_remote_pe's
+                        // OBS "mine" formula exactly.
+                        auto& new_crt = crt.back();
+                        auto& my_off = new_crt.iamleft ? new_crt.left_global_offset : new_crt.right_global_offset;
+                        mark_crt_window(local_root,
+                                         new_crt.vb_left + 1 + (int)my_off.first,
+                                         new_crt.vb_right + (int)my_off.first,
+                                         new_crt.vb_left + 1 + my_off.second,
+                                         new_crt.vb_right - 1 + my_off.second,
+                                         (int) my_off.second);
+                    }
                     if (DEBUG) {
                         auto& t = crt.back();
                         std::cout << "PE" << pid << " OBS cross-rank task s=" << s << ":\n"
@@ -1013,6 +1073,18 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                     crt.back().left_global_offset  = { (size_t)si.oi * K_p, (size_t)si.oi * K_vb };
                     crt.back().right_global_offset = { (size_t)si.oj * K_p, (size_t)si.oj * K_vb };
                     attach->add_special_task(&crt.back());
+                    {
+                        // Mark my own window for this CRT -- mirrors send_solution_to_remote_pe's
+                        // OBS "mine" formula exactly.
+                        auto& new_crt = crt.back();
+                        auto& my_off = new_crt.iamleft ? new_crt.left_global_offset : new_crt.right_global_offset;
+                        mark_crt_window(attach,
+                                         new_crt.vb_left + 1 + (int)my_off.first,
+                                         new_crt.vb_right + (int)my_off.first,
+                                         new_crt.vb_left + 1 + my_off.second,
+                                         new_crt.vb_right - 1 + my_off.second,
+                                         (int) my_off.second);
+                    }
                 }
 #endif
             }
@@ -1038,7 +1110,8 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                        + "  solver: " + std::format("{:p}", static_cast<void*>(t.solver)) + "\n"
                        + "    is_extraction_unit_root: " + std::to_string(t.is_extraction_unit_root)
                        + "  is_extraction_unit_connector: " + std::to_string(t.is_extraction_unit_connector)
-                       + "  defer_division: " + std::to_string(t.defer_division) + "\n"
+                       + "  defer_division: " + std::to_string(t.defer_division)
+                       + "  in_crt_window: " + std::to_string(t.in_crt_window) + "\n"
                        + "    left_child: " + std::format("{:p}",static_cast<void*>(t.left_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.left_child->part) + ")" : "")
                        + "  me: " + std::format("{:p}", static_cast<void*>(&t))
                        + "  right_child: " + std::format("{:p}", static_cast<void*>(t.right_child)) + ((t.right_child) ? "(" + (std::string)(t.right_child->is_fusion ? "f" : "p") + std::to_string(t.right_child->part) + ")" : "") + "\n"
@@ -1209,12 +1282,10 @@ bool check_pointers_for_self_and_all_descendents(
 
 void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size_t shot_id, pm::MatchingResult& res, CrossRankTask &t, Task &owner_task, int tid, std::ofstream &t_out) {
 #ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_DEFINE(sender_wait);
     SCOREP_USER_REGION_DEFINE(solution_isolation);
     SCOREP_USER_REGION_DEFINE(putmems);
     SCOREP_USER_REGION_DEFINE(send_fence);
     SCOREP_USER_REGION_DEFINE(send_signal);
-    SCOREP_USER_REGION_DEFINE(shatter);
 #endif
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_FUNC_BEGIN();
@@ -1568,51 +1639,92 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
     SCOREP_USER_REGION_END(send_signal);
 #endif
 
-    std::vector<std::vector<uint64_t>*> hits;
-    for (int p_i = p_start; p_i <= p_end; ++p_i) {
-        if (DEBUG) t_out << "  p" << p_i << std::flush;
-        hits.emplace_back(&shot_buffer->hits(shot_id, false, p_i));
-    }
-    for (int vb_i = t.vb_left + 1 + (int)my_vb_offset; vb_i < t.vb_right + (int)my_vb_offset; ++vb_i) {
-        if (DEBUG) t_out << "  vb" << vb_i << std::flush;
-        hits.emplace_back(&shot_buffer->hits(shot_id, true, vb_i));
-    }
-    if (DEBUG) t_out << std::endl << std::flush;
-
-    // Ensure completion
+    // Quiet + shatter-the-sent-window-without-saving used to happen right here, synchronously,
+    // blocking this thread until they finished. Phase 5 of the CRT sync plan defers both: the
+    // caller (decode_shots()) pushes `t` onto crts_i_sent instead, and finalize_sent_crt_window
+    // does the quiet + shatter (recomputing this exact same p_start/p_end/vb window) + reports
+    // extraction-done, right before this thread would otherwise fall into the shared
+    // extraction-job-claiming loop -- letting this thread return to decoding other work now,
+    // instead of blocking here.
+    if (DEBUG) t_out << "  sent all data to " << other_pid << std::endl << std::flush;
 #ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_BEGIN(sender_wait, "Sender Ctx Quiet", SCOREP_USER_REGION_TYPE_COMMON);
+    SCOREP_USER_FUNC_END();
 #endif
+}
+
+// Deferred cleanup for a CRT this PE sent for this shot (Phase 5 of the CRT sync plan) -- see
+// crts_i_sent in decode_shots(). Recomputes the exact same p_start/p_end/vb window
+// send_solution_to_remote_pe used (this PE's own local window, iamleft-mirrored), quiets that
+// send, then shatters every region in the window WITHOUT saving any solution contribution (the
+// receiver already saved the equivalent contribution via extract_crt_received_window/
+// extract_local_crt_window) -- purely freeing arena slots, same shatter-and-discard pattern
+// send_solution_to_remote_pe used to do synchronously in place. Every partition leaf in the window
+// is in_crt_window-marked (skipped by process_extraction_job), so this is its only remaining path
+// to mark_extraction_done() -- omitting that call would hang the next shot that reuses this
+// partition's buffer slot (see Task::wait_until_previous_extraction_done).
+void pm::DecodingUnit::finalize_sent_crt_window(ShotContainer& shot, size_t shot_container_id, size_t shot_id, CrossRankTask& t, int shot_buffer_round, int tid, std::ofstream& t_out) {
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_DEFINE(finalize_wait);
+    SCOREP_USER_REGION_DEFINE(finalize_shatter);
+    SCOREP_USER_FUNC_BEGIN();
+#endif
+
+    int p_start, p_end;
+    size_t my_vb_offset = 0;
+    if (config_parallel::division_strategy == config_parallel::ROUND) {
+        p_start = (t.iamleft) ? t.part - config_parallel::k + 1 : t.part + 1;
+        p_end = p_start + config_parallel::k - 1;
+        if (p_start < 0) p_start = 0;
+        if (p_end >= graph.num_partitions) p_end = graph.num_partitions - 1;
+    } else { // OBS
+        auto& my_off = t.iamleft ? t.left_global_offset : t.right_global_offset;
+        my_vb_offset = my_off.second;
+        p_start = t.vb_left + 1 + (int)my_off.first;
+        p_end   = t.vb_right + (int)my_off.first;
+    }
+    if (DEBUG) {
+        t_out << "  FINALIZE_SENT_CRT tid=" << tid << " part=" << t.part
+              << " p=[" << p_start << ", " << p_end << "]"
+              << " vb=[" << t.vb_left + 1 + (int)my_vb_offset << ", " << t.vb_right + (int)my_vb_offset - 1 << "]"
+              << " solver=" << t.solver << std::endl << std::flush;
+    }
+
+#ifdef SCOREP_USER_ENABLE
+    SCOREP_USER_REGION_BEGIN(finalize_wait, "Sender Ctx Quiet", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+    // Ensure our sends have completed so we can safely destroy sent regions
     shmem_ctx_quiet(t.context_shm);
 #ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_END(sender_wait);
+    SCOREP_USER_REGION_END(finalize_wait);
+    SCOREP_USER_REGION_BEGIN(finalize_shatter, "Sender Shatter Regions", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
 
-    // Cleanup sent regions
-#ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_BEGIN(shatter, "Sender Shatter Regions", SCOREP_USER_REGION_TYPE_COMMON);
-#endif
-    if (DEBUG) t_out << "  shattering sent blossoms" << std::endl << std::flush;
-    for (std::vector<uint64_t>* hitsref : hits) {
-        for (uint64_t i : *hitsref) {
+    auto& solver = *t.solver;
+    for (int vb_i = t.vb_left + 1 + (int)my_vb_offset; vb_i < t.vb_right + (int)my_vb_offset; ++vb_i) {
+        for (uint64_t i : shot_buffer->hits(shot_id, true, vb_i)) {
             auto& node_state = solver.flooder.graph.nodes[i].state(shot_container_id);
-            // Only shatter if it hasn't been shattered yet (region_that_arrived is still set)
             if (node_state.region_that_arrived) {
-                solver.shatter_blossom_and_extract_matches(node_state.region_that_arrived_top, &t, &t_out);
+                solver.shatter_blossom_and_extract_matches(node_state.region_that_arrived_top, &t, &t_out); // discard
+            }
+        }
+        // no mark_extraction_done() for fusion vbs -- they never get one, matching process_extraction_job.
+    }
+    for (int p = p_start; p <= p_end; ++p) {
+        for (uint64_t i : shot_buffer->hits(shot_id, false, p)) {
+            auto& node_state = solver.flooder.graph.nodes[i].state(shot_container_id);
+            if (node_state.region_that_arrived) {
+                solver.shatter_blossom_and_extract_matches(node_state.region_that_arrived_top, &t, &t_out); // discard
             }
         }
     }
+    for (int p = p_start; p <= p_end; ++p) {
+        shot.tasks[my_partition_task_ids[p - my_partitions_start]].mark_extraction_done();
+    }
 #ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_END(shatter);
+    SCOREP_USER_REGION_END(finalize_shatter);
 #endif
-    // p_start..p_end is this PE's OWN local window (my_off above, not the remote side's offset --
-    // contrast extract_crt_received_window, which uses the opposite side's offset since it's
-    // processing the REMOTE window instead). No mark_extraction_done() here: these partitions are
-    // ordinary tree leaves that still go through the normal process_extraction_job fan-out, which
-    // already marks them -- marking again here would double-increment extraction_done and hang the
-    // next round's wait_until_previous_extraction_done forever.
-    if (DEBUG) t_out << "  shattered sent blossoms" << std::endl
-                     << "  sent all data to " << other_pid << std::endl << std::flush;
+    // Report extraction done so the other PE can start sending if sender
+    t.report_extraction_done(shot_buffer_round);
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_FUNC_END();
 #endif
@@ -1891,10 +2003,7 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(
 }
 
 void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, size_t shot_id, CrossRankTask& crt, int tid, std::ofstream* t_out) {
-    // Computes the received partition/vb range directly from crt's own fields -- independent of
-    // whatever range get_solution_from_remote_pe used internally for rebasing, since that's a
-    // different concern (this needs the actual per-shot partition/virtual-boundary hits
-    // extraction range, division-strategy-aware).
+    // Computes the received partition/vb range directly from crt's own fields
     int p_lo, p_hi, vb_lo, vb_hi;
     if (config_parallel::division_strategy == config_parallel::ROUND) {
         int p_k = config_parallel::k;
@@ -1910,11 +2019,8 @@ void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t s
         vb_lo = crt.vb_left + 1;
         vb_hi = crt.vb_right - 1;
     } else {
-        // OBS: known pre-existing gap, not fixed as part of this plan (OBS support is explicitly
-        // out of scope -- see this-is-a-broader-purrfect-crystal.md). The old (pre-this-session)
-        // code had two extraction-time recomputations of this same range that disagreed with each
-        // other on left/right offset selection and off-by-ones (extended vs bit-packed branches) --
-        // this mirrors the old bit-packed branch's formula, not independently re-derived/verified.
+        // OBS: uses a different computation than get_solution..., which
+        // can be changed, but it should be quivalent
         auto& rem_off = crt.iamleft ? crt.right_global_offset : crt.left_global_offset;
         p_lo = crt.vb_left + 1 + (int)rem_off.first;
         p_hi = crt.vb_right + (int)rem_off.first;
@@ -1965,7 +2071,62 @@ void pm::DecodingUnit::extract_crt_received_window(ShotContainer& shot, size_t s
     // mark_extraction_done() through the normal process_extraction_job path, same as any other
     // unit.
 }
-#endif
+
+// Extracts and saves the WINNER's own local window -- the same in_crt_window-marked partitions
+// send_solution_to_remote_pe/finalize_sent_crt_window would send/free if this PE were instead the
+// sender this round (see mark_crt_window at task-construction time). Structurally mirrors
+// extract_crt_received_window, but uses MY OWN side's offset (not the remote side's) and, unlike
+// it, genuinely calls mark_extraction_done() on every partition leaf -- a real local Task exists
+// for each one here, unlike the remote window, and process_extraction_job now skips them entirely.
+void pm::DecodingUnit::extract_local_crt_window(ShotContainer& shot, size_t shot_container_id, size_t shot_id, CrossRankTask& crt, int tid, std::ofstream* t_out) {
+    int p_start, p_end;
+    size_t my_vb_offset = 0;
+    if (config_parallel::division_strategy == config_parallel::ROUND) {
+        p_start = (crt.iamleft) ? crt.part - config_parallel::k + 1 : crt.part + 1;
+        p_end = p_start + config_parallel::k - 1;
+        if (p_start < 0) p_start = 0;
+        if (p_end >= graph.num_partitions) p_end = graph.num_partitions - 1;
+    } else { // OBS
+        auto& my_off = crt.iamleft ? crt.left_global_offset : crt.right_global_offset;
+        my_vb_offset = my_off.second;
+        p_start = crt.vb_left + 1 + (int)my_off.first;
+        p_end   = crt.vb_right + (int)my_off.first;
+    }
+    int vb_lo = crt.vb_left + 1 + (int)my_vb_offset;
+    int vb_hi = crt.vb_right + (int)my_vb_offset - 1;
+
+    if (DEBUG && t_out) {
+        *t_out << "  EXTRACT_LOCAL_CRT tid=" << tid << " part=" << crt.part
+               << " p=[" << p_start << ", " << p_end << "]"
+               << " vb=[" << vb_lo << ", " << vb_hi << "]"
+               << " solver=" << crt.solver << std::endl << std::flush;
+    }
+    auto& solver = *crt.solver;
+    bool extended = shot_buffer->num_observables > sizeof(pm::obs_int) * 8;
+    pm::MatchingResult local_res{};
+    auto do_walk = [&]() {
+        for (int p = p_start; p <= p_end; ++p) accumulate_hits(solver, shot_buffer->hits(shot_id, false, p), extended, local_res, t_out);
+        for (int vb = vb_lo; vb <= vb_hi; ++vb) accumulate_hits(solver, shot_buffer->hits(shot_id, true, vb), extended, local_res, t_out);
+    };
+    if (extended) {
+        do_walk();
+        solver.prepare_for_extraction(&crt, /*set_vb_to_part=*/false);
+        auto& ext_res = shot_buffer->thread_extended_results(shot_id)[tid];
+        solver.extract_paths_from_match_edges(solver.flooder.match_edges, ext_res.obs_crossed.data(), ext_res.weight);
+        solver.flooder.match_edges.clear();
+    } else {
+        do_walk();
+        shot_buffer->thread_results(shot_id)[tid] += local_res;
+    }
+    // Unlike extract_crt_received_window: these ARE local partitions with real Task leaves, now
+    // in_crt_window-skipped by process_extraction_job -- this is their only remaining path to
+    // mark_extraction_done().
+    for (int p = p_start; p <= p_end; ++p) {
+        shot.tasks[my_partition_task_ids[p - my_partitions_start]].mark_extraction_done();
+    }
+}
+
+#endif // USE_SHMEM
 
 void pm::DecodingUnit::prune_stale_regions_matched_to_vb(TaskBase* t, const char* caller, std::ofstream* t_out) {
     auto& list = t->regions_matched_to_virtual_boundary;
@@ -2001,6 +2162,19 @@ void pm::DecodingUnit::prune_stale_regions_matched_to_vb(TaskBase* t, const char
 }
 
 void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, size_t shot_id, TaskBase* range_task, int tid, TaskBase* prune_target, std::ofstream* t_out) {
+    // CRT deferred-extraction design (Phase 5): a marked vb's regions are handled either by the
+    // sender's own deferred finalize_sent_crt_window (shattered without saving, since the receiver
+    // already saved the equivalent contribution) or by the receiver's extract_local_crt_window --
+    // never by the generic pipeline. Skipping here (rather than in every caller) means
+    // post_hoc_chunk_and_post/back_divide_walk need no changes of their own.
+    if (range_task->in_crt_window) {
+        if (DEBUG && t_out) {
+            *t_out << "  DIVIDE_VB tid=" << tid << " vb=" << range_task->part
+                   << " range_task=" << static_cast<void*>(range_task)
+                   << " SKIPPED (in_crt_window)" << std::endl << std::flush;
+        }
+        return;
+    }
     int vb_id = range_task->part;
     if (DEBUG && t_out) {
         *t_out << "  DIVIDE_VB tid=" << tid << " vb=" << vb_id << " range_task=" << static_cast<void*>(range_task)
@@ -2106,14 +2280,29 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
     std::vector<Task*> to_visit = {root};
     while (!to_visit.empty()) {
         Task* curr = to_visit.back(); to_visit.pop_back();
+        // CRT deferred-extraction design (Phase 5): a single posted job's subtree can contain a
+        // mix of in_crt_window and ordinary nodes when extraction_unit_size doesn't divide evenly
+        // by cross_rank_fusion_window_size -- skip exactly the marked ones (and, since we never
+        // push their children below, their whole subtree too), leaving mark_extraction_done() to
+        // whichever of finalize_sent_crt_window/extract_local_crt_window actually owns them.
         if (!curr->is_fusion) {
-            accumulate_hits(solver, shot_buffer->hits(shot_id, false, curr->part), extended, local_res, t_out);
-            leaves.push_back(curr);
+            if (!curr->in_crt_window) {
+                accumulate_hits(solver, shot_buffer->hits(shot_id, false, curr->part), extended, local_res, t_out);
+                leaves.push_back(curr);
+            } else if (DEBUG && t_out) {
+                *t_out << "     p=" << curr->part
+                    << " SKIPPED (in_crt_window)" << std::endl << std::flush;
+            }
         } else {
             // Internal (non-checkpoint) fusion vb -- still the simpler hits-list approach for
             // now (tracked separately as a correctness gap, same as divide_vb's approach fixes
             // for checkpoint/split-point boundaries specifically).
-            accumulate_hits(solver, shot_buffer->hits(shot_id, true, curr->part), extended, local_res, t_out);
+            if (!curr->in_crt_window) {
+                accumulate_hits(solver, shot_buffer->hits(shot_id, true, curr->part), extended, local_res, t_out);
+            } else if (DEBUG && t_out) {
+                *t_out << "     vb=" << curr->part
+                    << " SKIPPED (in_crt_window)" << std::endl << std::flush;
+            }
             // left_child/right_child are TaskBase* (a preemptive-OBS chain-link's child can be a
             // CrossRankTask -- see decoding_task.h), but this walk only ever runs on non-preemptive/
             // ROUND subtrees, which never attach a CRT as a child (CRTs there sit above a subtree
@@ -2127,7 +2316,7 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
     if (extended) {
         solver.prepare_for_extraction(root);
         if (DEBUG && t_out) {
-            *t_out << "    PROCESS_JOB tid=" << tid << " search_flooder vb=" << solver.search_flooder.vb
+            *t_out << "      search_flooder vb=" << solver.search_flooder.vb
                    << " vb_left=" << solver.search_flooder.vb_left
                    << " vb_right=" << solver.search_flooder.vb_right
                    << " match_edges=" << solver.flooder.match_edges.size() << std::endl << std::flush;
@@ -2219,6 +2408,8 @@ void pm::DecodingUnit::decode_shots() {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_REGION_DEFINE(local_decoding);
         SCOREP_USER_REGION_DEFINE(cross_rank_fusion);
+        SCOREP_USER_REGION_DEFINE(receiver_extraction);
+        SCOREP_USER_REGION_DEFINE(deferred_crt_cleanup);
         SCOREP_USER_REGION_DEFINE(solution_extraction);
         SCOREP_USER_REGION_DEFINE(shot_decode);
         SCOREP_USER_REGION_DEFINE(shot_iteration);
@@ -2403,9 +2594,11 @@ void pm::DecodingUnit::decode_shots() {
                 roots_i_solved.clear();
                 // Declared per-shot (not per-root): a CRT can now be resolved mid-climb, by a thread
                 // that never itself reaches a root this shot (a sibling subtree's own solver might win
-                // the race up to the shared parent first) -- see the report_done restructuring below.
+                // the race up to the shared parent first). Only the SENDER (loser) pushes onto this --
+                // see the deferred crts_i_sent-draining loop below, right before the extraction-job
+                // claiming loop.
 #ifdef USE_SHMEM
-                std::vector<CrossRankTask*> crts_i_handled;
+                std::vector<CrossRankTask*> crts_i_sent;
                 pm::MatchingResult& my_result = shot_buffer->thread_results(shot_id)[tid];
 #endif
 #ifdef SCOREP_USER_ENABLE
@@ -2568,12 +2761,26 @@ void pm::DecodingUnit::decode_shots() {
                                     // doing the work). Divide crt->part first (now that it's fully
                                     // solved) so the received window can be safely extracted alongside
                                     // it, in the same breath.
+#ifdef SCOREP_USER_ENABLE
+                                    SCOREP_USER_REGION_BEGIN(receiver_extraction, "Receiver Extraction", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
                                     divide_vb(shot, (int)shot_container_id, shot_id, crt, tid, /*prune_target=*/crt, &t_out);
                                     extract_crt_received_window(shot, shot_container_id, shot_id, *crt, tid, &t_out);
-                                    // now that received window is clear, I can mark extraction done
-                                    crt->report_done(shot_buffer_round);
+                                    // Report done as soon as the REMOTE window is consumed -- before
+                                    // extracting my own local window below -- so the "you may send
+                                    // again" notification reaches the other side ASAP, in case it's
+                                    // already waiting to send its window for the next shot.
 #ifdef ENABLE_DRAW_FLAGS
                                     if (draw_frames) draw_frame(crt_solver, pm::MwpmEvent::no_event(), 1001, true, tid);
+#endif
+                                    crt->report_extraction_done(shot_buffer_round);
+                                    // My own local window (the partitions in_crt_window marking
+                                    // skips in the generic pipeline, since I might have been the
+                                    // sender instead this round) is never touched by anyone else --
+                                    // extract and save it myself now.
+                                    extract_local_crt_window(shot, shot_container_id, shot_id, *crt, tid, &t_out);
+#ifdef SCOREP_USER_ENABLE
+                                    SCOREP_USER_REGION_END(receiver_extraction);
 #endif
                                 } else {
                                     if (BARE_DEBUG) t_out << "  Sending CRT data to " << crt->other_pid << std::endl;
@@ -2603,13 +2810,14 @@ void pm::DecodingUnit::decode_shots() {
                                     if (BARE_DEBUG) t_out << "    waiting until PE done" << std::endl << std::flush;
                                     crt->wait_until_done(pid, shot_buffer_round-1);
                                     send_solution_to_remote_pe(shot_container_id, shot_id, my_result, *crt, *t, tid, t_out);
-                                    // Loser also needs its own done_shm touched every round, or a PE
-                                    // that wins this CRT once can never re-enter its race again (the
-                                    // winner's report_done above only ever targets other_pid, never
-                                    // its own done_shm) -- see project plan for the full trace.
-                                    crt->report_done(shot_buffer_round);
+                                    // report_extraction_done is deferred -- NOT called here. My own
+                                    // local window's regions haven't been freed yet (send_solution_
+                                    // to_remote_pe no longer does that synchronously, see Phase 5);
+                                    // the deferred crts_i_sent-draining loop below calls it only
+                                    // once finalize_sent_crt_window has actually quieted and
+                                    // shattered them.
+                                    crts_i_sent.push_back(crt);
                                 }
-                                crts_i_handled.push_back(crt);
 #ifdef SCOREP_USER_ENABLE
                                 SCOREP_USER_REGION_END(cross_rank_fusion);
 #endif
@@ -2804,34 +3012,36 @@ void pm::DecodingUnit::decode_shots() {
                     }
                 }
                 // This thread's own work for the shot (decode climb, and any roots it just solved
-                // above) is done -- fall through into the shared extraction queue. Every thread
-                // does this, every shot, unconditionally: try_claim_extraction_job now claims a
-                // slot via a single fetch_add and, unless every one of this shot's
-                // num_extraction_units slots has already been claimed, spins on that slot's own
-                // ready flag until the job that will eventually land there is posted (see
-                // ShotIOResource::try_claim_extraction_job) -- so a thread that finishes early
-                // doesn't miss jobs posted moments later by a still-climbing thread elsewhere, and
-                // no thread ever needs to single-handedly drain a whole late burst by itself. Once
-                // this returns nullptr, every slot for this shot has been claimed (though maybe not
-                // yet finished processing -- see the pending_extraction_jobs waits below).
+                // above) is done. Before falling through into the shared extraction queue, drain
+                // any CRTs this thread sent this shot (Phase 5 of the CRT sync plan): quiet the
+                // send context, shatter the sent window without saving (the receiver already saved
+                // the equivalent contribution), then report extraction-done -- deferred exactly
+                // this far so send_solution_to_remote_pe itself never blocks on it.
+#ifdef USE_SHMEM
+#ifdef SCOREP_USER_ENABLE
+                SCOREP_USER_REGION_BEGIN(deferred_crt_cleanup, "Deferred CRT Cleanup", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+                for (CrossRankTask* crt : crts_i_sent) {
+                    finalize_sent_crt_window(shot, shot_container_id, shot_id, *crt, shot_buffer_round, tid, t_out);
+                }
+                crts_i_sent.clear();
+#ifdef SCOREP_USER_ENABLE
+                SCOREP_USER_REGION_END(deferred_crt_cleanup);
+#endif
+#endif
+                // Fall through into the shared extraction queue. Every thread does this, every
+                // shot, unconditionally: try_claim_extraction_job now claims a slot via a single
+                // fetch_add and, unless every one of this shot's num_extraction_units slots has
+                // already been claimed, spins on that slot's own ready flag until the job that will
+                // eventually land there is posted (see ShotIOResource::try_claim_extraction_job) --
+                // so a thread that finishes early doesn't miss jobs posted moments later by a
+                // still-climbing thread elsewhere, and no thread ever needs to single-handedly
+                // drain a whole late burst by itself. Once this returns nullptr, every slot for
+                // this shot has been claimed (though maybe not yet finished processing -- see the
+                // pending_extraction_jobs waits below).
                 while (ExtractionJob* job = shot_buffer->try_claim_extraction_job(shot_id)) {
                     process_extraction_job(shot, shot_id, *job, tid, &t_out);
                 }
-//                 // report_done tells the other PE "my local window buffer is free for your next shot's
-//                 // send_solution_to_remote_pe to reuse" -- must not fire until every job this shot
-//                 // posted (back_divide_walk, t's own divide+post) has actually been *processed*, not
-//                 // just posted, or the other PE could race ahead into next shot's send while this
-//                 // shot's own extraction is still reading/writing the same regions. Every thread with a
-//                 // non-empty crts_i_handled needs its own explicit wait here -- it can't rely on being
-//                 // the "last root" thread (only one thread ever is) or on the queue-drain loop above
-//                 // (SHMEM's idle-helper exits on root-completion, not job-completion).
-// #ifdef USE_SHMEM
-//                 if (!crts_i_handled.empty()) {
-//                     while (shot_buffer->pending_extraction_jobs(shot_id) != 0) {}
-//                     if (BARE_DEBUG) t_out << "    reporting done" << std::endl << std::flush;
-//                     for (auto* crt : crts_i_handled) crt->report_done(shot_buffer_round);
-//                 }
-// #endif
                 if (i_solved_last_root) {
                     i_solved_last_root = false;
                     // Idle-helper threads (above) may still be concurrently draining -- the loop just
@@ -2842,8 +3052,7 @@ void pm::DecodingUnit::decode_shots() {
                     // is the one causing this shot to complete, so no staleness check is needed);
                     // bounded by however long the last in-flight process_extraction_job calls, if
                     // any, take to finish, typically negligible.
-                    while (shot_buffer->pending_extraction_jobs(shot_id) != 0) {
-                    }
+                    while (shot_buffer->pending_extraction_jobs(shot_id) != 0) {}
                     // Negative-weight correction: a whole-graph constant
                     // (graph.negative_weight_*_set), identical across every solver, folded in
                     // exactly once per shot here -- any of my own local solvers works (see

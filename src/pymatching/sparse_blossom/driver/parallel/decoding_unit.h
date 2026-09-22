@@ -238,6 +238,20 @@ struct DecodingUnit {
     // Extracts a cross-rank fusion's received window immediately, inline on the resolving thread.
     // Assumes crt->part's own vb has already been divided (see divide_vb) by the caller.
     void extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, size_t shot_id, CrossRankTask& crt, int tid, std::ofstream* t_out = nullptr);
+    // Extracts and saves the WINNER's own local window (the same in_crt_window-marked partitions
+    // send_solution_to_remote_pe would send if this PE were instead the sender this round) -- these
+    // are skipped by the normal process_extraction_job/divide_vb pipeline, so the winner must
+    // extract them itself. Mirrors extract_crt_received_window but for "my own side" and, unlike
+    // it, calls mark_extraction_done() on every partition leaf touched (a real local Task exists
+    // for each one here, unlike the remote window).
+    void extract_local_crt_window(ShotContainer& shot, size_t shot_container_id, size_t shot_id, CrossRankTask& crt, int tid, std::ofstream* t_out = nullptr);
+    // Deferred cleanup for a CRT this PE sent for this shot (see crts_i_sent in decode_shots()):
+    // quiets the send context, then shatters the sent local window WITHOUT saving any solution
+    // contribution (the receiver already saved the equivalent contribution via
+    // extract_crt_received_window/extract_local_crt_window), then reports extraction-done. Called
+    // right before a thread would otherwise fall into the shared extraction-job-claiming loop, so
+    // the sending thread never blocks on this immediately after send_solution_to_remote_pe returns.
+    void finalize_sent_crt_window(ShotContainer& shot, size_t shot_container_id, size_t shot_id, CrossRankTask& t, int shot_buffer_round, int tid, std::ofstream& t_out);
 #endif
 
     // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md). Universal

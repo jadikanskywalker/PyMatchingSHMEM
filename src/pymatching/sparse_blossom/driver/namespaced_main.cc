@@ -129,7 +129,7 @@ int main_predict(int argc, const char** argv) {
     bool append_obs = stim::find_bool_argument("--in_includes_appended_observables", argc, argv);
     bool enable_correlations = stim::find_bool_argument("--enable_correlations", argc, argv);
 #ifdef OUTPUT_DECODING_TIME
-    int num_repeats = (int)stim::find_int64_argument("--num_repeats", 1, 1, INT64_MAX, argc, argv);
+    int num_repeats = (int)stim::find_int64_argument("--num_repeats", 0, 0, INT64_MAX, argc, argv);
 #endif
     // multi-threaded runtime flags
     config_parallel::use_threads = stim::find_bool_argument("--use_threads", argc, argv);

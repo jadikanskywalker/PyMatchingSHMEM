@@ -53,6 +53,15 @@ struct TaskBase {
     int vb_right;
     bool is_fusion;
 
+#ifdef USE_SHMEM
+    // Set once at task-construction time (see mark_crt_window in decoding_unit.cc) on every
+    // ordinary Task -- leaf or fusion -- whose own part/vb id falls inside a local CrossRankTask's
+    // send/receive window. Lives here (not just on Task) so divide_vb's TaskBase* parameter can
+    // check it directly; only ever set true on plain Task objects, never on a SpecialTask
+    // (CrossRankTask/LocalSeamTask themselves are never "in" a window, they define one).
+    bool in_crt_window{false};
+#endif
+
     // Which concrete kind this task is. Replaces the old is_cross_rank_fusion bool with a 3-way tag --
     // scoped (enum class) so the enumerator names can mirror the actual class names (TaskType::Task,
     // TaskType::LocalSeamTask, TaskType::CrossRankTask) without colliding with those class names in
@@ -96,7 +105,7 @@ struct TaskBase {
     TaskBase(TaskBase&& other) noexcept
         : part(other.part), vb_marker(other.vb_marker),
           vb_left(other.vb_left), vb_right(other.vb_right),
-          is_fusion(other.is_fusion), type(other.type),
+          is_fusion(other.is_fusion), in_crt_window(other.in_crt_window), type(other.type),
           solver(other.solver),
           regions_to_unmatch(std::move(other.regions_to_unmatch)),
           regions_matched_to_virtual_boundary(std::move(other.regions_matched_to_virtual_boundary))
@@ -108,6 +117,7 @@ struct TaskBase {
         vb_left = other.vb_left;
         vb_right = other.vb_right;
         is_fusion = other.is_fusion;
+        in_crt_window = other.in_crt_window;
         type = other.type;
         solver = other.solver;
         regions_to_unmatch = std::move(other.regions_to_unmatch);
@@ -638,7 +648,10 @@ public:
         throw std::logic_error("CrossRankTask::mark_solved: signal_shm is never reset; this should never be called");
     }
 
-    inline void report_done(int shot_buffer_round) {
+    // Renamed from report_done: under Phase 5, this fires only once this PE's own regions/nodes
+    // for this round are actually cleaned up (either the winner's post-extraction, or the loser's
+    // deferred finalize_sent_crt_window), so "extraction done" is the accurate name now.
+    inline void report_extraction_done(int shot_buffer_round) {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
 #endif
