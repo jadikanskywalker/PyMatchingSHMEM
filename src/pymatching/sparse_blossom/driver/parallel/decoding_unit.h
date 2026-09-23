@@ -45,6 +45,7 @@ class UserGraph;
 
 #ifdef USE_SHMEM
 #define SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION 3
+#define SHMEM_CACHE_LINE_SIZE 64
 
 struct FusionSummary {
     GraphFillRegion* regions_ptr_base; // index where solving partition's arena begins
@@ -120,7 +121,7 @@ struct DecodingUnit {
     GraphFillRegion* regions_ptr{ nullptr }; // buffers for region SHMEMArenas
     BlossomChild* child_edges_ptr{ nullptr }; // blossom parent-child relationship buffer
     // uint64_t* atomics_ptr{ nullptr }; // shot counter for each shot container
-    uint64_t* task_status_ptr{ nullptr }; // status and signal for each fusion task
+    unsigned long* task_status_ptr{ nullptr }; // status, signal, and done for each fusion task
     FusionSummary* task_fusion_summary_ptr { nullptr }; // fusion summary for each fusion task
     // Info used for symmetric memory accesses
     size_t nodes_nelems_per_buffer;
@@ -138,21 +139,20 @@ struct DecodingUnit {
         );
     }
 
-    inline uint64_t* get_task_status_ptr(size_t shot_container_id, bool iamleft) {
-        // There are two uint64s per slot: status and signal
+    inline unsigned long* get_task_status_ptr(size_t shot_container_id, bool iamleft) {
+        constexpr size_t stride = SHMEM_CACHE_LINE_SIZE / sizeof(unsigned long);
         //   Simple left/right case: num_cross_rank_fusions=2 slots per buffer
         //   Even PEs map slots (to left, to right), odd PEs (to right, to left)
         //   This ensures tasks correspond on each PE
         bool even = !(pid % 2);
         bool take_second_slot = (even && iamleft) || (!even && !iamleft);
-        return task_status_ptr + SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION*(num_cross_rank_fusions*shot_container_id + take_second_slot);
+        return task_status_ptr + stride * (num_cross_rank_fusions * shot_container_id + take_second_slot);
     }
 
     // OBS strategy: index by seam index s directly (both PEs compute seam_infos identically)
-    inline uint64_t* get_task_status_ptr_for_seam(size_t shot_id, int seam_idx) {
-        return task_status_ptr
-            + SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION
-              * (num_cross_rank_fusions * shot_id + seam_idx);
+    inline unsigned long* get_task_status_ptr_for_seam(size_t shot_id, int seam_idx) {
+        constexpr size_t stride = SHMEM_CACHE_LINE_SIZE / sizeof(unsigned long);
+        return task_status_ptr + stride * (num_cross_rank_fusions * shot_id + seam_idx);
     }
     inline FusionSummary* get_fusion_summary_ptr_for_seam(size_t shot_id, int seam_idx) {
         return reinterpret_cast<FusionSummary*>(

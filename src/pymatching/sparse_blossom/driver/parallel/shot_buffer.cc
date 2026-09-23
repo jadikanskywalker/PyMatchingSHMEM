@@ -14,11 +14,20 @@
 
 #include "pymatching/sparse_blossom/driver/parallel/shot_buffer.h"
 
-#include <immintrin.h>
 #include <iostream>
 #include <utility>
 
 #include <omp.h>
+
+// Architecture-specific pause instruction for spin-wait loops
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+    #include <immintrin.h>
+    #define CPU_PAUSE() _mm_pause()
+#elif defined(__aarch64__) || defined(__arm__)
+    #define CPU_PAUSE() __asm__ __volatile__("yield" ::: "memory")
+#else
+    #define CPU_PAUSE() do {} while(0)
+#endif
 
 #ifdef USE_SHMEM
 #include <shmem.h>
@@ -123,7 +132,7 @@ ExtractionJob* ShotIOResource::try_claim_extraction_job(size_t num_extraction_un
     constexpr int max_spin_count = 1024;
     while (extraction_jobs[idx].ready.load(std::memory_order_acquire) == 0) {
         for (int i = 0; i < spin_count; ++i) {
-            _mm_pause();
+            CPU_PAUSE();
         }
         if (spin_count < max_spin_count) {
             spin_count *= 2;

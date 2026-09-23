@@ -17,9 +17,18 @@
 
 #include <algorithm>
 #include <atomic>
-#include <immintrin.h>
 #include <memory>
 #include <vector>
+
+// Architecture-specific pause instruction for spin-wait loops
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+    #include <immintrin.h>
+    #define CPU_PAUSE() _mm_pause()
+#elif defined(__aarch64__) || defined(__arm__)
+    #define CPU_PAUSE() __asm__ __volatile__("yield" ::: "memory")
+#else
+    #define CPU_PAUSE() do {} while(0)
+#endif
 
 #ifdef SCOREP_USER_ENABLE
 #include <scorep/SCOREP_User.h>
@@ -342,7 +351,7 @@ struct Task : public TaskBase {
     // decode-only wall time 1.1x-4.2x worse (16->256 threads), dominated by `syscall` self-time
     // (20,050 CPU-s at 256 threads, vs 8,767 CPU-s for the spin it replaced).
     //
-    // Exponential _mm_pause() backoff, not a single pause per check: PAUSE's latency is wildly
+    // Exponential CPU_PAUSE() backoff, not a single pause per check: PAUSE's latency is wildly
     // architecture-dependent (measured ~18.5s of self-time on Intel Sapphire Rapids at 32 threads,
     // doesn't even register on AMD Zen4 -- Zen4's PAUSE is only a few cycles vs 100+ on many
     // recent Intel parts), so a fixed one-pause-per-check delay is Intel-tuned by accident. Scaling
@@ -359,7 +368,7 @@ struct Task : public TaskBase {
         constexpr int max_spin_count = 1024;
         while (extraction_done.load(std::memory_order_acquire) != round) {
             for (int i = 0; i < spin_count; ++i) {
-                _mm_pause();
+                CPU_PAUSE();
             }
             if (spin_count < max_spin_count) {
                 spin_count *= 2;
@@ -490,9 +499,9 @@ public:
     size_t other_pid{ 0 };
 
     // SHMEM resources
-    uint64_t* status_shm{ nullptr };
-    uint64_t* signal_shm{ nullptr };
-    uint64_t* done_shm{ nullptr };
+    unsigned long* status_shm{ nullptr };
+    unsigned long* signal_shm{ nullptr };
+    unsigned long* extraction_done_shm{ nullptr };
     pm::FusionSummary* fusion_summary_shm { nullptr };
 
     shmem_ctx_t context_shm;
@@ -512,9 +521,9 @@ public:
         int vb_left,
         int vb_right,
         size_t other_pid,
-        uint64_t* status_ptr,
-        uint64_t* signal_ptr,
-        uint64_t* done_ptr,
+        ulong* status_ptr,
+        ulong* signal_ptr,
+        ulong* extraction_done_ptr,
         pm::FusionSummary* fusion_summary_ptr,
         pm::Mwpm* solver
     ) : SpecialTask(vb, vb_left, vb_right, true, TaskType::CrossRankTask, solver),
@@ -522,7 +531,7 @@ public:
         other_pid(other_pid),
         status_shm(status_ptr),
         signal_shm(signal_ptr),
-        done_shm(done_ptr),
+        extraction_done_shm(extraction_done_ptr),
         fusion_summary_shm(fusion_summary_ptr)
     {
         if (status_shm == nullptr) {
@@ -535,11 +544,7 @@ public:
         }
         *status_shm = 0;
         *signal_shm = 0;
-        *done_shm = 0;
-        // No more "walk to top of child's own parent chain and attach there" -- CrossRankTasks no
-        // longer sit in the tree at all, and no longer take `child` as a constructor argument: the
-        // task-building pass sets it via the triggering Task's own add_special_task(this) call
-        // instead (mirroring however LocalSeamTask attaches).
+        *extraction_done_shm = 0;
     }
 
     CrossRankTask(CrossRankTask&& other) noexcept : SpecialTask(std::move(other)) {
@@ -549,7 +554,7 @@ public:
         other_pid = other.other_pid;
         status_shm = other.status_shm;
         signal_shm = other.signal_shm;
-        done_shm = other.done_shm;
+        extraction_done_shm = other.extraction_done_shm;
         fusion_summary_shm = other.fusion_summary_shm;
         context_shm = other.context_shm;
         owns_context = other.owns_context;
@@ -565,15 +570,7 @@ public:
             shmem_ctx_destroy(context_shm);
     }
 
-
     /* Helper Methods */
-    // Symmetric with LocalSeamTask::setup() -- combines regions from its one predecessor (child),
-    // splitting into regions_to_unmatch (matched to this CRT's own vb, to be sent/unmatched) vs
-    // regions_matched_to_virtual_boundary (everything else, kept live for a later setup() -- the next
-    // attached special task on the same Task, or (via the write-back in decode_shots()) that Task's
-    // own future parent). The else branch used to be commented out (this list was never read, since
-    // nothing propagated it back to child); restored now that the predecessor chain + write-back make
-    // it a genuinely consumed list again.
     void setup() override {
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
@@ -585,141 +582,94 @@ public:
         }
     };
 
-
     /* Sychronization Methods */
-    // Resets ONLY the right PE's own copy of status_shm -- remote if the winner is left, local if the
-    // winner is right. Called by the winner (whichever side it is) immediately after try_to_steal()
-    // returns true, before solving even starts.
-    //
-    // Left's own copy is NEVER reset here (or anywhere, ever, for the life of the run) -- see
-    // try_to_steal()/wait_until_ready_to_race() below for why. A prior version of this method reset
-    // BOTH copies every round, which (combined with a reset-to-0-every-round left copy) caused a real,
-    // reproduced bug: one PE racing multiple *shots* ahead of the other (not just mid-round timing --
-    // this codebase's decentralized shot sync allows real multi-shot drift) could have its vote for
-    // shot i+1 land in a slot the other side still read as "not yet started for shot i", corrupting
-    // the FusionSummary/region reconstruction in get_solution_from_remote_pe. The fix makes left's own
-    // copy a monotonically increasing, never-reset counter instead, so its absolute value alone always
-    // unambiguously identifies which shot's race it represents -- no more stale-vs-legitimate ambiguity.
-    //
-    // Neither this nor mark_signal_consumed() below gates the *send* path: that's still
-    // wait_until_done()/done_shm, gating only the loser's send (see decode_shots()). This reset only
-    // ever gates the right PE's own half of wait_until_ready_to_race().
-//     inline void mark_race_resolved(size_t my_pid) {
-// #ifdef SCOREP_USER_ENABLE
-//         SCOREP_USER_FUNC_BEGIN();
-// #endif
-//         shmem_ctx_uint64_atomic_set(context_shm, status_shm, 0, (iamleft) ? other_pid : my_pid);
-// #ifdef SCOREP_USER_ENABLE
-//         SCOREP_USER_FUNC_END();
-// #endif
-//     }
+    void signal_when_data_received(size_t my_pid) {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_BEGIN(send_fence, "Sender Fence", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+        shmem_ctx_fence(context_shm);
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(send_fence);
+#endif
 
-    // Cheap local-memory race-entry gate, replacing wait_until_done()/done_shm as the thing both
-    // roles wait on before attempting try_to_steal() again. Role assignment never touches payload
-    // data, so it's safe to let it proceed as soon as this PE's own gate condition is satisfied --
-    // independent of whether the winner's own extract/report_done pipeline has fully finished.
-    // shmem_wait_until on a local SHMEM-writable field mirrors wait_until_done's own pattern just
-    // below (SOS's own busy-poll, no syscall).
-    //
-    // Left and right need DIFFERENT conditions, and left's needs the actual shot index (found the hard
-    // way, twice): right's own copy is a clean, single-purpose "I attempted this round" marker, reset
-    // to 0 by whoever wins, so ==0 is unambiguous. Left's own copy IS the shared race-determination
-    // slot (see try_to_steal() below) -- a monotonically increasing counter, never reset, where the
-    // absolute value 2*shot_buffer_round is exactly the point at which shot (shot_buffer_round - 1)'s
-    // race has been fully, unambiguously resolved by both sides (see try_to_steal()'s own comment for
-    // the induction argument). Use shot_buffer_round here, not shot_id -- they're only numerically
-    // identical while ENABLE_SHOT_BUFFERS is off; report_done()/wait_until_done() already use
-    // shot_buffer_round for the same reason.
-//     inline void wait_until_ready_to_race(int shot_buffer_round) {
-// #ifdef SCOREP_USER_ENABLE
-//         SCOREP_USER_FUNC_BEGIN();
-// #endif
-        
-// #ifdef SCOREP_USER_ENABLE
-//         SCOREP_USER_FUNC_END();
-// #endif
-    // }
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_BEGIN(send_signal, "Sender Signal Atomics", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+        shmem_ctx_ulong_atomic_inc(context_shm, signal_shm, other_pid);
+        // increment my signal in case I am next receiver
+        shmem_ctx_ulong_atomic_inc(context_shm, signal_shm, my_pid); 
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(send_signal);
+#endif
+    }
 
-    // Kept only to satisfy TaskBase's pure-virtual interface (mirrors try_to_steal(size_t)'s own
-    // precedent above) -- signal_shm is now a never-reset monotonic counter (Phase 4 of the CRT
-    // sync plan: the sender's own send_solution_to_remote_pe does the only increments it needs),
-    // so there's nothing left for a CRT-specific mark_solved() to do. Every real call site
-    // branches on is_cross_rank_fusion() before ever calling mark_solved(), so this is never
-    // actually reached.
+    void wait_until_data_received(int shot_buffer_round) {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_BEGIN(receiver_wait, "Receiver Wait Until", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+        shmem_ulong_wait_until(signal_shm, SHMEM_CMP_EQ, (unsigned long)(shot_buffer_round + 1));
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(receiver_wait);
+#endif
+    }
+
+    void wait_until_data_sent() {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_BEGIN(finalize_wait, "Sender Ctx Quiet", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+        // Ensure our sends have completed so we can safely destroy sent regions
+        shmem_ctx_quiet(context_shm);
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(finalize_wait);
+#endif
+    }
+
     void mark_solved(size_t my_pid) override {
         throw std::logic_error("CrossRankTask::mark_solved: signal_shm is never reset; this should never be called");
     }
 
-    // Renamed from report_done: under Phase 5, this fires only once this PE's own regions/nodes
-    // for this round are actually cleaned up (either the winner's post-extraction, or the loser's
-    // deferred finalize_sent_crt_window), so "extraction done" is the accurate name now.
     inline void report_extraction_done(int shot_buffer_round) {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
 #endif
-        shmem_ctx_uint64_atomic_set(context_shm, done_shm, shot_buffer_round+1, other_pid); // notify other PE we are done
+        shmem_ctx_ulong_atomic_set(context_shm, extraction_done_shm, shot_buffer_round+1, other_pid); // notify other PE we are done
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_END();
 #endif
     }
 
-    inline void wait_until_done(size_t my_pid, int shot_buffer_round) {
+    inline void wait_until_extraction_done(size_t my_pid, int shot_buffer_round) {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
-        // Named (not just FUNC_BEGIN's auto-generated pm::CrossRankTask::wait_until_done) so
-        // analyze_trace_wall_clock.py's WAIT_REGIONS can match it by its literal display name --
-        // this is the task-status rendezvous wait (blocks until the other PE has posted its
-        // done_shm signal for this shot), one of the pure per-PE ENTER-to-LEAVE cross-PE-cost
-        // proxies that stay meaningful even across nodes with unsynced clocks.
         SCOREP_USER_REGION_DEFINE(wait_until_done_named);
         SCOREP_USER_REGION_BEGIN(wait_until_done_named, "wait_until_done", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
-        shmem_wait_until(done_shm, SHMEM_CMP_GE, shot_buffer_round + 1);
+        shmem_ulong_wait_until(extraction_done_shm, SHMEM_CMP_GE, shot_buffer_round + 1);
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_REGION_END(wait_until_done_named);
         SCOREP_USER_FUNC_END();
 #endif
     }
 
-    // Kept only to satisfy TaskBase's pure-virtual interface (mirrors mark_solved()'s own precedent
-    // just above) -- every real call site goes through a concrete CrossRankTask*, and CRT's own race
-    // needs shot_buffer_round too, so decode_shots() always calls the 2-arg overload below instead.
     bool try_to_steal(size_t val) override {
         throw std::logic_error("CrossRankTask::try_to_steal(size_t): call try_to_steal(my_pid, shot_buffer_round) instead");
     }
 
-    // Left's own copy of status_shm is a monotonically increasing counter, incremented by 1 by BOTH
-    // sides every shot, NEVER reset (see mark_race_resolved()'s own comment for why the old
-    // reset-every-shot OR-based scheme was unsound). For shot k (0-indexed), the counter reaches
-    // 2k+1 on whichever side's own fetch_add is the SECOND to land for that shot -- that side wins.
-    //
-    // Induction argument for why this can never be "lapped" the way the old scheme was: neither side
-    // can even ATTEMPT shot k's vote until wait_until_ready_to_race(k) passes, which for left requires
-    // status_shm >= 2k, and for right requires its own local marker == 0 (reset only by shot (k-1)'s
-    // winner, which is only known -- synchronously, via this fetch_add's own return value -- at the
-    // exact instant status_shm reaches 2k). So neither side's vote for shot k can land before shot
-    // k-1's pair of votes has fully landed, by construction -- unlike the old bit-reset scheme, there
-    // is no window where a value looks "clean" without actually meaning "ready for the next shot".
     bool try_to_steal(size_t my_pid, int shot_buffer_round) {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
 #endif
-        uint64_t old;
+        unsigned long old;
         if (iamleft) {
-            shmem_wait_until(status_shm, SHMEM_CMP_GE, (uint64_t)(2 * shot_buffer_round));
-            old = shmem_ctx_uint64_atomic_fetch_add(context_shm, status_shm, 1, my_pid);
+            shmem_ulong_wait_until(status_shm, SHMEM_CMP_GE, (unsigned long)(2 * shot_buffer_round));
+            old = shmem_ctx_ulong_atomic_fetch_add(context_shm, status_shm, 1, my_pid);
         } else {
-            shmem_wait_until(status_shm, SHMEM_CMP_EQ, shot_buffer_round);
-            // Local marker on my own copy first ("I attempted this round") -- consumed only by
-            // wait_until_ready_to_race()'s own-copy spin gate, decoupled from the real
-            // winner-determination fetch_add below (unchanged target: left's copy). Self first, same
-            // ordering discipline as mark_race_resolved.
-            // shmem_ctx_uint64_atomic_set(context_shm, status_shm, 1, my_pid);
-            old = shmem_ctx_uint64_atomic_fetch_add(context_shm, status_shm, 1, other_pid);
+            shmem_ulong_wait_until(status_shm, SHMEM_CMP_EQ, shot_buffer_round);
+            old = shmem_ctx_ulong_atomic_fetch_add(context_shm, status_shm, 1, other_pid);
         }
-        bool won = (old == 2 * (uint64_t)shot_buffer_round + 1);
+        bool won = (old == 2 * (unsigned long)shot_buffer_round + 1);
         if (won) {
-            shmem_ctx_uint64_atomic_inc(context_shm, status_shm, (iamleft) ? other_pid : my_pid);
+            shmem_ctx_ulong_atomic_inc(context_shm, status_shm, (iamleft) ? other_pid : my_pid);
         }
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_END();
@@ -730,18 +680,14 @@ public:
     void reset() override {
         *status_shm = 0;
         *signal_shm = 0;
-        *done_shm = 0;
+        *extraction_done_shm = 0;
     }
 
 };
 #endif
 
 inline void Task::add_special_task(SpecialTask* st) {
-    // The predecessor is this Task itself only if st is the first special task attached to it; if
-    // this Task already has one or more special tasks attached, the previously-attached one is the
-    // correct predecessor instead -- its own regions_matched_to_virtual_boundary is what's actually
-    // up to date (this Task's own list, populated by its setup() before any special task ran, is
-    // stale the moment a first special task's own divide_vb call prunes something from it).
+    // The predecessor is the Task if this is the first special task, or the previous special task
     TaskBase* predecessor = special_tasks.empty()
         ? static_cast<TaskBase*>(this)
         : static_cast<TaskBase*>(special_tasks.back());

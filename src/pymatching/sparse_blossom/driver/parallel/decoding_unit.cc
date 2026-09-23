@@ -21,12 +21,23 @@
 #include <limits>
 #include <omp.h>
 #include <set>
+#include <sstream>
+#include <iomanip>
 #include <unordered_map>
 #include <vector>
-#include <format>
+// #include <format>
 
 // #include "profiling/profiling_json.h"
 #include "pymatching/sparse_blossom/driver/user_graph.h"
+
+namespace {
+    // Helper function to format pointers (replacement for std::format with {:p})
+    std::string format_ptr(const void* ptr) {
+        std::ostringstream oss;
+        oss << "0x" << std::hex << reinterpret_cast<uintptr_t>(ptr);
+        return oss.str();
+    }
+}
 
 #ifdef SCOREP_USER_ENABLE
 #include <scorep/SCOREP_User.h>
@@ -124,7 +135,11 @@ pm::DecodingUnit::DecodingUnit(
         num_cross_rank_fusions = 2;  // 2
     }
     // --- Allocate sychronization & summary memory ---
-    task_status_ptr = static_cast<uint64_t*>(shmem_align(sizeof(uint64_t), num_cross_rank_fusions * SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION * num_shot_containers * sizeof(uint64_t)));
+    // Each CrossRankTask gets its own 64-byte cache line to avoid false sharing.
+    // stride = 64 bytes / sizeof(unsigned long) = number of unsigned long elements per cache line
+    constexpr size_t cache_line_stride = SHMEM_CACHE_LINE_SIZE / sizeof(unsigned long);
+    size_t task_status_total_elements = cache_line_stride * num_cross_rank_fusions * num_shot_containers;
+    task_status_ptr = static_cast<unsigned long*>(shmem_align(SHMEM_CACHE_LINE_SIZE, task_status_total_elements * sizeof(unsigned long)));
     // regions_nelems_per_solver (computed unconditionally above) / 64 gives number of uint64_t for bitmap
     child_edges_nelems_per_solver = regions_nelems_per_solver; // Could reduce this
     regions_matched_to_vb_nelems = graph.node_part_id.size() / graph.num_rounds * SHMEM_INTERSECTION_BUFFER_FACTOR;
@@ -244,9 +259,11 @@ pm::DecodingUnit::DecodingUnit(
         throw std::invalid_argument("Failed to allocate symmetric region buffer.");
     }
     if (DEBUG) {
+        constexpr size_t cache_line_stride = SHMEM_CACHE_LINE_SIZE / sizeof(unsigned long);
+        size_t task_status_bytes = cache_line_stride * num_cross_rank_fusions * num_shot_containers * sizeof(unsigned long);
         std::cout << "PE" << pid << " symmetric allocations:" << std::endl
                   << "  node_ephemeral_fields_ptr: " << node_ephemeral_fields_ptr << " (" << nodes_nelems_per_buffer * sizeof(DetectorNodeEphemeralFields) << " bytes)" << std::endl
-                  << "  task_status_ptr: " << task_status_ptr << " (" << (graph.num_partitions-1) * 2 * sizeof(uint64_t) << " bytes)" << std::endl
+                  << "  task_status_ptr: " << task_status_ptr << " (" << task_status_bytes << " bytes, " << num_cross_rank_fusions * num_shot_containers << " tasks @ " << SHMEM_CACHE_LINE_SIZE << "B each)" << std::endl
                   << "  task_fusion_summary_ptr: " << task_fusion_summary_ptr << " (" << task_fusion_summary_size_per_task * (graph.num_partitions-1) << " bytes)" << std::endl
                   << "  regions_ptr: " << regions_ptr << " (" << regions_nelems_per_solver * (num_threads) * 2 * num_shot_containers * sizeof(GraphFillRegion) << " bytes)" << std::endl
                   << "  regions_nelems_per_solver: " << regions_nelems_per_solver << std::endl
@@ -506,7 +523,7 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
     for (int i=0; i < num_shot_containers; ++i) {
         shot_buffer->buffer[i].cross_rank_tasks.reserve(2);
         if (pid > 0) { // Add cross-rank fusion on left
-            uint64_t* task_status_p = get_task_status_ptr(i, false);
+            unsigned long* task_status_p = get_task_status_ptr(i, false);
             FusionSummary* fusion_summary_p = get_fusion_summary_ptr(i, false);
             int vb = my_partitions_start-1;
             // Anchor on my own first local partition, right at this boundary -- same "a partition
@@ -519,7 +536,7 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                 pid-1,
                 task_status_p,     // status_shm
                 task_status_p + 1, // signal_shm
-                task_status_p + 2, // done_shm
+                task_status_p + 2, // extraction_done_shm
                 fusion_summary_p,
                 solver_for(i, my_partitions_start)
             );
@@ -552,7 +569,7 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
             }
         }
         if (pid < n_pes-1) { // Add cross-rank fusion on right
-            uint64_t* task_status_p = get_task_status_ptr(i, true);
+            unsigned long* task_status_p = get_task_status_ptr(i, true);
             FusionSummary* fusion_summary_p = get_fusion_summary_ptr(i, true);
             int vb = my_partitions_end-1;
             // Anchor on my own last local partition, right at this boundary.
@@ -564,7 +581,7 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                 pid+1,
                 task_status_p,     // status_shm
                 task_status_p + 1, // signal_shm
-                task_status_p + 2, // done_shm
+                task_status_p + 2, // extraction_done_shm
                 fusion_summary_p,
                 solver_for(i, my_partitions_end - 1)
             );
@@ -591,7 +608,7 @@ void pm::DecodingUnit::build_tasks_for_round_partitioning() {
                     << "    other_pid: " << t.other_pid << std::endl
                     << "    status_shm: " << t.status_shm << std::endl
                     << "    signal_shm: " << t.signal_shm << std::endl
-                    << "    done_shm: " << t.done_shm << std::endl
+                    << "    extraction_done_shm: " << t.extraction_done_shm << std::endl
                     << "    fusion_summary_shm: " << t.fusion_summary_shm << std::endl << std::flush;
             }
         }
@@ -880,7 +897,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                     const int remote_obs = oi_local ? si.oj : si.oi;
                     int other_pid = other_pid_for(remote_obs);
                     int global_vb = K_vb * (int)graph.num_obs_patches + s;
-                    uint64_t* sp = get_task_status_ptr_for_seam(container_id, s);
+                    unsigned long* sp = get_task_status_ptr_for_seam(container_id, s);
                     FusionSummary* fp = get_fusion_summary_ptr_for_seam(container_id, s);
                     pm::Mwpm* crt_solver = solver_for(container_id, (oi_local ? si.oi : si.oj) * K_p + si.vb_left + 1);
                     crt.emplace_back(global_vb, iamleft, si.vb_left, si.vb_right,
@@ -1054,7 +1071,7 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                     const int remote_obs = oi_local ? si.oj : si.oi;
                     const int other_pid = other_pid_for(remote_obs);
                     const int global_vb = K_vb * (int)graph.num_obs_patches + s;
-                    uint64_t* sp = get_task_status_ptr_for_seam(container_id, s);
+                    unsigned long* sp = get_task_status_ptr_for_seam(container_id, s);
                     FusionSummary* fp = get_fusion_summary_ptr_for_seam(container_id, s);
                     pm::Mwpm* crt_solver = solver_for(container_id, (oi_local ? si.oi : si.oj) * K_p + si.vb_left + 1);
                     // Unlike a local seam (which inherits its attachment connector's own vb_left/
@@ -1106,19 +1123,19 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                        + "  vb_left: " + std::to_string(t.vb_left)
                        + "  vb_right: " + std::to_string(t.vb_right)
                        + "  vb_marker: " + std::to_string(t.vb_marker)
-                       + "  solver: " + std::format("{:p}", static_cast<void*>(t.solver)) + "\n"
+                       + "  solver: " + format_ptr(static_cast<void*>(t.solver)) + "\n"
                        + "    is_extraction_unit_root: " + std::to_string(t.is_extraction_unit_root)
                        + "  is_extraction_unit_connector: " + std::to_string(t.is_extraction_unit_connector)
                        + "  defer_division: " + std::to_string(t.defer_division)
                        + "  in_crt_window: " + std::to_string(t.in_crt_window) + "\n"
-                       + "    left_child: " + std::format("{:p}",static_cast<void*>(t.left_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.left_child->part) + ")" : "")
-                       + "  me: " + std::format("{:p}", static_cast<void*>(&t))
-                       + "  right_child: " + std::format("{:p}", static_cast<void*>(t.right_child)) + ((t.right_child) ? "(" + (std::string)(t.right_child->is_fusion ? "f" : "p") + std::to_string(t.right_child->part) + ")" : "") + "\n"
-                       + "    parent: f" + std::format("{:p}", static_cast<void*>(t.parent))
+                       + "    left_child: " + format_ptr(static_cast<void*>(t.left_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.left_child->part) + ")" : "")
+                       + "  me: " + format_ptr(static_cast<void*>(&t))
+                       + "  right_child: " + format_ptr(static_cast<void*>(t.right_child)) + ((t.right_child) ? "(" + (std::string)(t.right_child->is_fusion ? "f" : "p") + std::to_string(t.right_child->part) + ")" : "") + "\n"
+                       + "    parent: f" + format_ptr(static_cast<void*>(t.parent))
                        + "\n";
                 tasks += "    special_tasks (" + std::to_string(t.special_tasks.size()) + "):";
                 for (SpecialTask* st : t.special_tasks) {
-                    tasks += "  " + std::format("{:p}", static_cast<void*>(st))
+                    tasks += "  " + format_ptr(static_cast<void*>(st))
                            + "(" + (std::string)(st->is_local_seam_fusion() ? "seam" : "crt")
                            + " vb=" + std::to_string(st->part)
                            + " vb_left=" + std::to_string(st->vb_left)
@@ -1593,23 +1610,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
     SCOREP_USER_REGION_END(putmems);
 #endif
 
-#ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_BEGIN(send_fence, "Sender Fence", SCOREP_USER_REGION_TYPE_COMMON);
-#endif
-    shmem_ctx_fence(t.context_shm);
-#ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_END(send_fence);
-#endif
-
-#ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_BEGIN(send_signal, "Sender Signal Atomics", SCOREP_USER_REGION_TYPE_COMMON);
-#endif
-    shmem_ctx_uint64_atomic_inc(t.context_shm, t.signal_shm, other_pid);
-    shmem_ctx_uint64_atomic_inc(t.context_shm, t.signal_shm, pid); // keep my signal updated too, in
-                                                                   // case I am next receiver
-#ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_END(send_signal);
-#endif
+    t.signal_when_data_received((size_t)pid);
 
     if (DEBUG) t_out << "  sent all data to " << other_pid << std::endl << std::flush;
 #ifdef SCOREP_USER_ENABLE
@@ -1617,8 +1618,7 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
 #endif
 }
 
-// Deferred cleanup for CRT sender's local window -- required to call shmem_ctx_quiet
-// to ensure puts completed before shattering
+// Deferred cleanup for CRT sender's local window
 void pm::DecodingUnit::finalize_sent_crt_window(ShotContainer& shot, size_t shot_container_id, size_t shot_id, CrossRankTask& t, int shot_buffer_round, int tid, std::ofstream& t_out) {
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_DEFINE(finalize_wait);
@@ -1646,16 +1646,12 @@ void pm::DecodingUnit::finalize_sent_crt_window(ShotContainer& shot, size_t shot
               << " solver=" << t.solver << std::endl << std::flush;
     }
 
-#ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_BEGIN(finalize_wait, "Sender Ctx Quiet", SCOREP_USER_REGION_TYPE_COMMON);
-#endif
-    // Ensure our sends have completed so we can safely destroy sent regions
-    shmem_ctx_quiet(t.context_shm);
-#ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_END(finalize_wait);
-    SCOREP_USER_REGION_BEGIN(finalize_shatter, "Sender Shatter Regions", SCOREP_USER_REGION_TYPE_COMMON);
-#endif
+    // Calls shmem_ctx_quiet to ensure local buffers are clear
+    t.wait_until_data_sent();
 
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_BEGIN(finalize_shatter, "Sender Shatter Regions", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
     auto& solver = *t.solver;
     for (int vb_i = t.vb_left + 1 + (int)my_vb_offset; vb_i < t.vb_right + (int)my_vb_offset; ++vb_i) {
         for (uint64_t i : shot_buffer->hits(shot_id, true, vb_i)) {
@@ -1735,14 +1731,8 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(
 
     if (DEBUG) t_out << "    getting (p_start=" << p_start << ", p_k=" << p_k << ", p_end=" << p_end << ") data from " << other_pid << std::endl << std::flush;
 
-#ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_BEGIN(receiver_wait, "Receiver Wait Until", SCOREP_USER_REGION_TYPE_COMMON);
-#endif
-    // signal_shm is monotonically increasing, never-reset
-    shmem_wait_until(t.signal_shm, SHMEM_CMP_EQ, (uint64_t)(shot_buffer_round + 1));
-#ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_END(receiver_wait);
-#endif
+    // Wait until sender's signal update is received signalling puts completed
+    t.wait_until_data_received(shot_buffer_round);
 
     // Read local FusionSummary buffer (which was populated by remote PE)
     FusionSummary*& fusion_summary_base = t.fusion_summary_shm;
@@ -2451,7 +2441,7 @@ void pm::DecodingUnit::decode_shots() {
         // now genuinely thread-local and free-running, never synchronized against any shared
         // state -- different threads (and different partitions) can legitimately be on different
         // shots at once. It remains the correct generation tag for Tier A's reused Task-tree CAS
-        // (try_to_steal/mark_decode_done/wait_until_decode_done/report_done/wait_until_done)
+        // (try_to_steal/mark_decode_done/wait_until_decode_done/report_extraction_done/wait_until_extraction_done)
         // because those all live on the small, reused-per-container pool; what makes this safe
         // despite the lack of synchronization is Task::extraction_done (see the leaf-claim below),
         // not shot_buffer_round itself.
@@ -2648,7 +2638,7 @@ void pm::DecodingUnit::decode_shots() {
                                                  << " iamleft=" << crt->iamleft
                                                  << " other_pid=" << crt->other_pid << "\n" << std::flush;
                                 // Cheap local race-entry gate (Phase 2 of the CRT sync plan) --
-                                // replaces the old unconditional wait_until_done()/done_shm wait
+                                // replaces the old unconditional wait_until_extraction_done()/extraction_done_shm wait
                                 // here; that wait now only happens in the loser branch below, right
                                 // before this PE actually sends (the only place it's load-bearing).
                                 if (BARE_DEBUG) t_out << "    waiting until ready to race" << std::endl << std::flush;
@@ -2728,13 +2718,13 @@ void pm::DecodingUnit::decode_shots() {
                                         draw_frame(dbg_solver, pm::MwpmEvent::no_event(), 1000, true, tid);
                                     }
 #endif
-                                    // Only the loser needs done_shm at all: this is the send-safety
+                                    // Only the loser needs extraction_done_shm at all: this is the send-safety
                                     // gate (has the receiver of MY last send finished consuming it,
                                     // so my shadow buffers are safe to overwrite again) -- checked
                                     // right here, immediately before actually sending, not at the top
                                     // of the CRT branch anymore (race-entry no longer depends on it).
                                     if (BARE_DEBUG) t_out << "    waiting until PE done" << std::endl << std::flush;
-                                    crt->wait_until_done(pid, shot_buffer_round-1);
+                                    crt->wait_until_extraction_done(pid, shot_buffer_round-1);
                                     send_solution_to_remote_pe(shot_container_id, shot_id, my_result, *crt, *t, tid, t_out);
                                     // report_extraction_done is deferred -- NOT called here. My own
                                     // local window's regions haven't been freed yet (send_solution_
