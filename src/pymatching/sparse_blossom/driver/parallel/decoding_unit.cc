@@ -1298,8 +1298,6 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_DEFINE(solution_isolation);
     SCOREP_USER_REGION_DEFINE(putmems);
-    SCOREP_USER_REGION_DEFINE(send_fence);
-    SCOREP_USER_REGION_DEFINE(send_signal);
 #endif
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_FUNC_BEGIN();
@@ -1621,7 +1619,6 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
 // Deferred cleanup for CRT sender's local window
 void pm::DecodingUnit::finalize_sent_crt_window(ShotContainer& shot, size_t shot_container_id, size_t shot_id, CrossRankTask& t, int shot_buffer_round, int tid, std::ofstream& t_out) {
 #ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_DEFINE(finalize_wait);
     SCOREP_USER_REGION_DEFINE(finalize_shatter);
     SCOREP_USER_FUNC_BEGIN();
 #endif
@@ -1686,7 +1683,6 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(
     size_t shot_container_id, CrossRankTask &t, int shot_buffer_round, std::ofstream &t_out,
     std::vector<uint64_t> &hitsref) {
 #ifdef SCOREP_USER_ENABLE
-    SCOREP_USER_REGION_DEFINE(receiver_wait);
 #endif
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_FUNC_BEGIN();

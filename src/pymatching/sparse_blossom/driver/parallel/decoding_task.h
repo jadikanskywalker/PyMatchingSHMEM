@@ -521,9 +521,9 @@ public:
         int vb_left,
         int vb_right,
         size_t other_pid,
-        ulong* status_ptr,
-        ulong* signal_ptr,
-        ulong* extraction_done_ptr,
+        unsigned long* status_ptr,
+        unsigned long* signal_ptr,
+        unsigned long* extraction_done_ptr,
         pm::FusionSummary* fusion_summary_ptr,
         pm::Mwpm* solver
     ) : SpecialTask(vb, vb_left, vb_right, true, TaskType::CrossRankTask, solver),
@@ -585,6 +585,8 @@ public:
     /* Sychronization Methods */
     void signal_when_data_received(size_t my_pid) {
 #ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_DEFINE(send_fence);
+        SCOREP_USER_REGION_DEFINE(send_signal);
         SCOREP_USER_REGION_BEGIN(send_fence, "Sender Fence", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
         shmem_ctx_fence(context_shm);
@@ -605,6 +607,7 @@ public:
 
     void wait_until_data_received(int shot_buffer_round) {
 #ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_DEFINE(receiver_wait);
         SCOREP_USER_REGION_BEGIN(receiver_wait, "Receiver Wait Until", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
         shmem_ulong_wait_until(signal_shm, SHMEM_CMP_EQ, (unsigned long)(shot_buffer_round + 1));
@@ -615,6 +618,7 @@ public:
 
     void wait_until_data_sent() {
 #ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_DEFINE(finalize_wait);
         SCOREP_USER_REGION_BEGIN(finalize_wait, "Sender Ctx Quiet", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
         // Ensure our sends have completed so we can safely destroy sent regions
@@ -659,19 +663,24 @@ public:
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
 #endif
-        unsigned long old;
-        if (iamleft) {
-            shmem_ulong_wait_until(status_shm, SHMEM_CMP_GE, (unsigned long)(2 * shot_buffer_round));
-            old = shmem_ctx_ulong_atomic_fetch_add(context_shm, status_shm, 1, my_pid);
-        } else {
-            shmem_ulong_wait_until(status_shm, SHMEM_CMP_EQ, shot_buffer_round);
-            old = shmem_ctx_ulong_atomic_fetch_add(context_shm, status_shm, 1, other_pid);
-        }
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_DEFINE(tts_wait);
+        SCOREP_USER_REGION_DEFINE(tts_atomics);
+        SCOREP_USER_REGION_BEGIN(tts_wait, "TTS Wait Until", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+        if (iamleft) shmem_ulong_wait_until(status_shm, SHMEM_CMP_GE, (unsigned long)(2 * shot_buffer_round));
+        else         shmem_ulong_wait_until(status_shm, SHMEM_CMP_EQ, shot_buffer_round);
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(tts_wait);
+        SCOREP_USER_REGION_BEGIN(tts_atomics, "TTS Atomics", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+        unsigned long old = shmem_ctx_ulong_atomic_fetch_add(context_shm, status_shm, 1, iamleft ? my_pid : other_pid);
         bool won = (old == 2 * (unsigned long)shot_buffer_round + 1);
         if (won) {
             shmem_ctx_ulong_atomic_inc(context_shm, status_shm, (iamleft) ? other_pid : my_pid);
         }
 #ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(tts_atomics);
         SCOREP_USER_FUNC_END();
 #endif
         return won;
