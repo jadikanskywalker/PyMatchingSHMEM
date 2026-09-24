@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
+#include "pymatching/sparse_blossom/driver/parallel/held_set.h"
 #include "pymatching/sparse_blossom/flooder/graph.h"
 #include "pymatching/sparse_blossom/ints.h"
 #include "pymatching/sparse_blossom/matcher/mwpm.h"
@@ -128,11 +129,16 @@ class UserGraph {
         pm::weight_int num_distinct_weights,
         const EdgeCallable& edge_func,
         const BoundaryEdgeCallable& boundary_edge_func);
+    /// If `held` is given, only nodes it marks as held are constructed (lazily-backed node array, complete
+    /// neighbour lists, obs_patch_id / vb / ephemeral fields); edges between two unheld nodes are skipped and an
+    /// edge to an unheld node is kept on the held endpoint as a pointer to the unheld slot. Everything global
+    /// (normalising constant, negative-weight bookkeeping, partition metadata) is identical to a full build.
     pm::SharedMatchingGraph to_shared_matching_graph(
         pm::weight_int num_distinct_weights
 #ifdef USE_SHMEM
         , DetectorNodeEphemeralFields *nodes_ephemeral_fields_ptr
 #endif
+        , const HeldSet* held = nullptr
     );
 
     pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);

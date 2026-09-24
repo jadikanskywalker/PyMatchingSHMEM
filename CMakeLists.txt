@@ -166,14 +166,27 @@ target_link_libraries(pymatching_tests GTest::gtest_main GTest::gmock_main libst
 
 # Standalone target for the subset-graph planning tests (builds without the rest of the test suite).
 add_executable(subset_plan_tests ${SOURCE_FILES_NO_MAIN} src/pymatching/sparse_blossom/driver/parallel/subset_plan.test.cc)
+target_compile_options(subset_plan_tests PRIVATE -fsanitize=address -fsanitize=undefined -g -fno-omit-frame-pointer)
 if (NOT (MSVC))
-    target_link_options(subset_plan_tests PRIVATE -pthread)
+    target_link_options(subset_plan_tests PRIVATE -pthread -fsanitize=address -fsanitize=undefined)
 endif ()
 target_link_libraries(subset_plan_tests OpenMP::OpenMP_CXX)
 if(USE_SHMEM)
     target_compile_definitions(subset_plan_tests PRIVATE USE_SHMEM)
 endif()
 target_link_libraries(subset_plan_tests GTest::gtest_main GTest::gmock_main libstim)
+
+# Real-graph check of the partial (held-set) graph build against the full build.
+add_executable(subset_check ${SOURCE_FILES_NO_MAIN} src/pymatching/sparse_blossom/driver/tools/subset_check.cc)
+target_compile_options(subset_check PRIVATE ${ARCH_OPT})
+if (NOT (MSVC))
+    target_link_options(subset_check PRIVATE -pthread -O3)
+endif ()
+target_link_libraries(subset_check OpenMP::OpenMP_CXX)
+if(USE_SHMEM)
+    target_compile_definitions(subset_check PRIVATE USE_SHMEM)
+endif()
+target_link_libraries(subset_check libstim)
 
 add_executable(pymatching_perf ${SOURCE_FILES_NO_MAIN} ${PERF_FILES})
 target_compile_options(pymatching_perf PRIVATE ${ARCH_OPT})

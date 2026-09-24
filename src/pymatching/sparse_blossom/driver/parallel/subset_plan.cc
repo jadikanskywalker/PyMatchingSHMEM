@@ -209,3 +209,129 @@ void pm::compute_partition_vb_bounds(
         partition_bounds[partition_bounds_idx].second = (int)node_part_id.size() - 1;
     }
 }
+
+pm::HeldSet pm::compute_held_set_obs(
+    size_t num_partitions,
+    size_t num_virtual_boundaries,
+    int num_obs_patches,
+    int K_p,
+    int K_vb,
+    int my_obs_start,
+    int my_obs_count,
+    const std::vector<SeamInfo>& seam_infos) {
+    HeldSet held;
+    held.part_held.assign(num_partitions, false);
+    held.vb_held.assign(num_virtual_boundaries, false);
+    auto is_local = [&](int o) { return o >= my_obs_start && o < my_obs_start + my_obs_count; };
+    for (int o = my_obs_start; o < my_obs_start + my_obs_count; ++o) {
+        for (int p = 0; p < K_p; ++p) held.part_held[(size_t)o * K_p + p] = true;
+        for (int v = 0; v < K_vb; ++v) held.vb_held[(size_t)o * K_vb + v] = true;
+    }
+    for (size_t s = 0; s < seam_infos.size(); ++s) {
+        const SeamInfo& si = seam_infos[s];
+        bool local_i = is_local(si.oi), local_j = is_local(si.oj);
+        if (!local_i && !local_j) continue;
+        held.vb_held[(size_t)K_vb * num_obs_patches + s] = true;
+        for (int remote : {si.oi, si.oj}) {
+            if (is_local(remote)) continue;
+            for (int p = si.vb_left + 1; p <= si.vb_right; ++p) {
+                held.part_held[(size_t)remote * K_p + p] = true;
+            }
+            // vbs strictly inside the window; the vb just outside each end is inactive for the fusion and is only
+            // built as a stub (vb stamped) because it neighbours a window partition.
+            for (int v = std::max(si.vb_left + 1, 0); v <= std::min(si.vb_right - 1, K_vb - 1); ++v) {
+                held.vb_held[(size_t)remote * K_vb + v] = true;
+            }
+        }
+    }
+    return held;
+}
+
+namespace {
+
+bool is_zero_slot(const pm::DetectorNode& n) {
+    const unsigned char* b = reinterpret_cast<const unsigned char*>(&n);
+    for (size_t i = 0; i < sizeof(pm::DetectorNode); ++i)
+        if (b[i]) return false;
+    return true;
+}
+
+}  // namespace
+
+pm::PartialGraphCheck pm::verify_partial_against_full(
+    const SharedMatchingGraph& full,
+    const SharedMatchingGraph& part,
+    const HeldSet& held,
+    const std::vector<SeamInfo>& unresolved,
+    size_t max_errors) {
+    PartialGraphCheck out;
+    auto fail = [&](const std::string& msg) {
+        ++out.num_errors;
+        if (out.errors.size() < max_errors) out.errors.push_back(msg);
+    };
+    const int K_vb = (int)full.vb_per_obs_patch;
+    const int num_obs = (int)full.num_obs_patches;
+    if (part.node_part_id != full.node_part_id) fail("node_part_id differs");
+    if (part.partition_bounds != full.partition_bounds) fail("partition_bounds differ");
+    if (part.vb_bounds != full.vb_bounds) fail("vb_bounds differ");
+    if (part.graph_ptr->normalising_constant != full.graph_ptr->normalising_constant) fail("normalising_constant differs");
+    if (part.graph_ptr->negative_weight_sum != full.graph_ptr->negative_weight_sum) fail("negative_weight_sum differs");
+    const auto& fn = full.graph_ptr->nodes;
+    const auto& pn = part.graph_ptr->nodes;
+    if (pn.size() != fn.size()) {
+        fail("node count differs");
+        return out;
+    }
+    out.total_nodes = fn.size();
+    std::vector<bool> is_stub(fn.size(), false);
+    for (size_t i = 0; i < fn.size(); ++i) {
+        if (!held.node_held(full.node_part_id[i])) continue;
+        for (const auto* nb : fn[i].neighbors) {
+            if (nb && !held.node_held(full.node_part_id[nb - fn.data()])) is_stub[nb - fn.data()] = true;
+        }
+    }
+    auto id = [](size_t i) { return std::to_string(i); };
+    for (size_t i = 0; i < fn.size(); ++i) {
+        if (!held.node_held(full.node_part_id[i])) {
+            if (!is_stub[i]) {
+                if (!is_zero_slot(pn[i])) fail("unheld node " + id(i) + " was touched");
+                continue;
+            }
+            ++out.num_stubs;
+            int part_id = full.node_part_id[i];
+            if (part_id >= 0) {
+                fail("stub " + id(i) + " is a partition node (held set misses a neighbour)");
+                continue;
+            }
+            int gvb = -part_id - 1;
+            if (gvb < K_vb * num_obs) {  // regular vb: must be the vb just outside a window end
+                int r = gvb / K_vb, j = gvb % K_vb;
+                bool outer = false;
+                for (const auto& w : unresolved)
+                    if ((w.oi == r || w.oj == r) && (j == w.vb_left || j == w.vb_right)) outer = true;
+                if (!outer) fail("regular-vb stub " + id(i) + " is not a window's outer vb");
+            }
+            if (!pn[i].neighbors.empty()) fail("stub " + id(i) + " has neighbours");
+            if (pn[i].vb != fn[i].vb) fail("stub " + id(i) + " vb differs");
+            if (pn[i].obs_patch_id != fn[i].obs_patch_id) fail("stub " + id(i) + " obs_patch_id differs");
+            continue;
+        }
+        ++out.num_held;
+        if (pn[i].neighbors.size() != fn[i].neighbors.size()) {
+            fail("held node " + id(i) + " neighbour count differs");
+            continue;
+        }
+        if (pn[i].neighbor_weights != fn[i].neighbor_weights) fail("held node " + id(i) + " weights differ");
+        if (pn[i].neighbor_observables != fn[i].neighbor_observables) fail("held node " + id(i) + " observables differ");
+        if (pn[i].vb != fn[i].vb) fail("held node " + id(i) + " vb differs");
+        if (pn[i].obs_patch_id != fn[i].obs_patch_id) fail("held node " + id(i) + " obs_patch_id differs");
+        for (size_t j = 0; j < fn[i].neighbors.size(); ++j) {
+            const DetectorNode* a = fn[i].neighbors[j];
+            const DetectorNode* b = pn[i].neighbors[j];
+            if ((a == nullptr) != (b == nullptr) || (a && (a - fn.data()) != (b - pn.data()))) {
+                fail("held node " + id(i) + " neighbour " + std::to_string(j) + " differs");
+            }
+        }
+    }
+    return out;
+}

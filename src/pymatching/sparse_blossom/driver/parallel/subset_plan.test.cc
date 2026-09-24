@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <fstream>
+
 #include "pymatching/sparse_blossom/config_parallel.h"
 #include "pymatching/sparse_blossom/driver/helpers/dem_generator.h"
 #include "pymatching/sparse_blossom/driver/user_graph.h"
@@ -22,6 +24,12 @@ struct ScopedObsConfig {
     }
 };
 
+// The (code, task) pairs every equivalence test runs over. Distance 3 keeps the graphs tiny.
+const std::vector<std::pair<std::string, std::string>> kCodes = {
+    {"repetition_code", "memory"},
+    {"surface_code", "rotated_memory_x"},
+};
+
 struct BuiltGraph {
     pm::SharedMatchingGraph graph;
 #ifdef USE_SHMEM
@@ -30,8 +38,10 @@ struct BuiltGraph {
 };
 
 // A multi-observable repetition-code DEM -> UserGraph (OBS partitioning) -> SharedMatchingGraph.
-BuiltGraph build_graph(int gen_rounds, int num_obs, const std::vector<pm::SurgerySpec>& specs) {
-    auto base = pm::MultiObsDemGenerator::generate_base_dem("repetition_code", "memory", 3, gen_rounds, 0.01);
+BuiltGraph build_graph(
+    const std::string& code, const std::string& task, int gen_rounds, int num_obs,
+    const std::vector<pm::SurgerySpec>& specs) {
+    auto base = pm::MultiObsDemGenerator::generate_base_dem(code, task, 3, gen_rounds, 0.01);
     pm::MultiObsDemGenerator generator(std::move(base), num_obs, specs, /*p_cross=*/0.02, /*boundary_depth=*/2);
     stim::DetectorErrorModel dem = generator.generate();
     pm::UserGraph user_graph = pm::detector_error_model_to_user_graph(dem, false, pm::NUM_DISTINCT_WEIGHTS);
@@ -120,14 +130,15 @@ TEST(SubsetPlan, SpecSeamInfosMatchGraphWalk) {
         {{0, 1, 11, 6}},                                  // runs past the last round (snapped)
         {{0, 1, 0, 2}},                                   // starts at round 0
     };
+    for (const auto& [code, task] : kCodes)
     for (int gen_rounds : gen_rounds_list) {
         for (int M : M_list) {
             ScopedObsConfig cfg(M);
             for (size_t li = 0; li < layouts.size(); ++li) {
                 const auto& specs = layouts[li];
-                SCOPED_TRACE("gen_rounds=" + std::to_string(gen_rounds) + " M=" + std::to_string(M) +
+                SCOPED_TRACE(code + " gen_rounds=" + std::to_string(gen_rounds) + " M=" + std::to_string(M) +
                              " layout=" + std::to_string(li));
-                BuiltGraph built = build_graph(gen_rounds, num_obs, specs);
+                BuiltGraph built = build_graph(code, task, gen_rounds, num_obs, specs);
                 const pm::SharedMatchingGraph& g = built.graph;
                 ASSERT_EQ((int)g.num_obs_patches, num_obs);
                 ASSERT_EQ((int)(g.num_virtual_boundaries - g.vb_per_obs_patch * g.num_obs_patches), (int)specs.size());
@@ -161,4 +172,114 @@ TEST(SubsetPlan, SpecSeamInfosRejectsBadArguments) {
     EXPECT_THROW(pm::compute_seam_infos_from_spec(specs, 1, 4, 5, 4, 1), std::invalid_argument);
     std::vector<pm::SurgerySpec> empty_seam = {{0, 1, 2, 0}};
     EXPECT_THROW(pm::compute_seam_infos_from_spec(empty_seam, 13, 4, 4, 3, 1), std::invalid_argument);
+}
+
+
+// A held-set (partial) build must match a full build node for node on held nodes, leave the rest unconstructed,
+// and keep every global quantity identical.
+TEST(SubsetPlan, PartialMatchingGraphEqualsFullOnHeldNodes) {
+    const int num_obs = 4;
+    const std::vector<std::vector<pm::SurgerySpec>> layouts = {
+        {{0, 1, 2, 3}},
+        {{0, 1, 4, 5}, {1, 2, 4, 5}},
+        {{0, 1, 4, 5}, {1, 2, 6, 5}, {2, 3, 9, 4}},
+        {{1, 2, 0, 2}, {0, 3, 7, 4}},
+    };
+    for (const auto& [code, task] : kCodes)
+    for (int M : {3, 5}) {
+        ScopedObsConfig cfg(M);
+        for (size_t li = 0; li < layouts.size(); ++li) {
+            const auto& specs = layouts[li];
+            auto base = pm::MultiObsDemGenerator::generate_base_dem(code, task, 3, 13, 0.01);
+            pm::MultiObsDemGenerator generator(std::move(base), num_obs, specs, 0.02, 2);
+            stim::DetectorErrorModel dem = generator.generate();
+            pm::UserGraph user_graph = pm::detector_error_model_to_user_graph(dem, false, pm::NUM_DISTINCT_WEIGHTS);
+#ifdef USE_SHMEM
+            std::vector<pm::DetectorNodeEphemeralFields> eph(user_graph.nodes.size());
+            pm::SharedMatchingGraph full = user_graph.to_shared_matching_graph(pm::NUM_DISTINCT_WEIGHTS, eph.data());
+#else
+            pm::SharedMatchingGraph full = user_graph.to_shared_matching_graph(pm::NUM_DISTINCT_WEIGHTS);
+#endif
+            const int K_p = (int)full.p_per_obs_patch, K_vb = (int)full.vb_per_obs_patch;
+            for (int n_pes : {2, 3, 4}) {
+                for (int k : {1, 2}) {
+                    int k_eff = pm::bound_effective_k(k, n_pes, full.num_partitions, K_p, true);
+                    auto seams = pm::compute_seam_infos_from_spec(specs, (int)full.num_rounds, M, K_p, K_vb, k_eff);
+                    const auto unresolved = seams;  // the held set covers each seam's full neighbour range
+                    try { pm::resolve_seam_window_conflicts(seams, 0); } catch (const std::invalid_argument&) { continue; }
+                    const int base_n = num_obs / n_pes, rem = num_obs % n_pes;
+                    for (int pid = 0; pid < n_pes; ++pid) {
+                        SCOPED_TRACE(code + " M=" + std::to_string(M) + " layout=" + std::to_string(li) + " n_pes=" +
+                                     std::to_string(n_pes) + " k=" + std::to_string(k_eff) + " pid=" + std::to_string(pid));
+                        int my_start = base_n * pid + std::min(pid, rem);
+                        int my_count = base_n + (pid < rem ? 1 : 0);
+                        pm::HeldSet held = pm::compute_held_set_obs(
+                            full.num_partitions, full.num_virtual_boundaries, num_obs, K_p, K_vb, my_start, my_count, unresolved);
+#ifdef USE_SHMEM
+                        pm::SharedMatchingGraph part =
+                            user_graph.to_shared_matching_graph(pm::NUM_DISTINCT_WEIGHTS, eph.data(), &held);
+#else
+                        pm::SharedMatchingGraph part = user_graph.to_shared_matching_graph(pm::NUM_DISTINCT_WEIGHTS, &held);
+#endif
+                        pm::PartialGraphCheck check = pm::verify_partial_against_full(full, part, held, unresolved);
+                        for (const auto& e : check.errors) ADD_FAILURE() << e;
+                        EXPECT_EQ(check.num_errors, 0u);
+                        EXPECT_LE(check.num_held, check.total_nodes);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// On a longer run each PE should hold far less than the whole graph.
+TEST(SubsetPlan, PartialGraphIsSmallerThanFull) {
+    ScopedObsConfig cfg(5);
+    const int num_obs = 4;
+    std::vector<pm::SurgerySpec> specs = {{0, 1, 30, 4}, {2, 3, 30, 4}};
+    auto base = pm::MultiObsDemGenerator::generate_base_dem("surface_code", "rotated_memory_x", 3, 60, 0.01);
+    pm::MultiObsDemGenerator generator(std::move(base), num_obs, specs, 0.02, 2);
+    stim::DetectorErrorModel dem = generator.generate();
+    pm::UserGraph user_graph = pm::detector_error_model_to_user_graph(dem, false, pm::NUM_DISTINCT_WEIGHTS);
+    const size_t total = user_graph.nodes.size();
+#ifdef USE_SHMEM
+    std::vector<pm::DetectorNodeEphemeralFields> eph(total);
+#endif
+    const int K_p = (int)user_graph.p_per_obs_patch, K_vb = (int)user_graph.vb_per_obs_patch;
+    auto seams = pm::compute_seam_infos_from_spec(specs, (int)user_graph.num_rounds, 5, K_p, K_vb, 1);
+    for (int pid = 0; pid < 4; ++pid) {  // 4 PEs, one observable each
+        pm::HeldSet held = pm::compute_held_set_obs(
+            user_graph.num_partitions, user_graph.num_virtual_boundaries, num_obs, K_p, K_vb, pid, 1, seams);
+#ifdef USE_SHMEM
+        pm::SharedMatchingGraph part = user_graph.to_shared_matching_graph(pm::NUM_DISTINCT_WEIGHTS, eph.data(), &held);
+#else
+        pm::SharedMatchingGraph part = user_graph.to_shared_matching_graph(pm::NUM_DISTINCT_WEIGHTS, &held);
+#endif
+        size_t num_held = 0;
+        for (size_t i = 0; i < total; ++i) num_held += held.node_held(part.node_part_id[i]);
+        EXPECT_LT(num_held, total * 6 / 10) << "pid " << pid;  // ~1 obs of 4 plus a window and seam nodes
+    }
+}
+
+namespace {
+size_t resident_bytes() {
+    std::ifstream f("/proc/self/statm");
+    size_t size_pages = 0, resident_pages = 0;
+    f >> size_pages >> resident_pages;
+    return resident_pages * 4096;
+}
+}  // namespace
+
+// A lazy node array reserves address space for every node but only the constructed nodes become resident.
+TEST(SubsetPlan, LazyNodeArrayOnlyResidentWhereConstructed) {
+    const size_t n = 20'000'000;  // several GB of address space
+    const size_t before = resident_bytes();
+    pm::MatchingGraph graph(n, 1, pm::MatchingGraph::LazyNodes{});
+    for (size_t i = 5'000'000; i < 5'010'000; ++i) graph.construct_node(i);
+    graph.nodes[5'000'000].neighbors.push_back(&graph.nodes[5'000'001]);
+    const size_t after = resident_bytes();
+    EXPECT_EQ(graph.nodes.size(), n);
+    EXPECT_EQ(&graph.nodes[12345] - graph.nodes.data(), 12345);  // contiguous, globally indexed
+    EXPECT_EQ(graph.nodes[5'000'005].vb, -1);                     // constructed nodes have default fields
+    EXPECT_LT(after - before, size_t(200) << 20) << "resident grew by " << (after - before) << " bytes";
 }

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "pymatching/sparse_blossom/driver/helpers/dem_generator.h"
+#include "pymatching/sparse_blossom/driver/parallel/held_set.h"
 #include "pymatching/sparse_blossom/flooder/graph.h"
 
 namespace pm {
@@ -56,6 +57,46 @@ void compute_partition_vb_bounds(
     size_t num_virtual_boundaries,
     std::vector<std::pair<size_t, size_t>>& partition_bounds,
     std::vector<std::pair<size_t, size_t>>& vb_bounds);
+
+/// Partitions / virtual boundaries a PE must have fully built under the OBS strategy (observable-major global
+/// ids: observable o owns partitions [o*K_p, (o+1)*K_p) and vbs [o*K_vb, (o+1)*K_vb); seam s is vb K_vb*P+s):
+///   - every partition and vb of its own observables [my_obs_start, my_obs_start+my_obs_count);
+///   - for every seam with exactly one observable on this PE (a cross-rank task): the seam's own vb, and on the
+///     remote observable the window partitions [vb_left+1, vb_right] and the vbs strictly inside the window
+///     [vb_left+1, vb_right-1]. The vb just outside each end (vb_left, vb_right) bounds the fusion and is
+///     inactive for it, so it only needs to exist as a stub (UserGraph::to_shared_matching_graph builds every
+///     unheld neighbour of a held node as a stub with vb stamped);
+///   - for a seam with both observables local: just the seam's vb.
+/// `seam_infos` must be the k-padded windows BEFORE conflict resolution: a seam's nodes keep edges to every
+/// round of the seam's span on both observables, and conflict resolution only narrows the windows the
+/// decoding tasks use, not which nodes those edges reach.
+HeldSet compute_held_set_obs(
+    size_t num_partitions,
+    size_t num_virtual_boundaries,
+    int num_obs_patches,
+    int K_p,
+    int K_vb,
+    int my_obs_start,
+    int my_obs_count,
+    const std::vector<SeamInfo>& seam_infos);
+
+/// Result of comparing a partial (held-set) graph against the full graph built from the same UserGraph.
+struct PartialGraphCheck {
+    std::vector<std::string> errors;  // first max_errors mismatches
+    size_t num_errors{0};
+    size_t total_nodes{0}, num_held{0}, num_stubs{0};
+};
+
+/// Verifies `part` (built with `held`) against `full`: identical global metadata; every held node identical
+/// (neighbour identity and order, weights, observable masks, vb, obs_patch_id); every unheld neighbour of a held
+/// node is a stub (vb node, vb / obs_patch_id stamped, no neighbours) sitting on the outer end of some window
+/// (`unresolved_seam_infos`) or on a seam's vb; every other unheld slot is untouched (all-zero bytes).
+PartialGraphCheck verify_partial_against_full(
+    const SharedMatchingGraph& full,
+    const SharedMatchingGraph& part,
+    const HeldSet& held,
+    const std::vector<SeamInfo>& unresolved_seam_infos,
+    size_t max_errors = 20);
 
 }  // namespace pm
 
