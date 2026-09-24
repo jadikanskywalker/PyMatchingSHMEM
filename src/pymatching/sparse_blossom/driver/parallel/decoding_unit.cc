@@ -1357,8 +1357,6 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
 
     // 1. Isolate Solution
     auto* regions_start_ptr = get_local_regions_ptr(shot_container_id, p_start);
-    auto* extracted_fields_start_ptr = get_extracted_fields_ptr(shot_container_id, p_start);
-    size_t extracted_fields_total_bytes = p_k * regions_nelems_per_solver * sizeof(GraphFillRegionExtractedFields);
     size_t nodes_nelems_total = graph.partition_bounds[p_end].second - graph.partition_bounds[p_start].first + 1;
 
     if (DEBUG) {
@@ -1532,16 +1530,22 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
                          nodes_nelems_total * sizeof(DetectorNodeEphemeralFields),
                          other_pid);
 
-    if (DEBUG) {
-        t_out << "    sending GraphFillRegionExtractedFields" << std::endl
-              << "      Extracted Fields Base: " << extracted_fields_start_ptr << std::endl
-              << "      Nelems: " << p_k * regions_nelems_per_solver << std::endl << std::flush;
+    // One put per partition's arena, bounded to its highest allocated slot.
+    for (int i = 0; i < p_k; ++i) {
+        auto& arena = solver_for(shot_container_id, p_start + i)->flooder.region_arena;
+        size_t nelems = (size_t)(arena.last_allocated_id + 1);
+        if (DEBUG) {
+            t_out << "    sending GraphFillRegionExtractedFields" << std::endl
+                  << "      Extracted Fields Base: " << arena.extracted_field << std::endl
+                  << "      Nelems: " << nelems << " of " << regions_nelems_per_solver << std::endl << std::flush;
+        }
+        if (nelems == 0) continue;
+        shmem_ctx_putmem_nbi(t.context_shm,
+                             arena.extracted_field,
+                             arena.extracted_field,
+                             nelems * sizeof(GraphFillRegionExtractedFields),
+                             other_pid);
     }
-    shmem_ctx_putmem_nbi(t.context_shm,
-                         extracted_fields_start_ptr,
-                         extracted_fields_start_ptr,
-                         extracted_fields_total_bytes,
-                         other_pid);
 
     // Send BlossomChild array
     //   Sent as one block from the base of partition_start
@@ -1844,7 +1848,7 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(
             }
         }
         // Copy bitmap
-        memcpy(bitmap_dst.data(), bitmap_base + i*bitmap_len, bitmap_dst.size() * sizeof(uint64_t));
+        region_arena.adopt_bitmap(bitmap_base + i*bitmap_len);
 
         GraphFillRegion* p_regions_base = region_arena.local_regions;
 

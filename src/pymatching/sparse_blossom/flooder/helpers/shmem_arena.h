@@ -16,6 +16,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <new>
@@ -43,6 +44,8 @@ struct GraphFillRegionArena {
     // One past the highest slot index ever constructed. Allocation always takes the lowest free bit, so
     // every slot below this has been constructed at least once and every slot at or above it never has.
     size_t constructed_count{0};
+    // Highest slab index currently taken, or -1 if none: a sender only needs to put extracted_field up to here.
+    ptrdiff_t last_allocated_id{-1};
 
     // Heap fallback. heap_extracted_fields[i] belongs to allocated[i].
     std::vector<GraphFillRegion*> allocated;
@@ -92,6 +95,26 @@ struct GraphFillRegionArena {
         }
     }
 
+    // Rescans backwards from last_allocated_id for the highest taken slot.
+    void recompute_last_allocated_id() {
+        ptrdiff_t word_id = last_allocated_id / 64;
+        for (; word_id >= 0; --word_id) {
+            uint64_t taken = ~shmem_bitmap[word_id];
+            if (taken) {
+                last_allocated_id = word_id * 64 + 63 - __builtin_clzll(taken);
+                return;
+            }
+        }
+        last_allocated_id = -1;
+    }
+
+    // Replaces the bitmap with a sender's (num_words words).
+    void adopt_bitmap(const uint64_t* src) {
+        std::memcpy(shmem_bitmap.data(), src, shmem_bitmap.size() * sizeof(uint64_t));
+        last_allocated_id = (ptrdiff_t)shmem_bitmap.size() * 64 - 1;
+        recompute_last_allocated_id();
+    }
+
     // Constructs every slot up to and including idx that has never been constructed. keep_extracted
     // leaves the extracted fields bytes alone (they were put there by a remote sender).
     void ensure_constructed(size_t idx, bool keep_extracted) {
@@ -115,6 +138,9 @@ struct GraphFillRegionArena {
                 size_t available_bit = __builtin_ctzll(word);       // find first bit == 1
                 shmem_bitmap[word_id] &= ~(1ULL << available_bit);  // set bit to 0 (taken)
                 size_t idx = word_id * 64 + available_bit;
+                if ((ptrdiff_t)idx > last_allocated_id) {
+                    last_allocated_id = (ptrdiff_t)idx;
+                }
                 if (idx >= constructed_count) {
                     ensure_constructed(idx, false);
                 } else {
@@ -158,6 +184,9 @@ struct GraphFillRegionArena {
         if (p >= local_regions && p < local_regions + shmem_buffer_size) {
             size_t idx = p - local_regions;
             shmem_bitmap[idx / 64] |= (1ULL << (idx % 64));  // set bit to 1 (free)
+            if ((ptrdiff_t)idx == last_allocated_id) {
+                recompute_last_allocated_id();
+            }
         } else {
             available.push_back(p);
         }
