@@ -1,0 +1,211 @@
+#include "pymatching/sparse_blossom/driver/parallel/subset_plan.h"
+
+#include <algorithm>
+#include <map>
+#include <stdexcept>
+
+namespace {
+
+void throw_degenerate_window(int pid, int squeezed, int against, const pm::SeamInfo& s) {
+    throw std::invalid_argument(
+        "Rank " + std::to_string(pid) + ": global seam window conflict resolution squeezed seam " +
+        std::to_string(squeezed) + " to a degenerate window (vb_left=" + std::to_string(s.vb_left) +
+        ", vb_right=" + std::to_string(s.vb_right) + ") while resolving against seam " +
+        std::to_string(against) +
+        " -- 3+ seams sharing overlapping observable sets within too few partitions is not currently "
+        "supported.");
+}
+
+}  // namespace
+
+int pm::bound_effective_k(
+    int k, int n_pes, size_t num_partitions, size_t p_per_obs_patch, bool obs_strategy, std::string* note) {
+    size_t p_per_pe = num_partitions / n_pes;
+    if (n_pes == 2 && (size_t)k > num_partitions / 2) {
+        k = (int)(num_partitions / 2);
+        if (note) *note = "NOTE: k set to " + std::to_string(k) + " for 2 PEs";
+    } else {
+        if (p_per_pe < 2) {
+            throw std::invalid_argument("The number of partitions per PE should be >= 2 for more than 2 ranks.");
+        } else if (!obs_strategy && (size_t)k > p_per_pe / 2) {
+            k = (int)(p_per_pe / 2);
+            if (note) *note = "NOTE: k bounded to " + std::to_string(k);
+        } else if (obs_strategy && (size_t)k > p_per_obs_patch) {
+            k = (int)p_per_obs_patch;
+            if (note) *note = "NOTE: k bounded to " + std::to_string(k);
+        }
+    }
+    return k;
+}
+
+std::vector<pm::SeamInfo> pm::compute_seam_infos_from_graph(const SharedMatchingGraph& graph, int k) {
+    const int K_p = (int)graph.p_per_obs_patch;
+    const int K_vb = (int)graph.vb_per_obs_patch;
+    const int num_seams = (int)graph.num_virtual_boundaries - K_vb * (int)graph.num_obs_patches;
+    std::vector<SeamInfo> seam_infos(num_seams);
+    for (int s = 0; s < num_seams; ++s) {
+        auto [first, last] = graph.vb_bounds[K_vb * graph.num_obs_patches + s];
+        std::map<int, std::pair<int, int>> obs_part_range;  // obs_id -> (min_local_p, max_local_p)
+        for (size_t ni = first; ni <= last; ++ni) {
+            for (auto* nbr : graph.graph_ptr->nodes[ni].neighbors) {
+                if (nbr == nullptr) continue;  // boundary
+                int nbr_idx = (int)(nbr - graph.graph_ptr->nodes.data());
+                int part_id = graph.node_part_id[nbr_idx];
+                int obs_id, low_p, high_p;
+                if (part_id >= 0) {  // partition node
+                    obs_id = part_id / K_p;
+                    low_p = part_id % K_p;
+                    high_p = low_p;
+                } else {
+                    if (K_vb == 0) continue;  // no intra-obs VBs possible
+                    int global_vb = -part_id - 1;
+                    obs_id = global_vb / K_vb;
+                    if (obs_id >= (int)graph.num_obs_patches) continue;  // cross-obs seam node
+                    int local_vb = global_vb % K_vb;
+                    low_p = local_vb - 1;
+                    high_p = local_vb;
+                }
+                auto [it, inserted] = obs_part_range.try_emplace(obs_id, low_p, high_p);
+                if (!inserted) {
+                    it->second.first = std::min(it->second.first, low_p);
+                    it->second.second = std::max(it->second.second, high_p);
+                }
+            }
+        }
+        if (obs_part_range.empty()) {
+            throw std::invalid_argument("Seam " + std::to_string(s) + " has no neighbours in any observable.");
+        }
+        auto it = obs_part_range.begin();
+        int oi = it->first;
+        int vb_left = std::max(it->second.first - k - 1, -1);
+        int vb_right = std::min(it->second.second + k, K_p - 1);
+        ++it;
+        int oj = (it != obs_part_range.end()) ? it->first : oi;
+        seam_infos[s] = {oi, oj, vb_left, vb_right};
+    }
+    return seam_infos;
+}
+
+std::vector<pm::SeamInfo> pm::compute_seam_infos_from_spec(
+    const std::vector<SurgerySpec>& surgeries, int num_rounds, int M, int K_p, int K_vb, int k) {
+    if (M < 2 || num_rounds < 2) {
+        throw std::invalid_argument("compute_seam_infos_from_spec requires M >= 2 and num_rounds >= 2.");
+    }
+    std::vector<SeamInfo> seam_infos;
+    seam_infos.reserve(surgeries.size());
+    for (size_t s = 0; s < surgeries.size(); ++s) {
+        const SurgerySpec& spec = surgeries[s];
+        if (spec.duration < 1) {
+            throw std::invalid_argument("Seam " + std::to_string(s) + " has no rounds (duration < 1).");
+        }
+        int lo = INT32_MAX, hi = INT32_MIN;
+        for (int step = 0; step < spec.duration; ++step) {
+            // build_seams snaps each target round to the nearest existing round, 0..num_rounds-1.
+            int r = std::clamp(spec.start_round + step, 0, num_rounds - 1);
+            int b = r / M;
+            // A partition round lies in partition b. A virtual-boundary round (last of its M-round block)
+            // is tagged as vb b and touches partitions [b-1, b]; a vb that would be the very last round is
+            // folded into the final partition (see partition_nodes_by_obs_patch).
+            bool is_vb_round = (r % M == M - 1) && (r < num_rounds - 1);
+            int low_p = is_vb_round ? b - 1 : b;
+            int high_p = b;
+            if (is_vb_round && b >= K_vb) {
+                throw std::logic_error("compute_seam_infos_from_spec: vb round beyond K_vb.");
+            }
+            lo = std::min(lo, low_p);
+            hi = std::max(hi, high_p);
+        }
+        // Both observables see the same rounds; the window is sized from the lower-numbered one.
+        SeamInfo si;
+        si.oi = std::min(spec.obs_a, spec.obs_b);
+        si.oj = std::max(spec.obs_a, spec.obs_b);
+        si.vb_left = std::max(lo - k - 1, -1);
+        si.vb_right = std::min(hi + k, K_p - 1);
+        seam_infos.push_back(si);
+    }
+    return seam_infos;
+}
+
+void pm::resolve_seam_window_conflicts(std::vector<SeamInfo>& seam_infos, int pid) {
+    const int num_seams = (int)seam_infos.size();
+    for (int si_idx = 0; si_idx < num_seams; ++si_idx) {
+        auto& si = seam_infos[si_idx];
+        for (int sj_idx = si_idx + 1; sj_idx < num_seams; ++sj_idx) {
+            auto& sj = seam_infos[sj_idx];
+            if (si.oi != sj.oi && si.oi != sj.oj && si.oj != sj.oi && si.oj != sj.oj) continue;
+            if (si.vb_left <= sj.vb_left) {
+                if (si.vb_right > sj.vb_left) {
+                    int mid = (si.vb_right + sj.vb_left + 1) / 2;
+                    si.vb_right = mid;
+                    sj.vb_left = mid;
+                    // A prior adjustment (from a different overlapping pair sharing si or sj) can already
+                    // have squeezed the other side of this same seam's window.
+                    if (si.vb_left >= si.vb_right) throw_degenerate_window(pid, si_idx, sj_idx, si);
+                    if (sj.vb_left >= sj.vb_right) throw_degenerate_window(pid, sj_idx, si_idx, sj);
+                }
+            } else {
+                if (sj.vb_right > si.vb_left) {
+                    int mid = (sj.vb_right + si.vb_left + 1) / 2;
+                    sj.vb_right = mid;
+                    si.vb_left = mid;
+                    if (si.vb_left >= si.vb_right) throw_degenerate_window(pid, si_idx, sj_idx, si);
+                    if (sj.vb_left >= sj.vb_right) throw_degenerate_window(pid, sj_idx, si_idx, sj);
+                }
+            }
+        }
+    }
+}
+
+void pm::assign_extraction_unit_spans(std::vector<SeamInfo>& seam_infos, int L) {
+    for (auto& si : seam_infos) {
+        si.unit_lo = (si.vb_left + 1) / L;
+        si.unit_hi = si.vb_right / L;
+    }
+}
+
+void pm::compute_partition_vb_bounds(
+    const std::vector<int>& node_part_id,
+    size_t num_partitions,
+    size_t num_virtual_boundaries,
+    std::vector<std::pair<size_t, size_t>>& partition_bounds,
+    std::vector<std::pair<size_t, size_t>>& vb_bounds) {
+    if (num_partitions <= 0) {
+        throw std::invalid_argument("SharedMatchingGraph requires at least one partition.");
+    }
+    if (node_part_id.empty()) {
+        throw std::invalid_argument("SharedMatchingGraph requires node partition assignments.");
+    }
+    partition_bounds.resize(num_partitions);
+    vb_bounds.resize(num_virtual_boundaries);
+    partition_bounds[0].first = 0;
+    size_t partition_bounds_idx = 0;
+    size_t vb_bounds_idx = 0;
+    int last_part_id = node_part_id[0];
+    for (int i = 1; i < (int)node_part_id.size(); ++i) {
+        if (node_part_id[i] == last_part_id) {
+            continue;
+        } else if (last_part_id < 0 && node_part_id[i] < 0) {  // vb -> vb
+            vb_bounds[vb_bounds_idx++].second = i - 1;
+            vb_bounds[vb_bounds_idx].first = i;
+            last_part_id = node_part_id[i];
+        } else if (node_part_id[i] < 0) {  // p -> vb
+            partition_bounds[partition_bounds_idx].second = i - 1;
+            vb_bounds[vb_bounds_idx].first = i;
+            last_part_id = node_part_id[i];
+        } else if (last_part_id < 0) {  // vb -> p
+            vb_bounds[vb_bounds_idx++].second = i - 1;
+            partition_bounds[++partition_bounds_idx].first = i;
+            last_part_id = node_part_id[i];
+        } else {  // p -> p (obs boundary)
+            partition_bounds[partition_bounds_idx].second = i - 1;
+            partition_bounds[++partition_bounds_idx].first = i;
+            last_part_id = node_part_id[i];
+        }
+    }
+    // Close the final block (partition or vb if cross-obs nodes are last).
+    if (last_part_id < 0) {
+        vb_bounds[vb_bounds_idx].second = (int)node_part_id.size() - 1;
+    } else {
+        partition_bounds[partition_bounds_idx].second = (int)node_part_id.size() - 1;
+    }
+}

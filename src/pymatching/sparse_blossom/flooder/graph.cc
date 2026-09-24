@@ -20,6 +20,7 @@
 
 #include "graph.h"
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
+#include "pymatching/sparse_blossom/driver/parallel/subset_plan.h"
 #include "pymatching/sparse_blossom/flooder_matcher_interop/mwpm_event.h"
 
 #include <iostream>
@@ -248,7 +249,7 @@ pm::SharedMatchingGraph::SharedMatchingGraph(
     size_t vb_per_obs_patch_
 )
 : graph_ptr(graph_ptr_),
-    node_part_id(node_part_id_),
+    node_part_id(std::move(node_part_id_)),
     num_partitions(num_partitions_),
     num_virtual_boundaries(num_virtual_boundaries_),
     num_rounds(num_rounds_),
@@ -259,52 +260,9 @@ pm::SharedMatchingGraph::SharedMatchingGraph(
     construct_partition_vb_bounds();
 }
 
-// Scans node_part_id sequentially and fills partition_bounds / vb_bounds.
-// Handles four transition types:
-//   p → vb : close current partition, open new vb entry
-//   vb → p : close current vb entry, open new partition
-//   p → p  : close current partition, open next partition (obs boundary with no vb between)
-//   vb → vb: close current vb entry, open next vb entry (adjacent seam sections)
+// Scans node_part_id sequentially and fills partition_bounds / vb_bounds (see compute_partition_vb_bounds).
 void pm::SharedMatchingGraph::construct_partition_vb_bounds() {
-    if (num_partitions <= 0) {
-        throw std::invalid_argument("SharedMatchingGraph requires at least one partition.");
-    }
-    if (node_part_id.empty()) {
-        throw std::invalid_argument("SharedMatchingGraph requires node partition assignments.");
-    }
-    partition_bounds.resize(num_partitions);
-    vb_bounds.resize(num_virtual_boundaries);
-    partition_bounds[0].first = 0;
-    size_t partition_bounds_idx = 0;
-    size_t vb_bounds_idx = 0;
-    int last_part_id = node_part_id[0];
-    for (int i = 1; i < (int)node_part_id.size(); ++i) {
-        if (node_part_id[i] == last_part_id) {
-            continue;
-        } else if (last_part_id < 0 && node_part_id[i] < 0) { // vb → vb
-            vb_bounds[vb_bounds_idx++].second = i - 1;
-            vb_bounds[vb_bounds_idx].first = i;
-            last_part_id = node_part_id[i];
-        } else if (node_part_id[i] < 0) {                     // p → vb
-            partition_bounds[partition_bounds_idx].second = i - 1;
-            vb_bounds[vb_bounds_idx].first = i;
-            last_part_id = node_part_id[i];
-        } else if (last_part_id < 0) {                        // vb → p
-            vb_bounds[vb_bounds_idx++].second = i - 1;
-            partition_bounds[++partition_bounds_idx].first = i;
-            last_part_id = node_part_id[i];
-        } else {                                               // p → p (obs boundary)
-            partition_bounds[partition_bounds_idx].second = i - 1;
-            partition_bounds[++partition_bounds_idx].first = i;
-            last_part_id = node_part_id[i];
-        }
-    }
-    // Close the final block (partition or vb if cross-obs nodes are last).
-    if (last_part_id < 0) {
-        vb_bounds[vb_bounds_idx].second = (int)node_part_id.size() - 1;
-    } else {
-        partition_bounds[partition_bounds_idx].second = (int)node_part_id.size() - 1;
-    }
+    compute_partition_vb_bounds(node_part_id, num_partitions, num_virtual_boundaries, partition_bounds, vb_bounds);
 
     if (DEBUG) {
         std::cout << "construct_partition_vb_bounds:"

@@ -272,6 +272,13 @@ int main_predict(int argc, const char** argv) {
 
     if (!loaded_from_graph_cache) {
         user_graph = pm::detector_error_model_to_user_graph(dem, enable_correlations, num_buckets);
+#ifdef ENABLE_DRAW_FLAGS
+        if (!draw_frames)
+#endif
+        {
+            // Only frame drawing reads the DEM after this point; release it before graph construction.
+            dem = stim::DetectorErrorModel();
+        }
         if (!graph_cache_path.empty()) {
             // Only one rank writes: every PE independently re-parses the same DEM and would
             // otherwise fopen(..., "wb") + fwrite the same path concurrently, corrupting it

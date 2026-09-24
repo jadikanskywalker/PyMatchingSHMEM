@@ -75,6 +75,7 @@ set(SOURCE_FILES_NO_MAIN
 list(APPEND SOURCE_FILES_NO_MAIN
     src/pymatching/sparse_blossom/driver/parallel/decoding_unit.cc
     src/pymatching/sparse_blossom/driver/parallel/shot_buffer.cc
+    src/pymatching/sparse_blossom/driver/parallel/subset_plan.cc
 )
 
 set(TEST_FILES
@@ -100,6 +101,7 @@ set(TEST_FILES
         src/pymatching/sparse_blossom/search/search_flooder.test.cc
         src/pymatching/sparse_blossom/driver/user_graph.test.cc
         src/pymatching/sparse_blossom/driver/helpers/graph_cache.test.cc
+        src/pymatching/sparse_blossom/driver/parallel/subset_plan.test.cc
         )
 
 set(PERF_FILES
@@ -161,6 +163,17 @@ if(USE_SHMEM)
     target_compile_definitions(pymatching_tests PRIVATE USE_SHMEM)
 endif()
 target_link_libraries(pymatching_tests GTest::gtest_main GTest::gmock_main libstim)
+
+# Standalone target for the subset-graph planning tests (builds without the rest of the test suite).
+add_executable(subset_plan_tests ${SOURCE_FILES_NO_MAIN} src/pymatching/sparse_blossom/driver/parallel/subset_plan.test.cc)
+if (NOT (MSVC))
+    target_link_options(subset_plan_tests PRIVATE -pthread)
+endif ()
+target_link_libraries(subset_plan_tests OpenMP::OpenMP_CXX)
+if(USE_SHMEM)
+    target_compile_definitions(subset_plan_tests PRIVATE USE_SHMEM)
+endif()
+target_link_libraries(subset_plan_tests GTest::gtest_main GTest::gmock_main libstim)
 
 add_executable(pymatching_perf ${SOURCE_FILES_NO_MAIN} ${PERF_FILES})
 target_compile_options(pymatching_perf PRIVATE ${ARCH_OPT})

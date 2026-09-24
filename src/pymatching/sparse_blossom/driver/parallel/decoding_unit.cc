@@ -29,6 +29,7 @@
 
 // #include "profiling/profiling_json.h"
 #include "pymatching/sparse_blossom/driver/user_graph.h"
+#include "pymatching/sparse_blossom/driver/parallel/subset_plan.h"
 
 namespace {
     // Helper function to format pointers (replacement for std::format with {:p})
@@ -99,6 +100,9 @@ pm::DecodingUnit::DecodingUnit(
     if (needs_search_flooder) {
         search_graph_ptr = user_graph.to_shared_search_graph(num_distinct_weights);
     }
+    // The UserGraph is no longer needed once both graphs are built; release it before the rest of the
+    // constructor allocates (this by-value parameter would otherwise live until the constructor returns).
+    user_graph = pm::UserGraph();
     // Per-solver GraphFillRegion arena size (see REGION_ARENA_BUFFER_FACTOR's own comment) -- computed
     // unconditionally (not just for USE_SHMEM) since build_solvers() now also uses it to pre-reserve
     // Arena::available's capacity for the plain-threads build, closing off concurrent-push_back
@@ -110,22 +114,12 @@ pm::DecodingUnit::DecodingUnit(
     }
 #ifdef USE_SHMEM
     // Bound k
-    int p_per_pe = graph.num_partitions / n_pes;
-    if (n_pes == 2 && config_parallel::k > graph.num_partitions/2) {
-        config_parallel::k = graph.num_partitions/2;
-        std::cout << "NOTE: k set to " << config_parallel::k << " for 2 PEs" << std::endl << std::flush;
-    } else {
-        if (p_per_pe < 2) {
-            throw std::invalid_argument("The number of partitions per PE should be >= 2 for more than 2 ranks.");
-        } else if (config_parallel::division_strategy == config_parallel::ROUND && config_parallel::k > p_per_pe / 2) {
-            // Bounding k for correctness
-            config_parallel::k = p_per_pe / 2;
-            std::cout << "NOTE: k bounded to " << config_parallel::k << std::endl << std::flush;
-        } else if (config_parallel::division_strategy == config_parallel::OBS && config_parallel::k > graph.p_per_obs_patch) {
-            // Bounding k for correctness
-            config_parallel::k = graph.p_per_obs_patch;
-            std::cout << "NOTE: k bounded to " << config_parallel::k << std::endl << std::flush;
-        }
+    {
+        std::string k_note;
+        config_parallel::k = bound_effective_k(
+            config_parallel::k, n_pes, graph.num_partitions, graph.p_per_obs_patch,
+            config_parallel::division_strategy == config_parallel::OBS, &k_note);
+        if (!k_note.empty()) std::cout << k_note << std::endl << std::flush;
     }
     // --- Compute num_cross_rank_fusions before allocations ---
     if (config_parallel::division_strategy == config_parallel::OBS) {
@@ -648,141 +642,20 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
 #endif
     if (DEBUG) std::cout << "my_obs_start: " << my_obs_start << ", n=" << my_obs_count << "\n" << std::flush;
 
-    // For each seam: determine the two obs patches it connects and the local partition
-    // range it touches (used for vb_left/vb_right on cross-PE fusion tasks).
-    // unit_lo/unit_hi (populated below, after window conflict resolution) are this seam's extraction-
-    // unit span for preemptive extraction -- see now-its-time-to-jazzy-turing.md Design §1.
-    struct SeamInfo { int oi, oj, vb_left, vb_right; int unit_lo{-1}, unit_hi{-1}; };
-    std::vector<SeamInfo> seam_infos(num_seams);
-    for (int s = 0; s < num_seams; ++s) {
-        auto [first, last] = graph.vb_bounds[K_vb * graph.num_obs_patches + s];
-        std::map<int, std::pair<int,int>> obs_part_range;  // obs_id → (min_local_p, max_local_p)
-#ifdef DEBUG
-        std::string p_string;
-#endif
-        for (size_t ni = first; ni <= last; ++ni) {
-            for (auto* nbr : graph.graph_ptr->nodes[ni].neighbors) {
-                if (nbr == nullptr) continue; // boundary
-                int nbr_idx = (int)(nbr - graph.graph_ptr->nodes.data());
-                int part_id = graph.node_part_id[nbr_idx];
-                int obs_id, low_p, high_p;
-                if (part_id >= 0) { // partition node
-                    obs_id = part_id / K_p;
-                    low_p = part_id % K_p;
-                    high_p = low_p;
-                    if (DEBUG) p_string += "  obs" + std::to_string(obs_id);
-                } else {
-                    if (K_vb == 0) continue;  // no intra-obs VBs possible
-                    int global_vb = -part_id - 1;
-                    int obs_id = global_vb / K_vb;
-                    if (obs_id >= (int)graph.num_obs_patches) continue;  // cross-obs seam node
-                    int local_vb = global_vb % K_vb;
-                    low_p  = local_vb - 1;
-                    high_p = local_vb;
-                    if (DEBUG) p_string += "  obs" + std::to_string(obs_id);
-                }
-                auto [it, inserted] = obs_part_range.try_emplace(obs_id, low_p, high_p);
-                if (!inserted) {
-                    it->second.first  = std::min(it->second.first,  low_p);
-                    it->second.second = std::max(it->second.second, high_p);
-                }
-            }
-        }
-
-        auto it = obs_part_range.begin();
-        int oi    = it->first;
-        int vb_left = std::max(it->second.first - config_parallel::k - 1, -1);
-        int vb_right = std::min(it->second.second + config_parallel::k, K_p-1);
-        ++it;
-        int oj = (it != obs_part_range.end()) ? it->first : oi;
-        seam_infos[s] = { oi, oj, vb_left, vb_right };
-        if (DEBUG) std::cout << "PE" << pid << " seam " << s << ": obs " << oi << " -- obs " << oj
-                             << " node_bounds [" << first << ", " << last << "]\n"
-                             << " vb_left=" << vb_left << " vb_right=" << vb_right << "\n    "
-                             << p_string << "\n" 
-                             << std::flush;
-    }
-
-    // --- Global seam window conflict resolution ---
-    // All PEs compute this identically (same seam_infos, same iteration order)
-    // so every PE ends up with the same adjusted windows.
-    for (int si_idx = 0; si_idx < num_seams; ++si_idx) {
-        auto& si = seam_infos[si_idx];
-        for (int sj_idx = si_idx + 1; sj_idx < num_seams; ++sj_idx) {
-            auto& sj = seam_infos[sj_idx];
-            if (si.oi != sj.oi && si.oi != sj.oj &&
-                si.oj != sj.oi && si.oj != sj.oj)
-                continue;
-            if (si.vb_left <= sj.vb_left) {
-                if (si.vb_right > sj.vb_left) {
-                    int mid = (si.vb_right + sj.vb_left + 1) / 2;
-                    if (DEBUG) std::cout << "  Global adjust: seam " << si_idx
-                        << " vb_right " << si.vb_right << " -> " << mid
-                        << ", seam " << sj_idx
-                        << " vb_left " << sj.vb_left << " -> " << mid << "\n" << std::flush;
-                    si.vb_right = mid;
-                    sj.vb_left  = mid;
-                    // A prior adjustment (from a different overlapping pair sharing si or sj) can
-                    // already have squeezed the other side of this same seam's window -- this pairwise
-                    // resolution only ever looks at one conflicting pair at a time, so it has no way to
-                    // notice a seam getting squeezed from both sides down to (or past) zero width.
-                    if (si.vb_left >= si.vb_right) {
-                        throw std::invalid_argument("Rank " + std::to_string(pid) + ": global seam window "
-                            "conflict resolution squeezed seam " + std::to_string(si_idx) + " to a "
-                            "degenerate window (vb_left=" + std::to_string(si.vb_left) + ", vb_right="
-                            + std::to_string(si.vb_right) + ") while resolving against seam "
-                            + std::to_string(sj_idx) + " -- 3+ seams sharing overlapping observable sets "
-                            "within too few partitions is not currently supported.");
-                    }
-                    if (sj.vb_left >= sj.vb_right) {
-                        throw std::invalid_argument("Rank " + std::to_string(pid) + ": global seam window "
-                            "conflict resolution squeezed seam " + std::to_string(sj_idx) + " to a "
-                            "degenerate window (vb_left=" + std::to_string(sj.vb_left) + ", vb_right="
-                            + std::to_string(sj.vb_right) + ") while resolving against seam "
-                            + std::to_string(si_idx) + " -- 3+ seams sharing overlapping observable sets "
-                            "within too few partitions is not currently supported.");
-                    }
-                }
-            } else {
-                if (sj.vb_right > si.vb_left) {
-                    int mid = (sj.vb_right + si.vb_left + 1) / 2;
-                    if (DEBUG) std::cout << "  Global adjust: seam " << sj_idx
-                        << " vb_right " << sj.vb_right << " -> " << mid
-                        << ", seam " << si_idx
-                        << " vb_left " << si.vb_left << " -> " << mid << "\n" << std::flush;
-                    sj.vb_right = mid;
-                    si.vb_left  = mid;
-                    if (si.vb_left >= si.vb_right) {
-                        throw std::invalid_argument("Rank " + std::to_string(pid) + ": global seam window "
-                            "conflict resolution squeezed seam " + std::to_string(si_idx) + " to a "
-                            "degenerate window (vb_left=" + std::to_string(si.vb_left) + ", vb_right="
-                            + std::to_string(si.vb_right) + ") while resolving against seam "
-                            + std::to_string(sj_idx) + " -- 3+ seams sharing overlapping observable sets "
-                            "within too few partitions is not currently supported.");
-                    }
-                    if (sj.vb_left >= sj.vb_right) {
-                        throw std::invalid_argument("Rank " + std::to_string(pid) + ": global seam window "
-                            "conflict resolution squeezed seam " + std::to_string(sj_idx) + " to a "
-                            "degenerate window (vb_left=" + std::to_string(sj.vb_left) + ", vb_right="
-                            + std::to_string(sj.vb_right) + ") while resolving against seam "
-                            + std::to_string(si_idx) + " -- 3+ seams sharing overlapping observable sets "
-                            "within too few partitions is not currently supported.");
-                    }
-                }
-            }
-        }
-    }
+    // Seam windows (vb_left/vb_right on cross-PE fusion tasks): which two observables each seam joins and
+    // the local partition range it touches, then the global window conflict resolution (identical on every
+    // PE: same seam_infos, same iteration order). See subset_plan.h.
+    // unit_lo/unit_hi (assigned below) are each seam's extraction-unit span for preemptive extraction --
+    // see now-its-time-to-jazzy-turing.md Design §1.
+    std::vector<SeamInfo> seam_infos = compute_seam_infos_from_graph(graph, config_parallel::k);
+    resolve_seam_window_conflicts(seam_infos, pid);
 
     // --- Extraction-unit span per seam (preemptive extraction only; harmless to always compute) ---
     // [si.vb_left+1, si.vb_right] (already k-padded, symmetric across both oi's and oj's own local
     // partition numbering -- see now-its-time-to-jazzy-turing.md Design §1) maps directly to the range
     // of L-sized extraction units this seam's deferred span must cover, using the same ustart/L
     // grouping build_extraction_units itself uses.
-    const int L = config_parallel::L;
-    for (auto& si : seam_infos) {
-        si.unit_lo = (si.vb_left + 1) / L;
-        si.unit_hi = si.vb_right / L;
-    }
+    assign_extraction_unit_spans(seam_infos, config_parallel::L);
     if (DEBUG) {
         for (size_t s = 0; s < seam_infos.size(); ++s) {
             auto& si = seam_infos[s];
