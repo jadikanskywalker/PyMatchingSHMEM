@@ -520,13 +520,13 @@ void pm::output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& dete
         if (region == nullptr) continue;
         if (freed_regions.find(region) != freed_regions.end()) continue;
         out << "  region: " << region << std::endl
-                  << "    radius: " << region->radius << std::endl
-                  << "    match.region: " << region->match.region << std::endl
-                  << "    match.edge.loc_to: " << region->match.edge.loc_to;
-        if (!region->match.edge.loc_to) {
+                  << "    radius: " << region->state().radius << std::endl
+                  << "    match.region: " << region->state().match.region << std::endl
+                  << "    match.edge.loc_to: " << region->state().match.edge.loc_to;
+        if (!region->state().match.edge.loc_to) {
             out << "  -  BOUNDARY  -  NO DETECTION EVENT" << std::endl;
         } else {
-            auto ptr = region->match.edge.loc_to;
+            auto ptr = region->state().match.edge.loc_to;
             if (ptr < nodes_begin || ptr >= nodes_end) {
                 out << "  -  INVALID DETECTOR POINTER" << std::endl;
             } else {
@@ -543,11 +543,11 @@ void pm::output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& dete
                     out << "  -  NO DETECTION EVENT" << std::endl;
             }
         }
-        out << "    match.edge.loc_from: " << region->match.edge.loc_from;
-        if (!region->match.edge.loc_from) {
+        out << "    match.edge.loc_from: " << region->state().match.edge.loc_from;
+        if (!region->state().match.edge.loc_from) {
             out << "  -  BOUNDARY  -  NO DETECTION EVENT" << std::endl;
         } else {
-            auto ptr = region->match.edge.loc_from;
+            auto ptr = region->state().match.edge.loc_from;
             if (ptr < nodes_begin || ptr >= nodes_end) {
                 out << "  -  INVALID DETECTOR POINTER" << std::endl;
             } else {
@@ -583,8 +583,8 @@ void pm::output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& dete
             }
         }
         out << "    alt_tree_node: " << region->alt_tree_node << std::endl
-                  << "    blossom_parent: " << region->blossom_parent << std::endl
-                  << "    blossom_parent_top: " << region->blossom_parent_top << std::endl
+                  << "    blossom_parent: " << region->state().blossom_parent << std::endl
+                  << "    blossom_parent_top: " << region->state().blossom_parent_top << std::endl
                   << "    blossom_children.size(): " << region->blossom_children.size() << std::endl;
     }
     out << "DEBUG: partition 0 detector nodes: " << std::endl;

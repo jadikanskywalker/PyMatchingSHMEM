@@ -41,7 +41,8 @@ GraphFlooder::GraphFlooder(
     std::shared_ptr<MatchingGraph> graph,
     int solver_set_idx
 #ifdef USE_SHMEM
-    , GraphFillRegion* shmem_buffer
+    , GraphFillRegionExtractedFields* extracted_field_buffer
+    , GraphFillRegion* local_region_buffer
 #endif
     , size_t region_arena_reserve_size
 #ifdef ENABLE_DRAW_FLAGS
@@ -53,7 +54,7 @@ GraphFlooder::GraphFlooder(
       negative_weight_sum(0)
 #ifdef USE_SHMEM
       , rotating_buffer_idx(solver_set_idx),
-      region_arena(shmem_buffer, region_arena_reserve_size)
+      region_arena(extracted_field_buffer, local_region_buffer, region_arena_reserve_size)
 #else
       , region_arena(region_arena_reserve_size)
 #endif
@@ -235,7 +236,7 @@ void GraphFlooder::reschedule_events_at_detector_node(DetectorNode& detector_nod
 void GraphFlooder::schedule_tentative_shrink_event(GraphFillRegion& region) {
     cumulative_time_int t;
     if (region.shell_area.empty()) {
-        t = region.radius.time_of_x_intercept_for_shrinking();
+        t = region.state().radius.time_of_x_intercept_for_shrinking();
     } else {
         t = region.shell_area.back()->local_radius(rotating_buffer_idx).time_of_x_intercept_for_shrinking();
     }
@@ -256,9 +257,9 @@ void GraphFlooder::do_region_arriving_at_empty_detector_node(
     empty_state.observables_crossed_from_source =
         (from_state.observables_crossed_from_source ^ from_node.neighbor_observables[from_to_empty_index]);
     empty_state.reached_from_source = from_state.reached_from_source;
-    empty_state.radius_of_arrival = region.radius.get_distance_at_time(queue.cur_time);
+    empty_state.radius_of_arrival = region.state().radius.get_distance_at_time(queue.cur_time);
     empty_state.region_that_arrived = &region;
-    empty_state.region_that_arrived_top = region.blossom_parent_top;
+    empty_state.region_that_arrived_top = region.state().blossom_parent_top;
     empty_state.wrapped_radius_cached = empty_node.compute_wrapped_radius(rotating_buffer_idx);
     region.shell_area.push_back(&empty_node);
     reschedule_events_at_detector_node(empty_node);
@@ -383,12 +384,11 @@ GraphFillRegion* GraphFlooder::create_blossom(std::vector<RegionEdge>& contained
     auto* target_arena = contained_regions[0].region->owner_arena;
     // auto* target_arena = &region_arena;
     auto blossom_region = target_arena->alloc_default_constructed();
-    blossom_region->owner_arena = target_arena;
     blossom_region->rotating_buffer_idx = rotating_buffer_idx;
-    blossom_region->radius = VaryingCT::growing_varying_with_zero_distance_at_time(queue.cur_time);
+    blossom_region->state().radius = VaryingCT::growing_varying_with_zero_distance_at_time(queue.cur_time);
     blossom_region->blossom_children = std::move(contained_regions);
     for (auto& region_edge : blossom_region->blossom_children) {
-        region_edge.region->radius = region_edge.region->radius.then_frozen_at_time(queue.cur_time);
+        region_edge.region->state().radius = region_edge.region->state().radius.then_frozen_at_time(queue.cur_time);
         region_edge.region->wrap_into_blossom(blossom_region);
         region_edge.region->shrink_event_tracker.set_no_desired_event();
     }
@@ -427,7 +427,7 @@ FloodCheckEvent GraphFlooder::dequeue_valid() {
 }
 
 void GraphFlooder::set_region_growing(GraphFillRegion& region) {
-    region.radius = region.radius.then_growing_at_time(queue.cur_time);
+    region.state().radius = region.state().radius.then_growing_at_time(queue.cur_time);
 
     // No shrinking event can occur while growing.
     region.shrink_event_tracker.set_no_desired_event();
@@ -440,8 +440,8 @@ void GraphFlooder::set_region_growing(GraphFillRegion& region) {
 }
 
 void GraphFlooder::set_region_frozen(GraphFillRegion& region) {
-    bool was_shrinking = region.radius.is_shrinking();
-    region.radius = region.radius.then_frozen_at_time(queue.cur_time);
+    bool was_shrinking = region.state().radius.is_shrinking();
+    region.state().radius = region.state().radius.then_frozen_at_time(queue.cur_time);
 
     // No shrinking event can occur while frozen.
     region.shrink_event_tracker.set_no_desired_event();
@@ -457,7 +457,7 @@ void GraphFlooder::set_region_frozen(GraphFillRegion& region) {
 }
 
 void GraphFlooder::set_region_shrinking(GraphFillRegion& region) {
-    region.radius = region.radius.then_shrinking_at_time(queue.cur_time);
+    region.state().radius = region.state().radius.then_shrinking_at_time(queue.cur_time);
 
     // Shrinking events can now occur.
     schedule_tentative_shrink_event(region);

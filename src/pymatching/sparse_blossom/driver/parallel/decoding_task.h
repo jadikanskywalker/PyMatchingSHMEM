@@ -276,7 +276,7 @@ struct Task : public TaskBase {
         regions_matched_to_virtual_boundary.clear();
         if (is_fusion) {
             for (auto& region : left_child->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker)
+                if (region->state().match.edge.loc_to && region->state().match.edge.loc_to->vb == vb_marker)
                     regions_to_unmatch.push_back(region);
                 else
                     regions_matched_to_virtual_boundary.push_back(region);
@@ -284,7 +284,7 @@ struct Task : public TaskBase {
             if (left_child == right_child)
                 return; // prevent double copy
             for (auto& region : right_child->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker)
+                if (region->state().match.edge.loc_to && region->state().match.edge.loc_to->vb == vb_marker)
                     regions_to_unmatch.push_back(region);
                 else
                     regions_matched_to_virtual_boundary.push_back(region);
@@ -450,7 +450,7 @@ struct LocalSeamTask : public SpecialTask {
         regions_matched_to_virtual_boundary.clear();
         for (TaskBase* c : children) {
             for (auto& region : c->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker) {
+                if (region->state().match.edge.loc_to && region->state().match.edge.loc_to->vb == vb_marker) {
                     if (std::find(regions_to_unmatch.begin(), regions_to_unmatch.end(), region) == regions_to_unmatch.end())
                         regions_to_unmatch.push_back(region);
                 } else {
@@ -575,7 +575,7 @@ public:
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
         for (auto& region : child->regions_matched_to_virtual_boundary) {
-            if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker) // seam vbs are marked with global part
+            if (region->state().match.edge.loc_to && region->state().match.edge.loc_to->vb == vb_marker) // seam vbs are marked with global part
                 regions_to_unmatch.push_back(region);
             else
                 regions_matched_to_virtual_boundary.push_back(region);

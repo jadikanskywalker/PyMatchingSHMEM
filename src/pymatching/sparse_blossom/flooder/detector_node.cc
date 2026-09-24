@@ -28,8 +28,8 @@ int32_t DetectorNode::compute_wrapped_radius(int rotating_buffer_idx) const {
     int32_t total = 0;
     auto r = s.region_that_arrived;
     while (r != s.region_that_arrived_top) {
-        total += r->radius.y_intercept();
-        r = r->blossom_parent;
+        total += r->state().radius.y_intercept();
+        r = r->state().blossom_parent;
     }
     return total - s.radius_of_arrival;
 }
@@ -51,7 +51,7 @@ GraphFillRegion *DetectorNode::heir_region_on_shatter(int rotating_buffer_idx) c
     GraphFillRegion *r = state(rotating_buffer_idx).region_that_arrived;
     GraphFillRegion *top = state(rotating_buffer_idx).region_that_arrived_top;
     while (true) {
-        GraphFillRegion *p = r->blossom_parent;
+        GraphFillRegion *p = r->state().blossom_parent;
         if (p == top) {
             return r;
         }
@@ -81,11 +81,11 @@ cumulative_time_int DetectorNode::compute_local_radius_at_time_bounded_by_region
         if (*container > bounding_region) {
             break;
         }
-        container_radius += container->radius.get_distance_at_time(time);
+        container_radius += container->state().radius.get_distance_at_time(time);
         if (*container == bounding_region) {
             break;
         }
-        container = container->blossom_parent;
+        container = container->state().blossom_parent;
     }
     return container_radius - s.radius_of_arrival;
 }

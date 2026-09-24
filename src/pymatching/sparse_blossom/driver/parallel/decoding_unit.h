@@ -48,7 +48,7 @@ class UserGraph;
 #define SHMEM_CACHE_LINE_SIZE 64
 
 struct FusionSummary {
-    GraphFillRegion* regions_ptr_base; // index where solving partition's arena begins
+    GraphFillRegion* local_regions_ptr_base; // sender's process-local GraphFillRegion buffer base (for rebasing region pointers)
     DetectorNode* static_nodes_base; // Base address of graph.nodes on the sender PE
     size_t blossom_children_size;
     size_t regions_to_unmatch_size;
@@ -87,7 +87,7 @@ struct DecodingUnit {
     // size_t num_partition_units;
     // Local partition count -- solvers only exist for this PE's own partitions (see build_solvers()
     // and the plan for this refactor: a full Mwpm is unnecessary for a remote partition, only its
-    // SHMEMArena is, see remote_arenas below).
+    // GraphFillRegionArena is, see remote_arenas below).
     size_t num_solvers_per_buffer;
     std::vector<std::shared_ptr<Mwpm>> solvers;
 #ifdef USE_SHMEM
@@ -95,7 +95,7 @@ struct DecodingUnit {
     // get_solution_from_remote_pe can copy a sender's bitmap and stamp owner_arena on rebased regions
     // for later del() bookkeeping -- see region_arena_for(). Built once per shot container in
     // build_solvers(), sized/ordered by remote_index() below.
-    std::vector<SHMEMArena<GraphFillRegion>> remote_arenas;
+    std::vector<GraphFillRegionArena> remote_arenas;
 #endif
     // Global partition id of this PE's own first local partition, and how many local partitions it
     // owns -- both contiguous by construction (obs-major numbering, per-PE contiguous ownership for
@@ -118,7 +118,8 @@ struct DecodingUnit {
 
     // Symmetric memory
     DetectorNodeEphemeralFields* node_ephemeral_fields_ptr{ nullptr }; // ephemeral field buffers for DetectorNodes
-    GraphFillRegion* regions_ptr{ nullptr }; // buffers for region SHMEMArenas
+    GraphFillRegionExtractedFields* extracted_fields_ptr{ nullptr }; // symmetric buffers for region GraphFillRegionArenas
+    GraphFillRegion* local_regions_ptr{ nullptr }; // process-local regions, index-aligned with extracted_fields_ptr
     BlossomChild* child_edges_ptr{ nullptr }; // blossom parent-child relationship buffer
     // uint64_t* atomics_ptr{ nullptr }; // shot counter for each shot container
     unsigned long* task_status_ptr{ nullptr }; // status, signal, and done for each fusion task
@@ -166,8 +167,12 @@ struct DecodingUnit {
         return node_ephemeral_fields_ptr + shot_container_id * nodes_nelems_per_buffer + bounds.first;
     }
 
-    inline GraphFillRegion* get_regions_ptr(size_t shot_container_id, int partition_id) {
-        return regions_ptr + (shot_container_id * graph.num_partitions + partition_id) * regions_nelems_per_solver;
+    inline GraphFillRegionExtractedFields* get_extracted_fields_ptr(size_t shot_container_id, int partition_id) {
+        return extracted_fields_ptr + (shot_container_id * graph.num_partitions + partition_id) * regions_nelems_per_solver;
+    }
+
+    inline GraphFillRegion* get_local_regions_ptr(size_t shot_container_id, int partition_id) {
+        return local_regions_ptr + (shot_container_id * graph.num_partitions + partition_id) * regions_nelems_per_solver;
     }
 
     inline BlossomChild* get_child_edges_ptr(size_t shot_container_id, int partition_id) {
@@ -227,7 +232,7 @@ struct DecodingUnit {
     // for a remote one. Used only by get_solution_from_remote_pe's bitmap-copy/rebase loop -- nowhere
     // else needs remote arena access, since every other solver reference goes through a task's own
     // ->solver (always local by construction).
-    SHMEMArena<GraphFillRegion>& region_arena_for(int shot_container_id, int global_partition);
+    GraphFillRegionArena& region_arena_for(int shot_container_id, int global_partition);
 #endif
 
 

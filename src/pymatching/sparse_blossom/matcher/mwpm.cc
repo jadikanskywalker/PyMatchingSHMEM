@@ -71,7 +71,7 @@ void Mwpm::handle_tree_hitting_boundary(const RegionHitBoundaryEventData &event)
     shatter_descendants_into_matches_and_freeze(*node);
 
     // Now match the event region to the boundary and freeze
-    event.region->match = Match{nullptr, event.edge};
+    event.region->state().match = Match{nullptr, event.edge};
     flooder.set_region_frozen(*event.region);
 }
 
@@ -82,7 +82,7 @@ void Mwpm::handle_tree_hitting_virtual_boundary(const RegionHitVirtualBoundaryEv
     shatter_descendants_into_matches_and_freeze(*node);
 
     // Now match the event region to the boundary and freeze
-    event.region->match = Match{nullptr, event.edge};
+    event.region->state().match = Match{nullptr, event.edge};
     flooder.set_region_frozen(*event.region);
 
     task->regions_matched_to_virtual_boundary.push_back(event.region);
@@ -159,12 +159,12 @@ void Mwpm::handle_tree_hitting_match(
     make_child(
         *alt_tree_node,
         matched_region,
-        matched_region->match.region,
-        matched_region->match.edge,
+        matched_region->state().match.region,
+        matched_region->state().match.edge,
         unmatched_to_matched_edge);
-    auto other_match = matched_region->match.region;
-    other_match->match.clear();
-    matched_region->match.clear();
+    auto other_match = matched_region->state().match.region;
+    other_match->state().match.clear();
+    matched_region->state().match.clear();
     flooder.set_region_shrinking(*matched_region);
     flooder.set_region_growing(*other_match);
 }
@@ -307,10 +307,10 @@ void Mwpm::handle_region_hit_region(const MwpmEvent event) {
         }
     } else if (alt_node_1) {
         // Region 2 is not in the tree, so must be matched to the boundary or another region
-        if (d.region2->match.region) {
+        if (d.region2->state().match.region) {
             handle_tree_hitting_match(d.region1, d.region2, d.edge);
         } else {
-            if (d.region2->match.edge.loc_to == nullptr) {
+            if (d.region2->state().match.edge.loc_to == nullptr) {
                 handle_tree_hitting_boundary_match(d.region1, d.region2, d.edge);
             } else {
                 handle_tree_hitting_virtual_boundary_match(d.region1, d.region2, d.edge);
@@ -318,10 +318,10 @@ void Mwpm::handle_region_hit_region(const MwpmEvent event) {
         }
     } else {
         // Region 1 is not in the tree, so must be matched to the boundary or another region
-        if (d.region1->match.region) {
+        if (d.region1->state().match.region) {
             handle_tree_hitting_match(d.region2, d.region1, d.edge.reversed());
         } else {
-            if (d.region1->match.edge.loc_to == nullptr) {
+            if (d.region1->state().match.edge.loc_to == nullptr) {
                 handle_tree_hitting_boundary_match(d.region2, d.region1, d.edge.reversed());
             } else {
                 handle_tree_hitting_virtual_boundary_match(d.region2, d.region1, d.edge.reversed());
@@ -355,17 +355,17 @@ void Mwpm::unmatch_virtual_boundaries_between_partitions() {
     if (!task || !task->is_fusion)
         return;
     for (GraphFillRegion *matched_region: task->regions_to_unmatch) {
-        CompressedEdge match_edge = matched_region->match.edge;
+        CompressedEdge match_edge = matched_region->state().match.edge;
         if ((match_edge.loc_to && match_edge.loc_from)) {
             auto alt_tree_node = node_arena.alloc_unconstructed();
             new (alt_tree_node) AltTreeNode(matched_region);
             matched_region->alt_tree_node = alt_tree_node;
             flooder.set_region_growing(*matched_region);
-            matched_region->match.clear();
+            matched_region->state().match.clear();
         } else {
             std::cout << "ERROR: region_matched_to_virtual_boundary has non-virtual match" << std::endl
                       << "  matched_region: " << matched_region << std::endl
-                      << "    match->region: " << matched_region->match.region << std::endl
+                      << "    match->region: " << matched_region->state().match.region << std::endl
                       << "    match_edge.loc_to: " << match_edge.loc_to << std::endl
                       << "    match_edge.loc_from: " << match_edge.loc_from << std::endl;
             throw std::invalid_argument("region_matched_to_virtual_boundary has non-virtual match");
@@ -378,11 +378,11 @@ GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_matches(
     for (auto &r : region->blossom_children) {
         r.region->clear_blossom_parent_ignoring_wrapped_radius();
     }
-    auto subblossom = region->match.edge.loc_from->state(region->rotating_buffer_idx).region_that_arrived_top;
-    subblossom->match = region->match;
-    if (subblossom->match.region)
-        subblossom->match.region->match.region = subblossom;
-    res.weight += region->radius.y_intercept();
+    auto subblossom = region->state().match.edge.loc_from->state(region->rotating_buffer_idx).region_that_arrived_top;
+    subblossom->state().match = region->state().match;
+    if (subblossom->state().match.region)
+        subblossom->state().match.region->state().match.region = subblossom;
+    res.weight += region->state().radius.y_intercept();
     auto iter = std::find_if(
         region->blossom_children.begin(), region->blossom_children.end(), [&subblossom](const RegionEdge &e) {
             return e.region == subblossom;
@@ -404,14 +404,14 @@ MatchingResult Mwpm::shatter_blossom_and_extract_matches(
     region->cleanup_shell_area();
 
     // First handle base cases (no subblossoms)
-    if (region->match.region) {
-        region->match.region->cleanup_shell_area();
-        if (region->blossom_children.empty() && region->match.region->blossom_children.empty()) {
+    if (region->state().match.region) {
+        region->state().match.region->cleanup_shell_area();
+        if (region->blossom_children.empty() && region->state().match.region->blossom_children.empty()) {
             // Neither region nor matched region have blossom children
             // No shattering required, so just return MatchingResult from this match.
             MatchingResult res = {
-                region->match.edge.obs_mask, region->radius.y_intercept() + region->match.region->radius.y_intercept()};
-            region->match.region->owner_arena->del(region->match.region);
+                region->state().match.edge.obs_mask, region->state().radius.y_intercept() + region->state().match.region->state().radius.y_intercept()};
+            region->state().match.region->owner_arena->del(region->state().match.region);
             region->owner_arena->del(region);
             return res;
         }
@@ -421,8 +421,8 @@ MatchingResult Mwpm::shatter_blossom_and_extract_matches(
         // this extra step: loc_to != nullptr is the same "matched to a vb, not the real boundary"
         // convention DecodingUnit::send_solution_to_remote_pe already uses).
         // No shattering required, so just return MatchingResult from this match.
-        MatchingResult res = {region->match.edge.obs_mask, region->radius.y_intercept()};
-        // if (region->match.edge.loc_to != nullptr) {
+        MatchingResult res = {region->state().match.edge.obs_mask, region->state().radius.y_intercept()};
+        // if (region->state().match.edge.loc_to != nullptr) {
         //     if (DEBUG && t_out) {
         //         std::ostringstream out_message;
         //         out_message << "T" << omp_get_thread_num()
@@ -457,8 +457,8 @@ MatchingResult Mwpm::shatter_blossom_and_extract_matches(
     MatchingResult res{0, 0};
     if (!region->blossom_children.empty())
         region = pair_and_shatter_subblossoms_and_extract_matches(region, res, prune_target, t_out);
-    if (region->match.region && !region->match.region->blossom_children.empty())
-        pair_and_shatter_subblossoms_and_extract_matches(region->match.region, res, prune_target, t_out);
+    if (region->state().match.region && !region->state().match.region->blossom_children.empty())
+        pair_and_shatter_subblossoms_and_extract_matches(region->state().match.region, res, prune_target, t_out);
     res += shatter_blossom_and_extract_matches(region, prune_target, t_out);
     return res;
 }
@@ -469,10 +469,10 @@ GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_match_edges(
     for (auto &r : region->blossom_children) {
         r.region->clear_blossom_parent_ignoring_wrapped_radius();
     }
-    auto subblossom = region->match.edge.loc_from->state(region->rotating_buffer_idx).region_that_arrived_top;
-    subblossom->match = region->match;
-    if (subblossom->match.region)
-        subblossom->match.region->match.region = subblossom;
+    auto subblossom = region->state().match.edge.loc_from->state(region->rotating_buffer_idx).region_that_arrived_top;
+    subblossom->state().match = region->state().match;
+    if (subblossom->state().match.region)
+        subblossom->state().match.region->state().match.region = subblossom;
     auto iter = std::find_if(
         region->blossom_children.begin(), region->blossom_children.end(), [&subblossom](const RegionEdge &e) {
             return e.region == subblossom;
@@ -495,13 +495,13 @@ void Mwpm::shatter_blossom_and_extract_match_edges(
     region->cleanup_shell_area();
 
     // First handle base cases (no subblossoms)
-    if (region->match.region) {
-        region->match.region->cleanup_shell_area();
-        if (region->blossom_children.empty() && region->match.region->blossom_children.empty()) {
+    if (region->state().match.region) {
+        region->state().match.region->cleanup_shell_area();
+        if (region->blossom_children.empty() && region->state().match.region->blossom_children.empty()) {
             // Neither region nor matched region have blossom children
             // No shattering required, so just return MatchingResult from this match.
-            match_edges.push_back(region->match.edge);
-            region->match.region->owner_arena->del(region->match.region);
+            match_edges.push_back(region->state().match.edge);
+            region->state().match.region->owner_arena->del(region->state().match.region);
             region->owner_arena->del(region);
             return;
         }
@@ -509,8 +509,8 @@ void Mwpm::shatter_blossom_and_extract_match_edges(
         // Region with no blossom children matched to boundary -- see the identical branch in
         // shatter_blossom_and_extract_matches for the vb-pruning rationale.
         // No shattering required, so just return MatchingResult from this match.
-        match_edges.push_back(region->match.edge);
-        // if (region->match.edge.loc_to != nullptr) {
+        match_edges.push_back(region->state().match.edge);
+        // if (region->state().match.edge.loc_to != nullptr) {
         //     if (DEBUG && t_out) {
         //         std::ostringstream out_message;
         //         out_message << "T" << omp_get_thread_num()
@@ -544,15 +544,14 @@ void Mwpm::shatter_blossom_and_extract_match_edges(
     // Pair up and shatter subblossoms into matches
     if (!region->blossom_children.empty())
         region = pair_and_shatter_subblossoms_and_extract_match_edges(region, match_edges, prune_target, t_out);
-    if (region->match.region && !region->match.region->blossom_children.empty())
-        pair_and_shatter_subblossoms_and_extract_match_edges(region->match.region, match_edges, prune_target, t_out);
+    if (region->state().match.region && !region->state().match.region->blossom_children.empty())
+        pair_and_shatter_subblossoms_and_extract_match_edges(region->state().match.region, match_edges, prune_target, t_out);
     shatter_blossom_and_extract_match_edges(region, match_edges, prune_target, t_out);
     return;
 }
 
 void Mwpm::create_detection_event(DetectorNode *node) {
     auto region = flooder.region_arena.alloc_default_constructed();
-    region->owner_arena = &flooder.region_arena;
     region->rotating_buffer_idx = flooder.rotating_buffer_idx;
     auto alt_tree_node = node_arena.alloc_unconstructed();
     new (alt_tree_node) AltTreeNode(region);
@@ -645,7 +644,7 @@ void Mwpm::reset() {
     flooder.queue.clear();
     node_arena.~Arena();
 #ifdef USE_SHMEM
-    flooder.region_arena.~SHMEMArena();
+    flooder.region_arena.~GraphFillRegionArena();
 #else
     flooder.region_arena.~Arena();
 #endif

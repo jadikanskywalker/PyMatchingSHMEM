@@ -71,12 +71,18 @@ struct Arena {
             // constructed) -- only that slot needs the real constructor to run, exactly once, ever.
             if (result->constructed == 0) {
                 new (result) T();
+                if constexpr (requires (T t) { t.owner_arena; }) {
+                    result->owner_arena = this;
+                }
             } else {
                 result->reset();
                 result->constructed++;
             }
         } else {
             new (result) T();
+            if constexpr (requires (T t) { t.owner_arena; }) {
+                result->owner_arena = this;
+            }
         }
         return result;
     }
@@ -172,11 +178,11 @@ struct Arena {
                             // exactly as it was at that last del(), so this is real, inspectable
                             // last-known state, not a blanked reset() one.
                             T* r = to_free[kf];
-                            std::cout << "  blossom_parent=" << r->blossom_parent << std::endl << std::flush;
-                            std::cout << "  blossom_parent_top=" << r->blossom_parent_top << std::endl << std::flush;
-                            std::cout << "  radius=" << r->radius << std::endl << std::flush;
-                            std::cout << "  match.region=" << r->match.region << std::endl << std::flush;
-                            std::cout << "  match.edge=" << r->match.edge << std::endl << std::flush;
+                            std::cout << "  blossom_parent=" << r->state().blossom_parent << std::endl << std::flush;
+                            std::cout << "  blossom_parent_top=" << r->state().blossom_parent_top << std::endl << std::flush;
+                            std::cout << "  radius=" << r->state().radius << std::endl << std::flush;
+                            std::cout << "  match.region=" << r->state().match.region << std::endl << std::flush;
+                            std::cout << "  match.edge=" << r->state().match.edge << std::endl << std::flush;
                             std::cout << "  alt_tree_node=" << r->alt_tree_node << std::endl << std::flush;
                             std::cout << "  blossom_children.size()=" << r->blossom_children.size() << std::endl << std::flush;
                             std::cout << "  shell_area.size()=" << r->shell_area.size() << std::endl << std::flush;
@@ -204,11 +210,11 @@ struct Arena {
                         std::cout << "  shell_area.front()=" << r->shell_area.front() << std::endl << std::flush;
                         std::cout << "  shell_area.back()=" << r->shell_area.back() << std::endl << std::flush;
                     }
-                    std::cout << "  match.region=" << r->match.region << std::endl << std::flush;
-                    std::cout << "  match.edge.loc_to=" << r->match.edge.loc_to << std::endl << std::flush;
+                    std::cout << "  match.region=" << r->state().match.region << std::endl << std::flush;
+                    std::cout << "  match.edge.loc_to=" << r->state().match.edge.loc_to << std::endl << std::flush;
                     std::cout << "  alt_tree_node=" << r->alt_tree_node << std::endl << std::flush;
-                    std::cout << "  blossom_parent=" << r->blossom_parent << std::endl << std::flush;
-                    std::cout << "  blossom_parent_top=" << r->blossom_parent_top << std::endl << std::flush;
+                    std::cout << "  blossom_parent=" << r->state().blossom_parent << std::endl << std::flush;
+                    std::cout << "  blossom_parent_top=" << r->state().blossom_parent_top << std::endl << std::flush;
                     std::cout << "  blossom_children.size()=" << r->blossom_children.size() << std::endl << std::flush;
                     std::cout << "  rotating_buffer_idx=" << r->rotating_buffer_idx << std::endl << std::flush;
                 }

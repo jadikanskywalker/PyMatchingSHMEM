@@ -119,7 +119,7 @@ class DetectorNode {
         if (s.region_that_arrived_top == nullptr) {
             return VaryingCT{0};
         }
-        return s.region_that_arrived_top->radius + s.wrapped_radius_cached;
+        return s.region_that_arrived_top->state().radius + s.wrapped_radius_cached;
     }
 
     /// Determines the region that owns this node which is a child of this node's top region.
