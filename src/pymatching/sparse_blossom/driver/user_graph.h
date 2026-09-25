@@ -144,7 +144,9 @@ class UserGraph {
     pm::MatchingGraph to_matching_graph(pm::weight_int num_distinct_weights);
 
     pm::SearchGraph to_search_graph(pm::weight_int num_distinct_weights);
-    std::shared_ptr<pm::SearchGraph> to_shared_search_graph(pm::weight_int num_distinct_weights);
+    /// `held` as in to_shared_matching_graph (must be the same held set used for the matching graph).
+    std::shared_ptr<pm::SearchGraph> to_shared_search_graph(
+        pm::weight_int num_distinct_weights, const HeldSet* held = nullptr);
     pm::Mwpm to_mwpm(pm::weight_int num_distinct_weights, bool ensure_search_graph_included);
     void update_mwpm();
     Mwpm& get_mwpm();

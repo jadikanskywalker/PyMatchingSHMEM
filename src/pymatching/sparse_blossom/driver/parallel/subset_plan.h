@@ -8,6 +8,7 @@
 #include "pymatching/sparse_blossom/driver/helpers/dem_generator.h"
 #include "pymatching/sparse_blossom/driver/parallel/held_set.h"
 #include "pymatching/sparse_blossom/flooder/graph.h"
+#include "pymatching/sparse_blossom/search/search_graph.h"
 
 namespace pm {
 
@@ -95,6 +96,17 @@ PartialGraphCheck verify_partial_against_full(
     const SharedMatchingGraph& full,
     const SharedMatchingGraph& part,
     const HeldSet& held,
+    const std::vector<SeamInfo>& unresolved_seam_infos,
+    size_t max_errors = 20);
+
+/// Same checks for the SearchGraph pair (`node_part_id` is the MatchingGraph's, shared by both graphs).
+PartialGraphCheck verify_partial_search_against_full(
+    const SearchGraph& full,
+    const SearchGraph& part,
+    const std::vector<int>& node_part_id,
+    const HeldSet& held,
+    int K_vb,
+    int num_obs_patches,
     const std::vector<SeamInfo>& unresolved_seam_infos,
     size_t max_errors = 20);
 

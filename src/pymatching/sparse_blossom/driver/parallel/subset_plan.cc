@@ -249,11 +249,85 @@ pm::HeldSet pm::compute_held_set_obs(
 
 namespace {
 
-bool is_zero_slot(const pm::DetectorNode& n) {
+template <typename Node>
+bool is_zero_slot(const Node& n) {
     const unsigned char* b = reinterpret_cast<const unsigned char*>(&n);
-    for (size_t i = 0; i < sizeof(pm::DetectorNode); ++i)
+    for (size_t i = 0; i < sizeof(Node); ++i)
         if (b[i]) return false;
     return true;
+}
+
+// Node-by-node comparison shared by the MatchingGraph and SearchGraph checks. `extra_equal(a, b)` compares the
+// node-type-specific per-edge arrays of two held nodes.
+template <typename NodeVecT, typename ExtraEqual>
+void verify_nodes(
+    const NodeVecT& fn,
+    const NodeVecT& pn,
+    const std::vector<int>& node_part_id,
+    const pm::HeldSet& held,
+    int K_vb,
+    int num_obs,
+    const std::vector<pm::SeamInfo>& unresolved,
+    pm::PartialGraphCheck& out,
+    size_t max_errors,
+    ExtraEqual extra_equal) {
+    auto fail = [&](const std::string& msg) {
+        ++out.num_errors;
+        if (out.errors.size() < max_errors) out.errors.push_back(msg);
+    };
+    if (pn.size() != fn.size()) {
+        fail("node count differs");
+        return;
+    }
+    out.total_nodes = fn.size();
+    std::vector<bool> is_stub(fn.size(), false);
+    for (size_t i = 0; i < fn.size(); ++i) {
+        if (!held.node_held(node_part_id[i])) continue;
+        for (const auto* nb : fn[i].neighbors) {
+            if (nb && !held.node_held(node_part_id[nb - fn.data()])) is_stub[nb - fn.data()] = true;
+        }
+    }
+    auto id = [](size_t i) { return std::to_string(i); };
+    for (size_t i = 0; i < fn.size(); ++i) {
+        if (!held.node_held(node_part_id[i])) {
+            if (!is_stub[i]) {
+                if (!is_zero_slot(pn[i])) fail("unheld node " + id(i) + " was touched");
+                continue;
+            }
+            ++out.num_stubs;
+            int part_id = node_part_id[i];
+            if (part_id >= 0) {
+                fail("stub " + id(i) + " is a partition node (held set misses a neighbour)");
+                continue;
+            }
+            int gvb = -part_id - 1;
+            if (gvb < K_vb * num_obs) {  // regular vb: must be the vb just outside a window end
+                int r = gvb / K_vb, j = gvb % K_vb;
+                bool outer = false;
+                for (const auto& w : unresolved)
+                    if ((w.oi == r || w.oj == r) && (j == w.vb_left || j == w.vb_right)) outer = true;
+                if (!outer) fail("regular-vb stub " + id(i) + " is not a window's outer vb");
+            }
+            if (!pn[i].neighbors.empty()) fail("stub " + id(i) + " has neighbours");
+            if (pn[i].vb != fn[i].vb) fail("stub " + id(i) + " vb differs");
+            continue;
+        }
+        ++out.num_held;
+        if (pn[i].neighbors.size() != fn[i].neighbors.size()) {
+            fail("held node " + id(i) + " neighbour count differs");
+            continue;
+        }
+        if (pn[i].neighbor_weights != fn[i].neighbor_weights) fail("held node " + id(i) + " weights differ");
+        if (!extra_equal(fn[i], pn[i])) fail("held node " + id(i) + " per-edge observables/markers differ");
+        if (pn[i].vb != fn[i].vb) fail("held node " + id(i) + " vb differs");
+        for (size_t j = 0; j < fn[i].neighbors.size(); ++j) {
+            const auto* a = fn[i].neighbors[j];
+            const auto* b = pn[i].neighbors[j];
+            if ((a == nullptr) != (b == nullptr) || (a && (a - fn.data()) != (b - pn.data()))) {
+                fail("held node " + id(i) + " neighbour " + std::to_string(j) + " differs");
+            }
+        }
+    }
 }
 
 }  // namespace
@@ -269,69 +343,44 @@ pm::PartialGraphCheck pm::verify_partial_against_full(
         ++out.num_errors;
         if (out.errors.size() < max_errors) out.errors.push_back(msg);
     };
-    const int K_vb = (int)full.vb_per_obs_patch;
-    const int num_obs = (int)full.num_obs_patches;
     if (part.node_part_id != full.node_part_id) fail("node_part_id differs");
     if (part.partition_bounds != full.partition_bounds) fail("partition_bounds differ");
     if (part.vb_bounds != full.vb_bounds) fail("vb_bounds differ");
     if (part.graph_ptr->normalising_constant != full.graph_ptr->normalising_constant) fail("normalising_constant differs");
     if (part.graph_ptr->negative_weight_sum != full.graph_ptr->negative_weight_sum) fail("negative_weight_sum differs");
+    verify_nodes(
+        full.graph_ptr->nodes, part.graph_ptr->nodes, full.node_part_id, held, (int)full.vb_per_obs_patch,
+        (int)full.num_obs_patches, unresolved, out, max_errors,
+        [](const DetectorNode& a, const DetectorNode& b) { return a.neighbor_observables == b.neighbor_observables; });
+    // obs_patch_id is stamped on every built node (held and stub).
     const auto& fn = full.graph_ptr->nodes;
     const auto& pn = part.graph_ptr->nodes;
-    if (pn.size() != fn.size()) {
-        fail("node count differs");
-        return out;
+    for (size_t i = 0; i < fn.size() && out.errors.size() < max_errors; ++i) {
+        bool built = held.node_held(full.node_part_id[i]) || !is_zero_slot(pn[i]);
+        if (built && pn[i].obs_patch_id != fn[i].obs_patch_id) fail("node " + std::to_string(i) + " obs_patch_id differs");
     }
-    out.total_nodes = fn.size();
-    std::vector<bool> is_stub(fn.size(), false);
-    for (size_t i = 0; i < fn.size(); ++i) {
-        if (!held.node_held(full.node_part_id[i])) continue;
-        for (const auto* nb : fn[i].neighbors) {
-            if (nb && !held.node_held(full.node_part_id[nb - fn.data()])) is_stub[nb - fn.data()] = true;
-        }
+    return out;
+}
+
+pm::PartialGraphCheck pm::verify_partial_search_against_full(
+    const SearchGraph& full,
+    const SearchGraph& part,
+    const std::vector<int>& node_part_id,
+    const HeldSet& held,
+    int K_vb,
+    int num_obs_patches,
+    const std::vector<SeamInfo>& unresolved,
+    size_t max_errors) {
+    PartialGraphCheck out;
+    if (part.negative_weight_edges != full.negative_weight_edges) {
+        ++out.num_errors;
+        out.errors.push_back("negative_weight_edges differ");
     }
-    auto id = [](size_t i) { return std::to_string(i); };
-    for (size_t i = 0; i < fn.size(); ++i) {
-        if (!held.node_held(full.node_part_id[i])) {
-            if (!is_stub[i]) {
-                if (!is_zero_slot(pn[i])) fail("unheld node " + id(i) + " was touched");
-                continue;
-            }
-            ++out.num_stubs;
-            int part_id = full.node_part_id[i];
-            if (part_id >= 0) {
-                fail("stub " + id(i) + " is a partition node (held set misses a neighbour)");
-                continue;
-            }
-            int gvb = -part_id - 1;
-            if (gvb < K_vb * num_obs) {  // regular vb: must be the vb just outside a window end
-                int r = gvb / K_vb, j = gvb % K_vb;
-                bool outer = false;
-                for (const auto& w : unresolved)
-                    if ((w.oi == r || w.oj == r) && (j == w.vb_left || j == w.vb_right)) outer = true;
-                if (!outer) fail("regular-vb stub " + id(i) + " is not a window's outer vb");
-            }
-            if (!pn[i].neighbors.empty()) fail("stub " + id(i) + " has neighbours");
-            if (pn[i].vb != fn[i].vb) fail("stub " + id(i) + " vb differs");
-            if (pn[i].obs_patch_id != fn[i].obs_patch_id) fail("stub " + id(i) + " obs_patch_id differs");
-            continue;
-        }
-        ++out.num_held;
-        if (pn[i].neighbors.size() != fn[i].neighbors.size()) {
-            fail("held node " + id(i) + " neighbour count differs");
-            continue;
-        }
-        if (pn[i].neighbor_weights != fn[i].neighbor_weights) fail("held node " + id(i) + " weights differ");
-        if (pn[i].neighbor_observables != fn[i].neighbor_observables) fail("held node " + id(i) + " observables differ");
-        if (pn[i].vb != fn[i].vb) fail("held node " + id(i) + " vb differs");
-        if (pn[i].obs_patch_id != fn[i].obs_patch_id) fail("held node " + id(i) + " obs_patch_id differs");
-        for (size_t j = 0; j < fn[i].neighbors.size(); ++j) {
-            const DetectorNode* a = fn[i].neighbors[j];
-            const DetectorNode* b = pn[i].neighbors[j];
-            if ((a == nullptr) != (b == nullptr) || (a && (a - fn.data()) != (b - pn.data()))) {
-                fail("held node " + id(i) + " neighbour " + std::to_string(j) + " differs");
-            }
-        }
-    }
+    verify_nodes(
+        full.nodes, part.nodes, node_part_id, held, K_vb, num_obs_patches, unresolved, out, max_errors,
+        [](const SearchDetectorNode& a, const SearchDetectorNode& b) {
+            return a.neighbor_observable_indices == b.neighbor_observable_indices &&
+                   a.neighbor_markers == b.neighbor_markers;
+        });
     return out;
 }

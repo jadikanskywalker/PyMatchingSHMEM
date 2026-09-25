@@ -201,6 +201,7 @@ TEST(SubsetPlan, PartialMatchingGraphEqualsFullOnHeldNodes) {
             pm::SharedMatchingGraph full = user_graph.to_shared_matching_graph(pm::NUM_DISTINCT_WEIGHTS);
 #endif
             const int K_p = (int)full.p_per_obs_patch, K_vb = (int)full.vb_per_obs_patch;
+            auto sfull = user_graph.to_shared_search_graph(pm::NUM_DISTINCT_WEIGHTS);
             for (int n_pes : {2, 3, 4}) {
                 for (int k : {1, 2}) {
                     int k_eff = pm::bound_effective_k(k, n_pes, full.num_partitions, K_p, true);
@@ -225,6 +226,16 @@ TEST(SubsetPlan, PartialMatchingGraphEqualsFullOnHeldNodes) {
                         for (const auto& e : check.errors) ADD_FAILURE() << e;
                         EXPECT_EQ(check.num_errors, 0u);
                         EXPECT_LE(check.num_held, check.total_nodes);
+                        // SearchGraph (used above 64 observables) built with the same held set.
+                        {
+                            auto spart = user_graph.to_shared_search_graph(pm::NUM_DISTINCT_WEIGHTS, &held);
+                            pm::PartialGraphCheck scheck = pm::verify_partial_search_against_full(
+                                *sfull, *spart, full.node_part_id, held, K_vb, num_obs, unresolved);
+                            for (const auto& e : scheck.errors) ADD_FAILURE() << "search: " << e;
+                            EXPECT_EQ(scheck.num_errors, 0u);
+                            EXPECT_EQ(scheck.num_held, check.num_held);
+                            EXPECT_EQ(scheck.num_stubs, check.num_stubs);
+                        }
                     }
                 }
             }

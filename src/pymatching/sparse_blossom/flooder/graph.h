@@ -72,7 +72,7 @@ class MatchingGraph {
     MatchingGraph();
     MatchingGraph(size_t num_nodes, size_t num_observables);
     /// Tag for the lazy constructor below.
-    struct LazyNodes {};
+    using LazyNodes = pm::LazyNodes;
     /// Graph whose node array is lazy (mmap-backed, nothing constructed): call construct_node(i) for each node
     /// that will be used. Unconstructed nodes are all-zero bytes and must never be read.
     MatchingGraph(size_t num_nodes, size_t num_observables, LazyNodes);

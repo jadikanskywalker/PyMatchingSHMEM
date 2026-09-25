@@ -417,15 +417,27 @@ pm::SearchGraph pm::UserGraph::to_search_graph(pm::weight_int num_distinct_weigh
     return search_graph;
 }
 
-std::shared_ptr<pm::SearchGraph> pm::UserGraph::to_shared_search_graph(pm::weight_int num_distinct_weights) {
+std::shared_ptr<pm::SearchGraph> pm::UserGraph::to_shared_search_graph(
+    pm::weight_int num_distinct_weights, const HeldSet* held) {
     /// Structurally mirrors to_shared_matching_graph, minus the SHMEM ephemeral-fields wiring (never
     /// needed here -- SearchDetectorNodeEphemeralFields never crosses the wire) and the partition/vb
     /// bounds metadata SharedMatchingGraph carries (not needed either: extract_paths_from_match_edges
     /// only ever runs on a single already-fused solver's own local match_edges). Only the per-node
     /// vb stamping is shared, so SearchFlooder::is_active() sees the same virtual-boundary structure
-    /// GraphFlooder::is_active() does.
-    auto search_graph_ptr = std::make_shared<pm::SearchGraph>(nodes.size());
+    /// GraphFlooder::is_active() does. With `held`, only held nodes (plus stubs for their unheld
+    /// neighbours) are constructed -- see to_shared_matching_graph.
+    auto search_graph_ptr = held ? std::make_shared<pm::SearchGraph>(nodes.size(), pm::LazyNodes{})
+                                 : std::make_shared<pm::SearchGraph>(nodes.size());
     pm::SearchGraph& search_graph = *search_graph_ptr;
+    auto is_held = [&](size_t i) { return held == nullptr || held->node_held(node_part_id[i]); };
+    std::vector<bool> is_stub;
+    if (held) {
+        is_stub.assign(nodes.size(), false);
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            if (is_held(i)) search_graph.construct_node(i);
+        }
+    }
+    auto is_built = [&](size_t i) { return is_held(i) || (held && is_stub[i]); };
 
     double normalizing_constant = to_matching_or_search_graph_helper(
         num_distinct_weights,
@@ -434,13 +446,21 @@ std::shared_ptr<pm::SearchGraph> pm::UserGraph::to_shared_search_graph(pm::weigh
             pm::signed_weight_int weight,
             const std::vector<size_t>& observables,
             const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
-            search_graph.add_edge(u, v, weight, observables, implied_weights_for_other_edges);
+            const bool u_held = is_held(u), v_held = is_held(v);
+            if (held && u_held != v_held) {
+                size_t other = u_held ? v : u;
+                if (!is_stub[other]) {
+                    is_stub[other] = true;
+                    search_graph.construct_node(other);
+                }
+            }
+            search_graph.add_edge_partial(u, v, weight, observables, implied_weights_for_other_edges, u_held, v_held);
         },
         [&](size_t u,
             pm::signed_weight_int weight,
             const std::vector<size_t>& observables,
             const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
-            search_graph.add_boundary_edge(u, weight, observables, implied_weights_for_other_edges);
+            search_graph.add_boundary_edge(u, weight, observables, implied_weights_for_other_edges, is_held(u));
         });
 
     search_graph.convert_implied_weights(normalizing_constant);
@@ -451,14 +471,14 @@ std::shared_ptr<pm::SearchGraph> pm::UserGraph::to_shared_search_graph(pm::weigh
         for (int vb = vb_per_obs_patch; vb < virtual_boundaries.size(); ++vb) {
             size_t vb_marker = vb + vb_per_obs_patch * (num_obs_patches - 1);
             for (int index : virtual_boundaries[vb]) {
-                search_graph.nodes[index].vb = vb_marker;
+                if (is_built(index)) search_graph.nodes[index].vb = vb_marker;
             }
         }
     }
 
     for (int vb = 0; vb < num_regular_vb_masks; ++vb) {
         for (int index : virtual_boundaries[vb]) {
-            search_graph.nodes[index].vb = vb;
+            if (is_built(index)) search_graph.nodes[index].vb = vb;
         }
     }
 

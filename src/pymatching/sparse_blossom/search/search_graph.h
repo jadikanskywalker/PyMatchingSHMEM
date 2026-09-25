@@ -30,7 +30,9 @@ struct SearchGraphEdge {
 
 class SearchGraph {
    public:
-    std::vector<SearchDetectorNode> nodes;
+    /// Global-indexed nodes (see MatchingGraph::nodes): lazy graphs leave nodes unconstructed until
+    /// construct_node(i) is called.
+    NodeVec<SearchDetectorNode> nodes;
     size_t num_nodes;
     std::vector<std::pair<size_t, size_t>> negative_weight_edges;
 
@@ -46,6 +48,10 @@ class SearchGraph {
 
     SearchGraph();
     explicit SearchGraph(size_t num_nodes);
+    SearchGraph(size_t num_nodes, LazyNodes);
+    void construct_node(size_t i) {
+        ::new (static_cast<void*>(&nodes[i])) SearchDetectorNode();
+    }
     SearchGraph(SearchGraph&& graph) noexcept;
     void add_edge(
         size_t u,
@@ -53,11 +59,22 @@ class SearchGraph {
         signed_weight_int weight,
         const std::vector<size_t>& observables,
         const std::vector<ImpliedWeightUnconverted>& implied_weights = {});
+    /// add_edge, but only attaches the edge to the endpoints that are held (see MatchingGraph::add_edge_partial).
+    void add_edge_partial(
+        size_t u,
+        size_t v,
+        signed_weight_int weight,
+        const std::vector<size_t>& observables,
+        const std::vector<ImpliedWeightUnconverted>& implied_weights,
+        bool u_held,
+        bool v_held);
+    /// If !held, only the (global) negative-weight bookkeeping is done and nothing is attached to node u.
     void add_boundary_edge(
         size_t u,
         signed_weight_int weight,
         const std::vector<size_t>& observables,
-        const std::vector<ImpliedWeightUnconverted>& implied_weights = {});
+        const std::vector<ImpliedWeightUnconverted>& implied_weights = {},
+        bool held = true);
     void convert_implied_weights(const double normalizing_constant);
     void reweight(std::vector<ImpliedWeight>& implied_weights);
     void reweight_for_edge(const int64_t& u, const int64_t& v);

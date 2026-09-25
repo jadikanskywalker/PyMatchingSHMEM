@@ -78,6 +78,9 @@ struct LazyNodeAllocator {
     }
 };
 
+/// Tag selecting the lazy-node constructors of MatchingGraph / SearchGraph.
+struct LazyNodes {};
+
 /// A std::vector of nodes that can be created lazily (see LazyNodeAllocator).
 template <typename T>
 using NodeVec = std::vector<T, LazyNodeAllocator<T>>;

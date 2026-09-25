@@ -2,7 +2,7 @@
 //   verify  : spec-derived seam windows vs graph-walk windows, and per-PE partial graph vs full graph
 //   measure : resident memory of one partial (or the full) graph build
 // Usage:
-//   subset_check verify  --graph_cache_path P --rounds_per_partition M --preset 36obs [--pes 2,4,8] [--k 1]
+//   subset_check verify  --graph_cache_path P --rounds_per_partition M --preset 36obs [--pes 2,4,8] [--k 1] [--search]
 //   subset_check measure --graph_cache_path P --rounds_per_partition M --preset 36obs --pe N:PID | --pe full
 #include <chrono>
 #include <cstring>
@@ -22,6 +22,12 @@ const char* arg(int argc, char** argv, const char* name) {
     for (int i = 1; i + 1 < argc; ++i)
         if (!strcmp(argv[i], name)) return argv[i + 1];
     return nullptr;
+}
+
+bool has_flag(int argc, char** argv, const char* name) {
+    for (int i = 1; i < argc; ++i)
+        if (!strcmp(argv[i], name)) return true;
+    return false;
 }
 
 double status_mb(const char* key) {
@@ -166,6 +172,14 @@ int main(int argc, char** argv) {
         failures += bad;
     }
     const int k = arg(argc, argv, "--k") ? std::stoi(arg(argc, argv, "--k")) : 1;
+    const bool with_search = has_flag(argc, argv, "--search");
+    std::shared_ptr<pm::SearchGraph> search_full;
+    if (with_search) {
+        auto ts = std::chrono::steady_clock::now();
+        search_full = user_graph.to_shared_search_graph(pm::NUM_DISTINCT_WEIGHTS);
+        std::cout << "full search graph built in " << seconds_since(ts) << "s  RSS=" << status_mb("VmRSS:") << " MB"
+                  << std::endl;
+    }
     std::vector<int> pes = parse_list(arg(argc, argv, "--pes") ? arg(argc, argv, "--pes") : "2,4,8");
     for (int n_pes : pes) {
         for (int pid = 0; pid < n_pes; ++pid) {
@@ -185,6 +199,15 @@ int main(int argc, char** argv) {
                       << " errors=" << check.num_errors << " (" << seconds_since(tp) << "s)" << std::endl;
             for (const auto& e : check.errors) std::cout << "    " << e << std::endl;
             failures += (int)check.num_errors;
+            if (with_search) {
+                auto spart = user_graph.to_shared_search_graph(pm::NUM_DISTINCT_WEIGHTS, &held);
+                auto scheck = pm::verify_partial_search_against_full(
+                    *search_full, *spart, full.node_part_id, held, K_vb, P, unresolved);
+                std::cout << "   search graph: held " << scheck.num_held << " stubs=" << scheck.num_stubs
+                          << " errors=" << scheck.num_errors << std::endl;
+                for (const auto& e : scheck.errors) std::cout << "    " << e << std::endl;
+                failures += (int)scheck.num_errors;
+            }
         }
     }
     std::cout << (failures ? "FAILED" : "ALL OK") << " (" << failures << " mismatches)" << std::endl;
