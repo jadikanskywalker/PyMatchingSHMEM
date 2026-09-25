@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <climits>
 #include "pymatching/sparse_blossom/driver/user_graph.h"
 
 #include "pymatching/rand/rand_gen.h"
@@ -359,6 +360,15 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
         }
     }
 
+    if (held && held->poison) {
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            if (is_built(i)) continue;
+            matching_graph.construct_node(i);
+            matching_graph.nodes[i].vb = INT_MIN;
+            matching_graph.nodes[i].neighbors.push_back(reinterpret_cast<DetectorNode*>(1));
+        }
+    }
+
     return SharedMatchingGraph(matching_graph_ptr, node_part_id, num_partitions, num_virtual_boundaries, num_rounds, num_obs_patches, p_per_obs_patch, vb_per_obs_patch);
 }
 
@@ -479,6 +489,15 @@ std::shared_ptr<pm::SearchGraph> pm::UserGraph::to_shared_search_graph(
     for (int vb = 0; vb < num_regular_vb_masks; ++vb) {
         for (int index : virtual_boundaries[vb]) {
             if (is_built(index)) search_graph.nodes[index].vb = vb;
+        }
+    }
+
+    if (held && held->poison) {
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            if (is_built(i)) continue;
+            search_graph.construct_node(i);
+            search_graph.nodes[i].vb = INT_MIN;
+            search_graph.nodes[i].neighbors.push_back(reinterpret_cast<SearchDetectorNode*>(1));
         }
     }
 

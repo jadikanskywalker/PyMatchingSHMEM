@@ -10,6 +10,10 @@ namespace pm {
 struct HeldSet {
     std::vector<bool> part_held;  // size num_partitions
     std::vector<bool> vb_held;    // size num_virtual_boundaries
+    /// Debug: also construct every node that is neither held nor a stub as a "poisoned" node (vb = INT_MIN and a
+    /// bogus neighbour pointer), so any traversal of a node outside the held set crashes instead of silently
+    /// reading an empty node.
+    bool poison{false};
 
     /// True if a node with this node_part_id entry is fully built on this PE.
     inline bool node_held(int part_id) const {

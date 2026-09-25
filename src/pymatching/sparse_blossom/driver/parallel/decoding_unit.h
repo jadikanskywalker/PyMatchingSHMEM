@@ -23,6 +23,7 @@
 #include "pymatching/sparse_blossom/diagram/mwpm_diagram.h"
 #include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
 #include "pymatching/sparse_blossom/driver/parallel/shot_buffer.h"
+#include "pymatching/sparse_blossom/driver/parallel/subset_plan.h"
 
 #ifdef USE_SHMEM
 #include <shmem.h>
@@ -196,14 +197,21 @@ struct DecodingUnit {
         pm::UserGraph user_graph,
         weight_int num_distinct_weights,
         bool ensure_search_flooder_included,
-        bool enable_correlations
+        bool enable_correlations,
+        const SubsetOptions* subset = nullptr
 #ifdef ENABLE_DRAW_FLAGS
-        , bool draw_frames
+        , bool draw_frames = false
         , const stim::DetectorErrorModel* dem_for_drawing = nullptr
 #endif
         );
 
     ~DecodingUnit();
+
+    // Seam windows derived from the seam spec (before conflict resolution); set when the graphs were built
+    // partially (SubsetOptions), in which case seam nodes of untouched seams are not built and the graph walk
+    // cannot be used to discover them.
+    bool subset_graph_build{false};
+    std::vector<SeamInfo> subset_seam_infos;
 
     void build_tasks_for_round_partitioning();
     void build_tasks_for_obs_patch_partitioning();

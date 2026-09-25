@@ -44,6 +44,31 @@
 
 // #include "profiling/profiling_json.h"
 
+// The seam spec named by --gen_surgery_preset / --gen_surgery_spec (empty if neither is given).
+static std::vector<pm::SurgerySpec> resolve_surgery_specs(int argc, const char** argv) {
+    int gen_surgery_dur = (int)stim::find_int64_argument("--gen_surgery_duration", 8, 1, INT64_MAX, argc, argv);
+    const char* preset_arg = stim::find_argument("--gen_surgery_preset", argc, argv);
+    const char* spec_arg = stim::find_argument("--gen_surgery_spec", argc, argv);
+    std::vector<pm::SurgerySpec> surgeries;
+    if (preset_arg) {
+        std::string preset = preset_arg;
+        if (preset == "18obs") surgeries = pm::MultiObsDemGenerator::preset_18obs();
+        else if (preset == "24obs") surgeries = pm::MultiObsDemGenerator::preset_24obs();
+        else if (preset == "36obs") surgeries = pm::MultiObsDemGenerator::preset_36obs();
+        else if (preset == "48obs") surgeries = pm::MultiObsDemGenerator::preset_48obs();
+        else if (preset == "64obs") surgeries = pm::MultiObsDemGenerator::preset_64obs();
+        else if (preset == "72obs") surgeries = pm::MultiObsDemGenerator::preset_72obs();
+        else if (preset == "144obs") surgeries = pm::MultiObsDemGenerator::preset_144obs();
+        else if (preset == "128obs") surgeries = pm::MultiObsDemGenerator::preset_128obs();
+        else if (preset == "256obs") surgeries = pm::MultiObsDemGenerator::preset_256obs();
+        else if (preset == "36obsx4") surgeries = pm::MultiObsDemGenerator::preset_36obs_repeated(4);
+        else throw std::invalid_argument("Unknown --gen_surgery_preset: " + preset);
+    } else if (spec_arg) {
+        surgeries = pm::MultiObsDemGenerator::parse_spec(spec_arg, gen_surgery_dur);
+    }
+    return surgeries;
+}
+
 int main_predict(int argc, const char** argv) {
     stim::check_for_unknown_arguments(
         {
@@ -60,6 +85,8 @@ int main_predict(int argc, const char** argv) {
             "--task_division_strategy", // ROUND or OBS partitioning
             "--extraction_unit_size",
             "--extract_preemptively",
+            "--subset_graph_build", // OBS + SHMEM: only build the graph nodes this PE needs (needs the surgery preset/spec flags)
+            "--poison_unheld", // debug: make every node outside the subset crash on access
             "--seam_buffer_size", // OBS only: extra partitions around seams to include for solution extraction / cross-rank fusion windows
 #ifdef USE_SHMEM
             "--cross_rank_fusion_window_size", // ROUND: number of partitions to send;
@@ -208,7 +235,6 @@ int main_predict(int argc, const char** argv) {
                 int gen_rounds = (int)stim::find_int64_argument("--gen_rounds", 10, 1, INT64_MAX, argc, argv);
                 int gen_num_obs = (int)stim::find_int64_argument("--gen_num_obs", 2, 1, INT64_MAX, argc, argv);
                 double gen_depol = stim::find_float_argument("--gen_depolarization", 0.01, 0.0, 1.0, argc, argv);
-                int gen_surgery_dur = (int)stim::find_int64_argument("--gen_surgery_duration", 8, 1, INT64_MAX, argc, argv);
                 double gen_p_cross_val = stim::find_float_argument("--gen_p_cross", -1.0, -1.0, 1.0, argc, argv);
                 double gen_p_cross = (gen_p_cross_val < 0) ? std::min(0.4, 0.2 * gen_depol) : gen_p_cross_val;
                 int gen_boundary_depth = (int)stim::find_int64_argument("--gen_boundary_depth", 2, 0, INT64_MAX, argc, argv);
@@ -216,26 +242,7 @@ int main_predict(int argc, const char** argv) {
                 auto base_dem = pm::MultiObsDemGenerator::generate_base_dem(
                     gen_code, gen_task, gen_distance, gen_rounds, gen_depol);
 
-                std::vector<pm::SurgerySpec> surgeries;
-                const char* preset_arg = stim::find_argument("--gen_surgery_preset", argc, argv);
-                const char* spec_arg = stim::find_argument("--gen_surgery_spec", argc, argv);
-
-                if (preset_arg) {
-                    std::string preset = preset_arg;
-                    if (preset == "18obs") surgeries = pm::MultiObsDemGenerator::preset_18obs();
-                    else if (preset == "24obs") surgeries = pm::MultiObsDemGenerator::preset_24obs();
-                    else if (preset == "36obs") surgeries = pm::MultiObsDemGenerator::preset_36obs();
-                    else if (preset == "48obs") surgeries = pm::MultiObsDemGenerator::preset_48obs();
-                    else if (preset == "64obs") surgeries = pm::MultiObsDemGenerator::preset_64obs();
-                    else if (preset == "72obs") surgeries = pm::MultiObsDemGenerator::preset_72obs();
-                    else if (preset == "144obs") surgeries = pm::MultiObsDemGenerator::preset_144obs();
-                    else if (preset == "128obs") surgeries = pm::MultiObsDemGenerator::preset_128obs();
-                    else if (preset == "256obs") surgeries = pm::MultiObsDemGenerator::preset_256obs();
-                    else if (preset == "36obsx4") surgeries = pm::MultiObsDemGenerator::preset_36obs_repeated(4);
-                    else throw std::invalid_argument("Unknown --gen_surgery_preset: " + preset);
-                } else if (spec_arg) {
-                    surgeries = pm::MultiObsDemGenerator::parse_spec(spec_arg, gen_surgery_dur);
-                }
+                std::vector<pm::SurgerySpec> surgeries = resolve_surgery_specs(argc, argv);
 
                 pm::MultiObsDemGenerator generator(
                     std::move(base_dem), gen_num_obs, std::move(surgeries), gen_p_cross, gen_boundary_depth);
@@ -327,13 +334,20 @@ int main_predict(int argc, const char** argv) {
 #endif
 
     if (config_parallel::use_threads) {
+        pm::SubsetOptions subset_opts;
+        if (stim::find_bool_argument("--subset_graph_build", argc, argv)) {
+            subset_opts.enabled = true;
+            subset_opts.surgeries = resolve_surgery_specs(argc, argv);
+            subset_opts.poison_unheld = stim::find_bool_argument("--poison_unheld", argc, argv);
+        }
         pm::DecodingUnit decoding_unit(
             std::move(reader),
             std::move(writer),
             std::move(user_graph),
             num_buckets,
             enable_correlations,
-            enable_correlations
+            enable_correlations,
+            &subset_opts
 #ifdef ENABLE_DRAW_FLAGS
             , draw_frames
             , (loaded_from_graph_cache ? nullptr : &dem)

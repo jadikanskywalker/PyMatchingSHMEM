@@ -1,6 +1,7 @@
 #include "pymatching/sparse_blossom/driver/parallel/subset_plan.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <stdexcept>
 
@@ -62,8 +63,9 @@ std::vector<pm::SeamInfo> pm::compute_seam_infos_from_graph(const SharedMatching
                     obs_id = global_vb / K_vb;
                     if (obs_id >= (int)graph.num_obs_patches) continue;  // cross-obs seam node
                     int local_vb = global_vb % K_vb;
-                    low_p = local_vb - 1;
-                    high_p = local_vb;
+                    // vb slot j lies between partitions j and j+1.
+                    low_p = local_vb;
+                    high_p = local_vb + 1;
                 }
                 auto [it, inserted] = obs_part_range.try_emplace(obs_id, low_p, high_p);
                 if (!inserted) {
@@ -104,11 +106,11 @@ std::vector<pm::SeamInfo> pm::compute_seam_infos_from_spec(
             int r = std::clamp(spec.start_round + step, 0, num_rounds - 1);
             int b = r / M;
             // A partition round lies in partition b. A virtual-boundary round (last of its M-round block)
-            // is tagged as vb b and touches partitions [b-1, b]; a vb that would be the very last round is
-            // folded into the final partition (see partition_nodes_by_obs_patch).
+            // is tagged as vb b, which lies between partitions b and b+1; a vb that would be the very last
+            // round is folded into the final partition (see partition_nodes_by_obs_patch).
             bool is_vb_round = (r % M == M - 1) && (r < num_rounds - 1);
-            int low_p = is_vb_round ? b - 1 : b;
-            int high_p = b;
+            int low_p = b;
+            int high_p = is_vb_round ? b + 1 : b;
             if (is_vb_round && b >= K_vb) {
                 throw std::logic_error("compute_seam_infos_from_spec: vb round beyond K_vb.");
             }

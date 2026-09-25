@@ -17,6 +17,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <malloc.h>
 #include <functional>
 #include <limits>
 #include <omp.h>
@@ -54,7 +55,8 @@ pm::DecodingUnit::DecodingUnit(
     pm::UserGraph user_graph,
     pm::weight_int num_distinct_weights,
     bool ensure_search_flooder_included,
-    bool enable_correlations
+    bool enable_correlations,
+    const pm::SubsetOptions* subset
 #ifdef ENABLE_DRAW_FLAGS
     ,
     bool draw_frames,
@@ -85,42 +87,99 @@ pm::DecodingUnit::DecodingUnit(
         throw std::invalid_argument("Failed to allocate symmetric detector node buffer.");
     }
 #endif
-    graph = user_graph.to_shared_matching_graph(
-        num_distinct_weights
-#ifdef USE_SHMEM
-        ,
-        node_ephemeral_fields_ptr
-#endif
-    );
-    if (graph.num_partitions <= 0) {
+    if (user_graph.num_partitions <= 0) {
         throw std::invalid_argument("Graph partitioning produced no partitions. Check --rounds_per_partition.");
-    }
-    needs_search_flooder =
-        ensure_search_flooder_included || (graph.graph_ptr->num_observables > sizeof(pm::obs_int) * 8);
-    if (needs_search_flooder) {
-        search_graph_ptr = user_graph.to_shared_search_graph(num_distinct_weights);
-    }
-    // The UserGraph is no longer needed once both graphs are built; release it before the rest of the
-    // constructor allocates (this by-value parameter would otherwise live until the constructor returns).
-    user_graph = pm::UserGraph();
-    // Per-solver GraphFillRegion arena size (see REGION_ARENA_BUFFER_FACTOR's own comment) -- computed
-    // unconditionally (not just for USE_SHMEM) since build_solvers() now also uses it to pre-reserve
-    // Arena::available's capacity for the plain-threads build, closing off concurrent-push_back
-    // reallocation on that vector.
-    regions_nelems_per_solver = graph.node_part_id.size() / graph.num_partitions * REGION_ARENA_BUFFER_FACTOR;
-    if (regions_nelems_per_solver % 64 > 0) {
-        regions_nelems_per_solver =
-            (regions_nelems_per_solver / 64 + 1) * 64;  // make multiple of 64
     }
 #ifdef USE_SHMEM
     // Bound k
     {
         std::string k_note;
         config_parallel::k = bound_effective_k(
-            config_parallel::k, n_pes, graph.num_partitions, graph.p_per_obs_patch,
+            config_parallel::k, n_pes, user_graph.num_partitions, user_graph.p_per_obs_patch,
             config_parallel::division_strategy == config_parallel::OBS, &k_note);
         if (!k_note.empty()) std::cout << k_note << std::endl << std::flush;
     }
+#endif
+    // Partial build: work out which partitions / virtual boundaries this PE needs using the seam spec
+    std::unique_ptr<HeldSet> held;
+    if (subset && subset->enabled) {
+#ifdef USE_SHMEM
+        if (config_parallel::division_strategy != config_parallel::OBS) {
+            throw std::invalid_argument("The subset graph build requires --task_division_strategy observable.");
+        }
+        const int P = (int)user_graph.num_obs_patches, K_p = (int)user_graph.p_per_obs_patch,
+                  K_vb = (int)user_graph.vb_per_obs_patch;
+        const int num_seams = (int)user_graph.num_virtual_boundaries - K_vb * P;
+        if ((int)subset->surgeries.size() != num_seams) {
+            throw std::invalid_argument(
+                "The seam spec has " + std::to_string(subset->surgeries.size()) + " seams but the graph has " +
+                std::to_string(num_seams) + ": pass the same surgery preset/spec the graph was generated from.");
+        }
+        for (const auto& sg : subset->surgeries) {
+            if (sg.obs_a < 0 || sg.obs_b < 0 || sg.obs_a >= P || sg.obs_b >= P) {
+                throw std::invalid_argument("The seam spec references an observable outside the graph's " +
+                                            std::to_string(P) + " observables.");
+            }
+        }
+        subset_seam_infos = compute_seam_infos_from_spec(
+            subset->surgeries, (int)user_graph.num_rounds, config_parallel::M, K_p, K_vb, config_parallel::k);
+        const int base = P / n_pes, rem = P % n_pes;
+        const int my_obs_start = base * pid + std::min(pid, rem);
+        const int my_obs_count = base + (pid < rem ? 1 : 0);
+        held = std::make_unique<HeldSet>(compute_held_set_obs(
+            user_graph.num_partitions, user_graph.num_virtual_boundaries, P, K_p, K_vb, my_obs_start, my_obs_count,
+            subset_seam_infos));
+        held->poison = subset->poison_unheld;
+        subset_graph_build = true;
+        if (pid == 0) std::cout << "Subset graph build: PE-local observables " << my_obs_start << ".." 
+                                << (my_obs_start + my_obs_count - 1) << " of " << P << " (poison="
+                                << subset->poison_unheld << ")" << std::endl << std::flush;
+#else
+        throw std::invalid_argument("The subset graph build requires a SHMEM build.");
+#endif
+    }
+    graph = user_graph.to_shared_matching_graph(
+        num_distinct_weights
+#ifdef USE_SHMEM
+        ,
+        node_ephemeral_fields_ptr
+#endif
+        , held.get()
+    );
+    needs_search_flooder =
+        ensure_search_flooder_included || (graph.graph_ptr->num_observables > sizeof(pm::obs_int) * 8);
+    if (needs_search_flooder) {
+        search_graph_ptr = user_graph.to_shared_search_graph(num_distinct_weights, held.get());
+    }
+    // The UserGraph is no longer needed once both graphs are built; release it to save memory
+    user_graph = pm::UserGraph();
+    {
+        // Freed small allocations stay resident in glibc's arenas until malloc_trim hands the pages back to the OS.
+        auto read_status = [](std::string& rss, std::string& hwm) {
+            std::ifstream status("/proc/self/status");
+            std::string line;
+            while (std::getline(status, line)) {
+                if (line.rfind("VmRSS:", 0) == 0) rss = line.substr(6);
+                if (line.rfind("VmHWM:", 0) == 0) hwm = line.substr(6);
+            }
+        };
+        std::string rss_before, rss_after, hwm;
+        read_status(rss_before, hwm);
+        malloc_trim(0);
+        read_status(rss_after, hwm);
+        std::cout << "PE" << pid << " graphs built" << (subset_graph_build ? " (subset)" : " (full)")
+                  << ": VmRSS=" << rss_before << " -> " << rss_after << " after malloc_trim, VmHWM=" << hwm
+                  << std::endl << std::flush;
+    }
+    // Per-solver GraphFillRegion arena size (see REGION_ARENA_BUFFER_FACTOR's own comment) -- computed
+    // for SHMEM and non-SHMEM builds because build_solvers() uses it to pre-reserve Arena::available's
+    // capacity (making concurrent-push_back reallocation on that vector extra impossible).
+    regions_nelems_per_solver = graph.node_part_id.size() / graph.num_partitions * REGION_ARENA_BUFFER_FACTOR;
+    if (regions_nelems_per_solver % 64 > 0) {
+        regions_nelems_per_solver =
+            (regions_nelems_per_solver / 64 + 1) * 64;  // make multiple of 64
+    }
+#ifdef USE_SHMEM
     // --- Compute num_cross_rank_fusions before allocations ---
     if (config_parallel::division_strategy == config_parallel::OBS) {
         if (DEBUG) std::cout << "K_p: " << graph.p_per_obs_patch << "; K_vb: " << graph.vb_per_obs_patch << std::endl;
@@ -130,11 +189,11 @@ pm::DecodingUnit::DecodingUnit(
     }
     // --- Allocate sychronization & summary memory ---
     // Each CrossRankTask gets its own 64-byte cache line to avoid false sharing.
-    // stride = 64 bytes / sizeof(unsigned long) = number of unsigned long elements per cache line
+    //   stride = 64 bytes / sizeof(unsigned long) = number of unsigned long elements per cache line
     constexpr size_t cache_line_stride = SHMEM_CACHE_LINE_SIZE / sizeof(unsigned long);
     size_t task_status_total_elements = cache_line_stride * num_cross_rank_fusions * num_shot_containers;
     task_status_ptr = static_cast<unsigned long*>(shmem_align(SHMEM_CACHE_LINE_SIZE, task_status_total_elements * sizeof(unsigned long)));
-    // regions_nelems_per_solver (computed unconditionally above) / 64 gives number of uint64_t for bitmap
+    // regions_nelems_per_solver / 64 gives number of uint64_t for bitmap
     child_edges_nelems_per_solver = regions_nelems_per_solver; // Could reduce this
     regions_matched_to_vb_nelems = graph.node_part_id.size() / graph.num_rounds * SHMEM_INTERSECTION_BUFFER_FACTOR;
     child_edges_ptr = static_cast<BlossomChild*>(shmem_malloc(child_edges_nelems_per_solver * graph.num_partitions * num_shot_containers * sizeof(BlossomChild)));
@@ -161,21 +220,13 @@ pm::DecodingUnit::DecodingUnit(
         std::cout << "DEBUG: Setting num threads\n" << std::flush;
     }
     int max_threads = omp_get_max_threads();
-    // num_task_roots is a fixed per-run constant (1 for ROUND, my_obs_count for OBS -- see
-    // ShotIOResource/ShotBuffer's own comments) needed by read_all_shots_and_create_IO_resources
-    // below; computed here since it falls straight out of the OBS/ROUND branch already below,
-    // rather than duplicating that branch's logic a second time.
+    // num_task_roots is a fixed per-run constant (1 for ROUND, my_obs_count for OBS)
+    // needed by read_all_shots_and_create_IO_resources
     int num_task_roots_for_shots = 1;
     // Exact total extraction jobs a shot will ever post (ceil(my_partition_count/L) for ROUND,
-    // summed per-obs-patch for OBS) -- a static, verified-exact per-run constant (see the plan
-    // this implements), computed here for the same reason as num_task_roots_for_shots above.
+    // summed per-obs-patch for OBS)
     int num_extraction_units_for_shots = 0;
-    // --- Populate my_partition_task_ids (ROUND only -- OBS populates this itself, from inside
-    // build_tasks_for_obs_patch_partitioning, recording each leaf's *actual* tasks[] index as it's
-    // created. A fixed p_base formula here would assume every observable occupies a fixed-size block
-    // in tasks[], which no longer holds once seams/CRTs/continuation fusions get interleaved into
-    // tasks[] by the preemptive-extraction worklist construction -- see now-its-time-to-jazzy-
-    // turing.md.) ---
+    // --- Compute my partitions ---
     if (config_parallel::division_strategy == config_parallel::OBS) {
 #ifdef USE_SHMEM
         const int base         = (int)graph.num_obs_patches / n_pes;
@@ -186,24 +237,18 @@ pm::DecodingUnit::DecodingUnit(
         const int my_obs_start = 0;
         const int my_obs_count =  graph.num_obs_patches;
 #endif
-        // A PE owning more local observables than threads used to deadlock: the loser of
-        // LocalSeamTask::try_to_steal spin-waited in place, and an observable with zero assigned
-        // threads would never get its leaves stolen at all. decode_shots() now lets a thread own
+        // A PE owning more local observables than threads used to deadlock because the loser of
+        // LocalSeamTask::try_to_steal spin-waited in place. decode_shots() now lets a thread own
         // multiple observables (round-robin, deferring a lost LocalSeamTask instead of blocking)
-        // whenever max_threads < my_obs_count, so this is no longer a hard error -- see
-        // decode_shots()'s owned_obs/OwnedObservable machinery.
         if (DEBUG && max_threads < my_obs_count) {
             std::cout << "DEBUG: max_threads (" << max_threads << ") < my_obs_count (" << my_obs_count
                        << ") -- using multi-observable-per-thread scheduling with deferred LocalSeamTask resume\n"
                        << std::flush;
         }
-        // Global partition id of my own first local partition, and how many I own -- contiguous by
-        // construction (obs-major numbering, per-PE contiguous observable ownership). Distinct from
-        // my_partition_task_ids, which holds indices into this PE's own tasks[] array, not global
-        // partition ids -- populated later, see above.
+        // Global partition id of my first local partition and how many I own (contiguous by construction)
         my_partitions_start = my_obs_start * (int)graph.p_per_obs_patch;
         my_partition_count  = my_obs_count * (int)graph.p_per_obs_patch;
-        my_partition_task_ids.reserve((size_t)my_partition_count);
+        my_partition_task_ids.reserve((size_t)my_partition_count); // populated later
         num_task_roots_for_shots = my_obs_count;
         num_extraction_units_for_shots = my_obs_count *
             (((int)graph.p_per_obs_patch + config_parallel::L - 1) / config_parallel::L);
@@ -221,19 +266,13 @@ pm::DecodingUnit::DecodingUnit(
         num_extraction_units_for_shots =
             (my_partition_count + config_parallel::L - 1) / config_parallel::L;
     }
-    // my_partition_task_ids isn't populated yet at this point for either strategy (OBS fills it in
-    // from build_tasks_for_obs_patch_partitioning, ROUND from build_tasks_for_round_partitioning, both
-    // called after this constructor) -- size off my_partition_count instead, which is always equal to
-    // the eventual my_partition_task_ids.size() once construction finishes.
     num_threads = std::min(max_threads, my_partition_count);
-    // solvers only exist for this PE's own partitions -- see build_solvers() and the plan for this
-    // refactor (a full Mwpm is unnecessary for a remote partition, only its GraphFillRegionArena is).
+    // solvers only exist for this PE's own partitions -- see build_solvers()
     num_solvers_per_buffer = (size_t)my_partition_count;
     std::cout << "graph.num_partitions = " << graph.num_partitions << "; num_threads: " << num_threads << std::endl;
     omp_set_num_threads(num_threads);
-    // --- Fill buffer with shots (upfront, Tier B -- docs/decentralized_shot_sync_design.md §3):
-    // every shot is read and hit-partitioned once here, before decoding starts, rather than one
-    // shot per container slot as containers are reused. ---
+    // --- Fill buffer with shots ---
+    // every shot is read and hit-partitioned once here before decoding starts
     if (DEBUG) {
         std::cout << "DEBUG: Reading shots \n" << std::flush;
     }
@@ -241,9 +280,8 @@ pm::DecodingUnit::DecodingUnit(
         graph.node_part_id, (int)num_threads, num_task_roots_for_shots, num_extraction_units_for_shots);
 #ifdef USE_SHMEM
     // --- Allocate buffer for GraphFillRegion arenas ---
-    // Sized globally (graph.num_partitions, not num_solvers_per_buffer/my_partition_count): the
-    // underlying SHMEM region buffer must stay addressable by every PE's own global partition ids for
-    // RMA puts, independent of how many local Mwpm solver objects this PE actually constructs.
+    // Sized globally (graph.num_partitions): the underlying SHMEM region buffer must stay
+    // addressable by every PE's own global partition ids for RMA puts
     if (DEBUG) {
         std::cout << "DEBUG: Allocating Regions\n" << std::flush;
     }
@@ -273,8 +311,7 @@ pm::DecodingUnit::DecodingUnit(
                   << std::flush;
     }
 #endif
-    // --- Build solvers (before tasks: task construction assigns each task's own ->solver, which
-    // needs solvers[]/remote_arenas already built) ---
+    // --- Build solvers (before tasks: task construction assigns each task's own ->solver) ---
     build_solvers();
     // --- Build local merge-tree tasks and cross-rank fusions ---
     if (config_parallel::division_strategy == config_parallel::OBS) {
@@ -647,7 +684,9 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
     // PE: same seam_infos, same iteration order). See subset_plan.h.
     // unit_lo/unit_hi (assigned below) are each seam's extraction-unit span for preemptive extraction --
     // see now-its-time-to-jazzy-turing.md Design §1.
-    std::vector<SeamInfo> seam_infos = compute_seam_infos_from_graph(graph, config_parallel::k);
+    // With a partial graph the untouched seams' nodes are not built, so the windows come from the seam spec.
+    std::vector<SeamInfo> seam_infos =
+        subset_graph_build ? subset_seam_infos : compute_seam_infos_from_graph(graph, config_parallel::k);
     resolve_seam_window_conflicts(seam_infos, pid);
 
     // --- Extraction-unit span per seam (preemptive extraction only; harmless to always compute) ---

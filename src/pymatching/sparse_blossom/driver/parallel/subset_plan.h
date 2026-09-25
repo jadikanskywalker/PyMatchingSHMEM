@@ -19,6 +19,14 @@ struct SeamInfo {
     int unit_lo{-1}, unit_hi{-1};
 };
 
+/// Options for building only the part of the graph a PE needs (see compute_held_set_obs). Observable strategy,
+/// SHMEM builds only. `surgeries` must be the same seam spec the graph was generated from.
+struct SubsetOptions {
+    bool enabled{false};
+    std::vector<SurgerySpec> surgeries;
+    bool poison_unheld{false};
+};
+
 /// The effective cross-rank fusion window size k for a run (the cap DecodingUnit applies right after graph
 /// construction). Throws std::invalid_argument for >2 PEs with fewer than 2 partitions per PE. `note` (if
 /// non-null) receives the "NOTE: k ..." message when k is reduced.
