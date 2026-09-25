@@ -239,6 +239,13 @@ struct DecodingUnit {
     // else needs remote arena access, since every other solver reference goes through a task's own
     // ->solver (always local by construction).
     GraphFillRegionArena& region_arena_for(int shot_container_id, int global_partition);
+
+    // Global partitions [first, last] a cross-rank task sends from (this PE's side) / receives into (the remote
+    // PE's side). Shared by send_solution_to_remote_pe, get_solution_from_remote_pe and prefault_crt_windows.
+    std::pair<int, int> crt_send_window(const CrossRankTask& t) const;
+    std::pair<int, int> crt_recv_window(const CrossRankTask& t) const;
+    // Faults in the symmetric-heap pages cross-rank fusions read or write (config_parallel::prefault_windows).
+    void prefault_crt_windows();
 #endif
 
 

@@ -284,17 +284,24 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
 #ifdef USE_SHMEM
     const int num_nodes = nodes.size();
 #endif
+#ifdef USE_SHMEM
+    std::vector<size_t> built_nodes;  // when ephemeral fields are wired later (ptr == nullptr)
+#endif
     auto init_node = [&](size_t i) {
         if (held) matching_graph.construct_node(i);
         matching_graph.nodes[i].obs_patch_id = nodes[i].observable_id;
 #ifdef USE_SHMEM
+        if (node_ephemeral_fields_ptr == nullptr) {
+            if (held) built_nodes.push_back(i);
+        } else {
 #ifdef ENABLE_SHOT_BUFFERS
-        for (int j = 0; j < NUM_BUFFERS_PER_UNIT; ++j) {
-            matching_graph.nodes[i].ephemeral_fields[j] = node_ephemeral_fields_ptr + i + j * num_nodes;
-        }
+            for (int j = 0; j < NUM_BUFFERS_PER_UNIT; ++j) {
+                matching_graph.nodes[i].ephemeral_fields[j] = node_ephemeral_fields_ptr + i + j * num_nodes;
+            }
 #else
-        matching_graph.nodes[i].ephemeral_fields = node_ephemeral_fields_ptr + i;
+            matching_graph.nodes[i].ephemeral_fields = node_ephemeral_fields_ptr + i;
 #endif  // ENABLE_SHOT_BUFFERS
+        }
 #endif  // USE_SHMEM
     };
     // A held node's neighbour that is not itself held is built as a "stub": constructed, with its vb /
@@ -369,7 +376,11 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
         }
     }
 
-    return SharedMatchingGraph(matching_graph_ptr, node_part_id, num_partitions, num_virtual_boundaries, num_rounds, num_obs_patches, p_per_obs_patch, vb_per_obs_patch);
+    SharedMatchingGraph shared_graph(matching_graph_ptr, node_part_id, num_partitions, num_virtual_boundaries, num_rounds, num_obs_patches, p_per_obs_patch, vb_per_obs_patch);
+#ifdef USE_SHMEM
+    shared_graph.built_nodes = std::move(built_nodes);
+#endif
+    return shared_graph;
 }
 
 pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_weights) {

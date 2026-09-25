@@ -152,6 +152,14 @@ struct SharedMatchingGraph {
 
     size_t num_obs_patches{ 0 };
     size_t p_per_obs_patch, vb_per_obs_patch;
+
+#ifdef USE_SHMEM
+    /// Nodes that were built (held nodes and their stubs) when the graph was built without wiring ephemeral fields
+    /// (nodes_ephemeral_fields_ptr == nullptr); empty means every node was built.
+    std::vector<size_t> built_nodes;
+    /// Points each built node's ephemeral_fields at its slot of the symmetric buffer `base` (indexed by global node id).
+    void wire_ephemeral_fields(DetectorNodeEphemeralFields* base);
+#endif
     
     SharedMatchingGraph();
     SharedMatchingGraph(

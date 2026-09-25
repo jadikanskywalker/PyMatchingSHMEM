@@ -86,9 +86,11 @@ int main_predict(int argc, const char** argv) {
             "--extraction_unit_size",
             "--extract_preemptively",
             "--subset_graph_build", // OBS + SHMEM: only build the graph nodes this PE needs (needs the surgery preset/spec flags)
+            "--limited_memory_mode", // subset build where the PEs of a node take turns loading the graph cache (needs --graph_cache_path)
             "--poison_unheld", // debug: make every node outside the subset crash on access
             "--seam_buffer_size", // OBS only: extra partitions around seams to include for solution extraction / cross-rank fusion windows
 #ifdef USE_SHMEM
+            "--prefault_windows", // touch the symmetric-heap pages cross-rank fusions use before decoding (for on-demand-paging NICs)
             "--cross_rank_fusion_window_size", // ROUND: number of partitions to send;
                                                //   OBS: extra partitions to include for cross-rank fusion windows (if different than seam_buffer_size)
 #endif
@@ -176,6 +178,7 @@ int main_predict(int argc, const char** argv) {
     config_parallel::seam_buffer_size = stim::find_int64_argument("--seam_buffer_size", 1, 0, INT64_MAX, argc, argv); // not yet implemented
 #ifdef USE_SHMEM
     config_parallel::k = stim::find_int64_argument("--cross_rank_fusion_window_size", 1, 0, INT64_MAX, argc, argv);
+    config_parallel::prefault_windows = stim::find_bool_argument("--prefault_windows", argc, argv);
 #endif
 #ifdef ENABLE_DRAW_FLAGS    
     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
@@ -183,11 +186,21 @@ int main_predict(int argc, const char** argv) {
 
     pm::UserGraph user_graph;
     bool loaded_from_graph_cache = false;
+    const bool limited_memory_mode = stim::find_bool_argument("--limited_memory_mode", argc, argv);
+    pm::GraphCacheHeader cache_header;
 
     const char* graph_cache_arg = stim::find_argument("--graph_cache_path", argc, argv);
     std::string graph_cache_path = graph_cache_arg ? graph_cache_arg : "";
 
-    if (!graph_cache_path.empty()) {
+    if (limited_memory_mode) {
+        // The graph is loaded later, inside each PE's turn (DecodingUnit); here only the cache header is needed.
+        if (graph_cache_path.empty() || !config_parallel::use_threads) {
+            throw std::invalid_argument("--limited_memory_mode needs --graph_cache_path and --use_threads.");
+        }
+        cache_header = pm::read_user_graph_cache_header(
+            graph_cache_path, enable_correlations, config_parallel::M, (int)config_parallel::division_strategy);
+        loaded_from_graph_cache = true;
+    } else if (!graph_cache_path.empty()) {
         FILE* gcache_check = fopen(graph_cache_path.c_str(), "rb");
         if (gcache_check) {
             fclose(gcache_check);
@@ -317,8 +330,8 @@ int main_predict(int argc, const char** argv) {
 #endif
 
     FILE* shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
-    size_t num_obs = user_graph.get_num_observables();
-    size_t num_detectors = user_graph.get_num_detectors();
+    size_t num_obs = limited_memory_mode ? (size_t)cache_header.num_observables : user_graph.get_num_observables();
+    size_t num_detectors = limited_memory_mode ? (size_t)cache_header.num_detectors() : user_graph.get_num_detectors();
     auto reader = stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>::make(
         shots_in, shots_in_format.id, 0, num_detectors, append_obs * num_obs);
     auto writer = stim::MeasureRecordWriter::make(predictions_out, predictions_out_format.id);
@@ -335,8 +348,16 @@ int main_predict(int argc, const char** argv) {
 
     if (config_parallel::use_threads) {
         pm::SubsetOptions subset_opts;
-        if (stim::find_bool_argument("--subset_graph_build", argc, argv)) {
+        if (stim::find_bool_argument("--subset_graph_build", argc, argv) || limited_memory_mode) {
             subset_opts.enabled = true;
+            subset_opts.limited_memory = limited_memory_mode;
+            if (limited_memory_mode) {
+                subset_opts.load_user_graph = [&]() {
+                    return pm::read_user_graph_cache(
+                        graph_cache_path, enable_correlations, config_parallel::M,
+                        (int)config_parallel::division_strategy);
+                };
+            }
             subset_opts.surgeries = resolve_surgery_specs(argc, argv);
             subset_opts.poison_unheld = stim::find_bool_argument("--poison_unheld", argc, argv);
         }
@@ -549,6 +570,17 @@ int pm::main(int argc, const char** argv) {
             shmem_init_thread(SHMEM_THREAD_SERIALIZED, &provided);
             if (provided < SHMEM_THREAD_SERIALIZED) {
                 std::cerr << "Warning: OpenSHMEM failed to init with SHMEM_THREAD_SERIALED." << std::endl;
+            }
+            if (shmem_my_pe() == 0) {
+                // Resident memory right after init: shows whether the runtime populates or pins the symmetric heap.
+                std::ifstream status("/proc/self/status");
+                std::string line;
+                while (std::getline(status, line)) {
+                    if (line.rfind("VmRSS:", 0) == 0)
+                        std::cout << "SHMEM init done: VmRSS=" << line.substr(6) << " (symmetric heap "
+                                  << (std::getenv("SHMEM_SYMMETRIC_SIZE") ? std::getenv("SHMEM_SYMMETRIC_SIZE") : "default")
+                                  << ")" << std::endl << std::flush;
+                }
             }
 #endif
             int status = main_predict(argc, argv);

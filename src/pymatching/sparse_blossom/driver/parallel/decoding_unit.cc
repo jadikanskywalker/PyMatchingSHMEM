@@ -22,6 +22,8 @@
 #include <limits>
 #include <omp.h>
 #include <set>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <sstream>
 #include <iomanip>
 #include <unordered_map>
@@ -30,6 +32,7 @@
 
 // #include "profiling/profiling_json.h"
 #include "pymatching/sparse_blossom/driver/user_graph.h"
+#include "pymatching/sparse_blossom/driver/parallel/node_turns.h"
 #include "pymatching/sparse_blossom/driver/parallel/subset_plan.h"
 
 namespace {
@@ -100,84 +103,75 @@ pm::DecodingUnit::DecodingUnit(
 #else
     const int num_shot_containers = 1;
 #endif
-#ifdef USE_SHMEM
-    nodes_nelems_per_buffer = user_graph.nodes.size();
-    RssProbe rss_probe;
-    node_ephemeral_fields_ptr = static_cast<DetectorNodeEphemeralFields*>(
-        shmem_malloc(num_shot_containers * nodes_nelems_per_buffer * sizeof(DetectorNodeEphemeralFields)));
-    rss_probe.report(pid, "node_ephemeral_fields", num_shot_containers * nodes_nelems_per_buffer * sizeof(DetectorNodeEphemeralFields));
-    if (node_ephemeral_fields_ptr == nullptr) {
-        throw std::invalid_argument("Failed to allocate symmetric detector node buffer.");
-    }
-#endif
-    if (user_graph.num_partitions <= 0) {
-        throw std::invalid_argument("Graph partitioning produced no partitions. Check --rounds_per_partition.");
-    }
-#ifdef USE_SHMEM
-    // Bound k
-    {
-        std::string k_note;
-        config_parallel::k = bound_effective_k(
-            config_parallel::k, n_pes, user_graph.num_partitions, user_graph.p_per_obs_patch,
-            config_parallel::division_strategy == config_parallel::OBS, &k_note);
-        if (!k_note.empty()) std::cout << k_note << std::endl << std::flush;
-    }
-#endif
-    // Partial build: work out which partitions / virtual boundaries this PE needs using the seam spec
+    // Builds the (possibly partial) matching and search graphs from `ug`. Ephemeral fields are wired later, after the
+    // symmetric buffer exists, so this contains no collective operation and can run inside a node-local turn.
     std::unique_ptr<HeldSet> held;
-    if (subset && subset->enabled) {
+    auto build_graphs = [&](pm::UserGraph& ug) {
+        if (ug.num_partitions <= 0) {
+            throw std::invalid_argument("Graph partitioning produced no partitions. Check --rounds_per_partition.");
+        }
 #ifdef USE_SHMEM
-        if (config_parallel::division_strategy != config_parallel::OBS) {
-            throw std::invalid_argument("The subset graph build requires --task_division_strategy observable.");
+        // Bound k
+        {
+            std::string k_note;
+            config_parallel::k = bound_effective_k(
+                config_parallel::k, n_pes, ug.num_partitions, ug.p_per_obs_patch,
+                config_parallel::division_strategy == config_parallel::OBS, &k_note);
+            if (!k_note.empty()) std::cout << k_note << std::endl << std::flush;
         }
-        const int P = (int)user_graph.num_obs_patches, K_p = (int)user_graph.p_per_obs_patch,
-                  K_vb = (int)user_graph.vb_per_obs_patch;
-        const int num_seams = (int)user_graph.num_virtual_boundaries - K_vb * P;
-        if ((int)subset->surgeries.size() != num_seams) {
-            throw std::invalid_argument(
-                "The seam spec has " + std::to_string(subset->surgeries.size()) + " seams but the graph has " +
-                std::to_string(num_seams) + ": pass the same surgery preset/spec the graph was generated from.");
-        }
-        for (const auto& sg : subset->surgeries) {
-            if (sg.obs_a < 0 || sg.obs_b < 0 || sg.obs_a >= P || sg.obs_b >= P) {
-                throw std::invalid_argument("The seam spec references an observable outside the graph's " +
-                                            std::to_string(P) + " observables.");
+#endif
+        // Partial build: work out which partitions / virtual boundaries this PE needs using the seam spec
+        if (subset && subset->enabled) {
+#ifdef USE_SHMEM
+            if (config_parallel::division_strategy != config_parallel::OBS) {
+                throw std::invalid_argument("The subset graph build requires --task_division_strategy observable.");
             }
-        }
-        subset_seam_infos = compute_seam_infos_from_spec(
-            subset->surgeries, (int)user_graph.num_rounds, config_parallel::M, K_p, K_vb, config_parallel::k);
-        const int base = P / n_pes, rem = P % n_pes;
-        const int my_obs_start = base * pid + std::min(pid, rem);
-        const int my_obs_count = base + (pid < rem ? 1 : 0);
-        held = std::make_unique<HeldSet>(compute_held_set_obs(
-            user_graph.num_partitions, user_graph.num_virtual_boundaries, P, K_p, K_vb, my_obs_start, my_obs_count,
-            subset_seam_infos));
-        held->poison = subset->poison_unheld;
-        held_partitions = held->part_held;
-        subset_graph_build = true;
-        if (pid == 0) std::cout << "Subset graph build: PE-local observables " << my_obs_start << ".." 
-                                << (my_obs_start + my_obs_count - 1) << " of " << P << " (poison="
-                                << subset->poison_unheld << ")" << std::endl << std::flush;
+            const int P = (int)ug.num_obs_patches, K_p = (int)ug.p_per_obs_patch, K_vb = (int)ug.vb_per_obs_patch;
+            const int num_seams = (int)ug.num_virtual_boundaries - K_vb * P;
+            if ((int)subset->surgeries.size() != num_seams) {
+                throw std::invalid_argument(
+                    "The seam spec has " + std::to_string(subset->surgeries.size()) + " seams but the graph has " +
+                    std::to_string(num_seams) + ": pass the same surgery preset/spec the graph was generated from.");
+            }
+            for (const auto& sg : subset->surgeries) {
+                if (sg.obs_a < 0 || sg.obs_b < 0 || sg.obs_a >= P || sg.obs_b >= P) {
+                    throw std::invalid_argument("The seam spec references an observable outside the graph's " +
+                                                std::to_string(P) + " observables.");
+                }
+            }
+            subset_seam_infos = compute_seam_infos_from_spec(
+                subset->surgeries, (int)ug.num_rounds, config_parallel::M, K_p, K_vb, config_parallel::k);
+            const int base = P / n_pes, rem = P % n_pes;
+            const int my_obs_start = base * pid + std::min(pid, rem);
+            const int my_obs_count = base + (pid < rem ? 1 : 0);
+            held = std::make_unique<HeldSet>(compute_held_set_obs(
+                ug.num_partitions, ug.num_virtual_boundaries, P, K_p, K_vb, my_obs_start, my_obs_count,
+                subset_seam_infos));
+            held->poison = subset->poison_unheld;
+            held_partitions = held->part_held;
+            subset_graph_build = true;
+            if (pid == 0) std::cout << "Subset graph build: PE-local observables " << my_obs_start << ".."
+                                    << (my_obs_start + my_obs_count - 1) << " of " << P << " (poison="
+                                    << subset->poison_unheld << ")" << std::endl << std::flush;
 #else
-        throw std::invalid_argument("The subset graph build requires a SHMEM build.");
+            throw std::invalid_argument("The subset graph build requires a SHMEM build.");
 #endif
-    }
-    graph = user_graph.to_shared_matching_graph(
-        num_distinct_weights
+        }
+        graph = ug.to_shared_matching_graph(
+            num_distinct_weights
 #ifdef USE_SHMEM
-        ,
-        node_ephemeral_fields_ptr
+            ,
+            nullptr
 #endif
-        , held.get()
-    );
-    needs_search_flooder =
-        ensure_search_flooder_included || (graph.graph_ptr->num_observables > sizeof(pm::obs_int) * 8);
-    if (needs_search_flooder) {
-        search_graph_ptr = user_graph.to_shared_search_graph(num_distinct_weights, held.get());
-    }
-    // The UserGraph is no longer needed once both graphs are built; release it to save memory
-    user_graph = pm::UserGraph();
-    {
+            , held.get()
+        );
+        needs_search_flooder =
+            ensure_search_flooder_included || (graph.graph_ptr->num_observables > sizeof(pm::obs_int) * 8);
+        if (needs_search_flooder) {
+            search_graph_ptr = ug.to_shared_search_graph(num_distinct_weights, held.get());
+        }
+    };
+    auto trim_and_report = [&](const char* when) {
         // Freed small allocations stay resident in glibc's arenas until malloc_trim hands the pages back to the OS.
         auto read_status = [](std::string& rss, std::string& hwm) {
             std::ifstream status("/proc/self/status");
@@ -191,10 +185,47 @@ pm::DecodingUnit::DecodingUnit(
         read_status(rss_before, hwm);
         malloc_trim(0);
         read_status(rss_after, hwm);
-        std::cout << "PE" << pid << " graphs built" << (subset_graph_build ? " (subset)" : " (full)")
+        std::cout << "PE" << pid << " graphs built" << (subset_graph_build ? " (subset)" : " (full)") << when
                   << ": VmRSS=" << rss_before << " -> " << rss_after << " after malloc_trim, VmHWM=" << hwm
                   << std::endl << std::flush;
+    };
+    if (subset && subset->limited_memory) {
+#ifdef USE_SHMEM
+        // The PEs of a node take turns loading the UserGraph, building their graphs and freeing it, so a node holds
+        // one UserGraph at a time. No collective operation inside the turns; everyone syncs afterwards.
+        NodeTurns turns = make_node_turns();
+        if (pid == 0) std::cout << "limited_memory_mode: " << turns.local_size << " PEs per node take turns" << std::endl;
+        run_in_turns(turns, [&]() {
+            {
+                pm::UserGraph ug = subset->load_user_graph();
+                build_graphs(ug);
+            }
+            // Return the freed UserGraph to the OS before the next PE on this node starts its turn.
+            malloc_trim(0);
+        });
+        trim_and_report(" (limited_memory_mode)");
+        shmem_barrier_all();
+#else
+        throw std::invalid_argument("limited_memory_mode requires a SHMEM build.");
+#endif
+    } else {
+        build_graphs(user_graph);
+        // The UserGraph is no longer needed once both graphs are built; release it to save memory
+        user_graph = pm::UserGraph();
+        trim_and_report("");
     }
+#ifdef USE_SHMEM
+    // Symmetric allocations are collective, so they come after the graphs (and any node-local turns).
+    nodes_nelems_per_buffer = graph.graph_ptr->nodes.size();
+    RssProbe rss_probe;
+    node_ephemeral_fields_ptr = static_cast<DetectorNodeEphemeralFields*>(
+        shmem_malloc(num_shot_containers * nodes_nelems_per_buffer * sizeof(DetectorNodeEphemeralFields)));
+    rss_probe.report(pid, "node_ephemeral_fields", num_shot_containers * nodes_nelems_per_buffer * sizeof(DetectorNodeEphemeralFields));
+    if (node_ephemeral_fields_ptr == nullptr) {
+        throw std::invalid_argument("Failed to allocate symmetric detector node buffer.");
+    }
+    graph.wire_ephemeral_fields(node_ephemeral_fields_ptr);
+#endif
     // Per-solver GraphFillRegion arena size (see REGION_ARENA_BUFFER_FACTOR's own comment) -- computed
     // for SHMEM and non-SHMEM builds because build_solvers() uses it to pre-reserve Arena::available's
     // capacity (making concurrent-push_back reallocation on that vector extra impossible).
@@ -232,6 +263,7 @@ pm::DecodingUnit::DecodingUnit(
     if (task_status_ptr == nullptr || task_fusion_summary_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate symmetric atomics buffer.");
     }
+    rss_probe.report(pid, "task_status+fusion_summary", 0);
 #endif
     // --- Create shot buffer ---
     shot_buffer = std::make_shared<pm::ShotBuffer>(
@@ -304,6 +336,7 @@ pm::DecodingUnit::DecodingUnit(
     shot_buffer->read_all_shots_and_create_IO_resources(
         graph.node_part_id, (int)num_threads, num_task_roots_for_shots, num_extraction_units_for_shots);
 #ifdef USE_SHMEM
+    rss_probe.report(pid, "read_all_shots (not an allocation buffer)", 0);
     // --- Allocate buffer for GraphFillRegion arenas ---
     // Sized globally (graph.num_partitions): the underlying SHMEM region buffer must stay
     // addressable by every PE's own global partition ids for RMA puts
@@ -362,6 +395,12 @@ pm::DecodingUnit::DecodingUnit(
         }
         shmem_barrier_all();
 #endif
+    }
+#endif
+#ifdef USE_SHMEM
+    if (config_parallel::prefault_windows) {
+        prefault_crt_windows();
+        rss_probe.report(pid, "prefault_windows", 0);
     }
 #endif
 }
@@ -1192,6 +1231,86 @@ void pm::DecodingUnit::build_solvers() {
 }
 
 #ifdef USE_SHMEM
+std::pair<int, int> pm::DecodingUnit::crt_send_window(const CrossRankTask& t) const {
+    if (config_parallel::division_strategy == config_parallel::ROUND) {
+        int p_start = (t.iamleft) ? t.part - config_parallel::k + 1 : t.part + 1;
+        int p_end = p_start + config_parallel::k - 1;
+        if (p_start < 0) p_start = 0;
+        if (p_end >= (int)graph.num_partitions) p_end = (int)graph.num_partitions - 1;
+        return {p_start, p_end};
+    }
+    size_t my_p_offset = (t.iamleft ? t.left_global_offset : t.right_global_offset).first;
+    return {t.vb_left + 1 + (int)my_p_offset, t.vb_right + (int)my_p_offset};
+}
+
+std::pair<int, int> pm::DecodingUnit::crt_recv_window(const CrossRankTask& t) const {
+    if (config_parallel::division_strategy == config_parallel::ROUND) {
+        int p_k = config_parallel::k;
+        int p_start = (t.iamleft) ? t.part + 1 : t.part - p_k + 1;
+        if (p_start < 0) {
+            p_k += p_start;
+            p_start = 0;
+        }
+        if (p_start + p_k > (int)graph.num_partitions) p_k = (int)graph.num_partitions - p_start;
+        return {p_start, p_start + p_k - 1};
+    }
+    size_t remote_p_offset = (t.iamleft ? t.right_global_offset : t.left_global_offset).first;
+    return {t.vb_left + 1 + (int)remote_p_offset, t.vb_right + (int)remote_p_offset};
+}
+
+namespace {
+#ifndef MADV_POPULATE_WRITE
+#define MADV_POPULATE_WRITE 23
+#endif
+// Faults in every page overlapping [ptr, ptr+bytes) without changing its contents. Returns the pages touched.
+size_t populate_pages(const void* ptr, size_t bytes) {
+    const uintptr_t page = (uintptr_t)sysconf(_SC_PAGESIZE);
+    uintptr_t begin = (uintptr_t)ptr & ~(page - 1);
+    uintptr_t end = ((uintptr_t)ptr + bytes + page - 1) & ~(page - 1);
+    if (madvise((void*)begin, end - begin, MADV_POPULATE_WRITE) != 0) {
+        // Kernel without MADV_POPULATE_WRITE: rewrite each page's first byte with itself.
+        for (uintptr_t a = begin; a < end; a += page) {
+            volatile char* c = (volatile char*)a;
+            *c = *c;
+        }
+    }
+    return (end - begin) / page;
+}
+}  // namespace
+
+void pm::DecodingUnit::prefault_crt_windows() {
+    if (shot_buffer->buffer.empty()) return;
+    const auto t0 = std::chrono::steady_clock::now();
+    size_t pages = 0;
+    // Every partition a cross-rank task sends from or receives into, in any shot container.
+    std::set<int> partitions;
+    for (const auto& t : shot_buffer->buffer[0].cross_rank_tasks) {
+        for (auto [a, b] : {crt_send_window(t), crt_recv_window(t)})
+            for (int p = std::max(a, 0); p <= std::min(b, (int)graph.num_partitions - 1); ++p) partitions.insert(p);
+    }
+#ifdef ENABLE_SHOT_BUFFERS
+    const size_t num_containers = NUM_BUFFERS_PER_UNIT;
+#else
+    const size_t num_containers = 1;
+#endif
+    for (size_t idx = 0; idx < num_containers; ++idx) {
+        for (int p : partitions) {
+            // Node ephemeral fields of the partition's nodes (the window put covers the whole partition range).
+            auto [first, last] = graph.partition_bounds[p];
+            pages += populate_pages(get_node_fields_ptr(idx, p), (last - first + 1) * sizeof(DetectorNodeEphemeralFields));
+            pages += populate_pages(get_extracted_fields_ptr(idx, p), regions_nelems_per_solver * sizeof(GraphFillRegionExtractedFields));
+            pages += populate_pages(get_child_edges_ptr(idx, p), child_edges_nelems_per_solver * sizeof(BlossomChild));
+        }
+    }
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    if (pid == 0) {
+        std::cout << "prefault_windows: " << partitions.size() << " partitions, " << pages << " pages ("
+                  << (pages * (size_t)sysconf(_SC_PAGESIZE) >> 20) << " MB) in " << secs << "s" << std::endl << std::flush;
+    }
+}
+#endif
+
+#ifdef USE_SHMEM
 pm::GraphFillRegionArena& pm::DecodingUnit::region_arena_for(int shot_container_id, int global_partition) {
     if (global_partition >= my_partitions_start && global_partition < my_partitions_start + my_partition_count) {
         return solver_for(shot_container_id, global_partition)->flooder.region_arena;
@@ -1264,25 +1383,11 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
     SCOREP_USER_FUNC_BEGIN();
 #endif
     size_t other_pid = t.other_pid;
-    int p_start, p_end, p_k;
+    auto [p_start, p_end] = crt_send_window(t);
+    const int p_k = p_end - p_start + 1;
     size_t my_vb_offset = 0;
-    if (config_parallel::division_strategy == config_parallel::ROUND) { // ROUND
-        p_start = (t.iamleft) ? t.part - config_parallel::k + 1 : t.part + 1;
-        p_end = p_start + config_parallel::k - 1;
-        if (p_start < 0) {
-            p_start = 0;
-        }
-        if (p_end >= graph.num_partitions) {
-            p_end = graph.num_partitions - 1;
-        }
-        p_k = p_end - p_start + 1;
-    } else { // OBS
-        auto& my_off    = t.iamleft ? t.left_global_offset  : t.right_global_offset;
-        size_t my_p_offset  = my_off.first;
-        my_vb_offset        = my_off.second;
-        p_start = t.vb_left + 1 + (int)my_p_offset;
-        p_end   = t.vb_right + (int)my_p_offset;
-        p_k = p_end - p_start + 1;
+    if (config_parallel::division_strategy != config_parallel::ROUND) { // OBS
+        my_vb_offset = (t.iamleft ? t.left_global_offset : t.right_global_offset).second;
     }
 
     bool extended = shot_buffer->num_observables > sizeof(pm::obs_int) * 8;
@@ -1656,25 +1761,8 @@ bool pm::DecodingUnit::get_solution_from_remote_pe(
     SCOREP_USER_FUNC_BEGIN();
 #endif
     size_t other_pid = t.other_pid;
-    int p_k, p_start, p_end;
-    if (config_parallel::division_strategy == config_parallel::ROUND) {
-        p_k = config_parallel::k;
-        p_start = (t.iamleft) ? t.part + 1 : t.part - p_k + 1;
-        if (p_start < 0) {
-            p_k += p_start;
-            p_start = 0;
-        }
-        if (p_start + p_k > graph.num_partitions) {
-            p_k = graph.num_partitions - p_start;
-        }
-        p_end = p_start + p_k - 1;
-    } else { // OBS
-        auto& rem_off        = t.iamleft ? t.right_global_offset : t.left_global_offset;
-        size_t remote_p_offset = rem_off.first;
-        p_start = t.vb_left + 1 + (int)remote_p_offset;
-        p_end   = t.vb_right + (int)remote_p_offset;
-        p_k     = p_end - p_start + 1;
-    }
+    auto [p_start, p_end] = crt_recv_window(t);
+    const int p_k = p_end - p_start + 1;
 
     // // Isolating local window from the rest of the graph
     // if (DEBUG) t_out << "    isolating solution" << std::endl << std::flush;

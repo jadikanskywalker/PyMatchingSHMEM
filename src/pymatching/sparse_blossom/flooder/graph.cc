@@ -285,6 +285,24 @@ pm::SharedMatchingGraph::SharedMatchingGraph(
     construct_partition_vb_bounds();
 }
 
+#ifdef USE_SHMEM
+void pm::SharedMatchingGraph::wire_ephemeral_fields(DetectorNodeEphemeralFields* base) {
+    const size_t n = graph_ptr->nodes.size();
+    auto wire = [&](size_t i) {
+#ifdef ENABLE_SHOT_BUFFERS
+        for (int j = 0; j < NUM_BUFFERS_PER_UNIT; ++j) graph_ptr->nodes[i].ephemeral_fields[j] = base + i + j * n;
+#else
+        graph_ptr->nodes[i].ephemeral_fields = base + i;
+#endif
+    };
+    if (built_nodes.empty()) {
+        for (size_t i = 0; i < n; ++i) wire(i);
+    } else {
+        for (size_t i : built_nodes) wire(i);
+    }
+}
+#endif
+
 // Scans node_part_id sequentially and fills partition_bounds / vb_bounds (see compute_partition_vb_bounds).
 void pm::SharedMatchingGraph::construct_partition_vb_bounds() {
     compute_partition_vb_bounds(node_part_id, num_partitions, num_virtual_boundaries, partition_bounds, vb_bounds);

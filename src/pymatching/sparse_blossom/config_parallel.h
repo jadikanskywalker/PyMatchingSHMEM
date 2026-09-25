@@ -47,4 +47,8 @@ namespace config_parallel {
     // solved, then recursively chunks it into <=L-leaf jobs; true builds the chain-of-unit-subtrees
     // and posts one job per checkpoint incrementally, as each one resolves during decode.
     inline bool extract_preemptively = false;
+    // SHMEM: touch (fault in) the symmetric-heap pages that cross-rank fusions read or write before decoding starts, so
+    // a NIC using on-demand paging does not take network page faults on the first send. See
+    // DecodingUnit::prefault_crt_windows.
+    inline bool prefault_windows = false;
 }

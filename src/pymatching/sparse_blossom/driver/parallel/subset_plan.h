@@ -1,6 +1,7 @@
 #ifndef PYMATCHING2_SUBSET_PLAN_H
 #define PYMATCHING2_SUBSET_PLAN_H
 
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -12,6 +13,8 @@
 
 namespace pm {
 
+class UserGraph;
+
 /// One cross-observable seam: the two observables it joins and the vb window [vb_left+1, vb_right] of
 /// (observable-local) partitions its fusion covers. unit_lo/unit_hi are its extraction-unit span.
 struct SeamInfo {
@@ -21,10 +24,16 @@ struct SeamInfo {
 
 /// Options for building only the part of the graph a PE needs (see compute_held_set_obs). Observable strategy,
 /// SHMEM builds only. `surgeries` must be the same seam spec the graph was generated from.
+///
+/// limited_memory: the UserGraph is not loaded up front. Instead each PE calls `load_user_graph` inside its turn on
+/// its node (PEs of a node take turns, see node_turns.h), builds its partial graphs, and frees the UserGraph before
+/// the next PE on the node starts, so a node never holds more than one UserGraph.
 struct SubsetOptions {
     bool enabled{false};
     std::vector<SurgerySpec> surgeries;
     bool poison_unheld{false};
+    bool limited_memory{false};
+    std::function<UserGraph()> load_user_graph;
 };
 
 /// The effective cross-rank fusion window size k for a run (the cap DecodingUnit applies right after graph
