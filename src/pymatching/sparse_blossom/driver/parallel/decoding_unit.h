@@ -95,7 +95,7 @@ struct DecodingUnit {
     // Bare region-tracking arenas for every partition NOT owned by this PE, needed only so
     // get_solution_from_remote_pe can copy a sender's bitmap and stamp owner_arena on rebased regions
     // for later del() bookkeeping -- see region_arena_for(). Built once per shot container in
-    // build_solvers(), sized/ordered by remote_index() below.
+    // build_solvers(), indexed through remote_arena_slot below.
     std::vector<GraphFillRegionArena> remote_arenas;
 #endif
     // Global partition id of this PE's own first local partition, and how many local partitions it
@@ -226,15 +226,13 @@ struct DecodingUnit {
     }
 
 #ifdef USE_SHMEM
-    // My own local range is one contiguous block, but its complement generally isn't (e.g. PE1 with
-    // local [8..15] has "remote" split across PE0's [0..7] and PE2's [16..23]). remote_arenas is built
-    // by iterating every global partition once and appending everything outside my own local range, in
-    // order -- so the index back is a two-branch formula, not a plain subtraction. Only ever called
-    // for partitions the caller has already confirmed are non-local.
-    inline int remote_index(int global_partition) const {
-        if (global_partition < my_partitions_start) return global_partition;
-        return global_partition - my_partition_count;
-    }
+    // remote_arenas holds one arena per remote partition this PE can receive a window for: every partition outside
+    // my own local range for a full graph build, only the held partitions for a subset build. remote_arena_slot[p]
+    // is the arena's index (per shot container) or -1 if p has none.
+    std::vector<int> remote_arena_slot;
+    size_t num_remote_arenas{0};
+    // Partitions built as held (subset build); empty means every partition is held.
+    std::vector<bool> held_partitions;
 
     // Dispatches to solvers[...]->flooder.region_arena for a local partition, or remote_arenas[...]
     // for a remote one. Used only by get_solution_from_remote_pe's bitmap-copy/rebase loop -- nowhere

@@ -33,6 +33,27 @@
 #include "pymatching/sparse_blossom/driver/parallel/subset_plan.h"
 
 namespace {
+    long vm_rss_mb() {
+        std::ifstream status("/proc/self/status");
+        std::string line;
+        while (std::getline(status, line)) {
+            if (line.rfind("VmRSS:", 0) == 0) return std::stol(line.substr(6)) / 1024;
+        }
+        return -1;
+    }
+
+    // Prints how much resident memory an allocation added (PE 0 only), to see whether it is touched eagerly.
+    struct RssProbe {
+        long last = vm_rss_mb();
+        void report(int pid, const char* what, size_t bytes) {
+            long now = vm_rss_mb();
+            if (pid == 0)
+                std::cout << "ALLOC " << what << ": " << (bytes >> 20) << " MB requested, VmRSS " << last << " -> "
+                          << now << " MB" << std::endl << std::flush;
+            last = now;
+        }
+    };
+
     // Helper function to format pointers (replacement for std::format with {:p})
     std::string format_ptr(const void* ptr) {
         std::ostringstream oss;
@@ -81,8 +102,10 @@ pm::DecodingUnit::DecodingUnit(
 #endif
 #ifdef USE_SHMEM
     nodes_nelems_per_buffer = user_graph.nodes.size();
+    RssProbe rss_probe;
     node_ephemeral_fields_ptr = static_cast<DetectorNodeEphemeralFields*>(
         shmem_malloc(num_shot_containers * nodes_nelems_per_buffer * sizeof(DetectorNodeEphemeralFields)));
+    rss_probe.report(pid, "node_ephemeral_fields", num_shot_containers * nodes_nelems_per_buffer * sizeof(DetectorNodeEphemeralFields));
     if (node_ephemeral_fields_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate symmetric detector node buffer.");
     }
@@ -130,6 +153,7 @@ pm::DecodingUnit::DecodingUnit(
             user_graph.num_partitions, user_graph.num_virtual_boundaries, P, K_p, K_vb, my_obs_start, my_obs_count,
             subset_seam_infos));
         held->poison = subset->poison_unheld;
+        held_partitions = held->part_held;
         subset_graph_build = true;
         if (pid == 0) std::cout << "Subset graph build: PE-local observables " << my_obs_start << ".." 
                                 << (my_obs_start + my_obs_count - 1) << " of " << P << " (poison="
@@ -197,6 +221,7 @@ pm::DecodingUnit::DecodingUnit(
     child_edges_nelems_per_solver = regions_nelems_per_solver; // Could reduce this
     regions_matched_to_vb_nelems = graph.node_part_id.size() / graph.num_rounds * SHMEM_INTERSECTION_BUFFER_FACTOR;
     child_edges_ptr = static_cast<BlossomChild*>(shmem_malloc(child_edges_nelems_per_solver * graph.num_partitions * num_shot_containers * sizeof(BlossomChild)));
+    rss_probe.report(pid, "child_edges", child_edges_nelems_per_solver * graph.num_partitions * num_shot_containers * sizeof(BlossomChild));
     if (child_edges_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate symmetric blossom child buffer.");
     }
@@ -288,6 +313,7 @@ pm::DecodingUnit::DecodingUnit(
     size_t num_regions = regions_nelems_per_solver * graph.num_partitions * num_shot_containers;
     extracted_fields_ptr = static_cast<GraphFillRegionExtractedFields*>(
         shmem_malloc(num_regions * sizeof(GraphFillRegionExtractedFields)));
+    rss_probe.report(pid, "extracted_fields", num_regions * sizeof(GraphFillRegionExtractedFields));
     if (extracted_fields_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate symmetric region extracted fields buffer.");
     }
@@ -295,6 +321,7 @@ pm::DecodingUnit::DecodingUnit(
     // GraphFillRegionArena constructs each slot on first use.
     local_regions_ptr = static_cast<GraphFillRegion*>(
         std::malloc(num_regions * sizeof(GraphFillRegion)));
+    rss_probe.report(pid, "local_regions(malloc)", num_regions * sizeof(GraphFillRegion));
     if (local_regions_ptr == nullptr) {
         throw std::invalid_argument("Failed to allocate local region buffer.");
     }
@@ -1141,15 +1168,21 @@ void pm::DecodingUnit::build_solvers() {
     // Bare region-tracking arenas for every partition NOT owned by this PE. get_solution_from_remote_pe
     // copies the sender's bitmap into one of these and stamps owner_arena on every rebased region,
     // purely for later del() bookkeeping -- no other Mwpm/GraphFlooder machinery is ever touched for a
-    // remote partition. Ordered to match remote_index(): every global partition outside my own local
-    // range, in order. Reserved to the exact final size up front so addresses stay stable -- owner_arena
-    // pointers into this vector must never dangle.
-    size_t num_remote = (size_t)graph.num_partitions - (size_t)my_partition_count;
+    // remote partition. One arena per remote partition this PE can receive a window for (see remote_arena_slot),
+    // reserved to the exact final size up front so addresses stay stable -- owner_arena pointers into this vector
+    // must never dangle.
+    remote_arena_slot.assign(graph.num_partitions, -1);
+    num_remote_arenas = 0;
+    for (int p = 0; p < (int)graph.num_partitions; ++p) {
+        if (p >= my_partitions_start && p < my_partitions_start + my_partition_count) continue;
+        if (!held_partitions.empty() && !held_partitions[p]) continue;
+        remote_arena_slot[p] = (int)num_remote_arenas++;
+    }
     remote_arenas.clear();
-    remote_arenas.reserve(num_remote * num_shot_containers);
+    remote_arenas.reserve(num_remote_arenas * num_shot_containers);
     for (size_t idx = 0; idx < num_shot_containers; ++idx) {
         for (int p = 0; p < (int)graph.num_partitions; ++p) {
-            if (p >= my_partitions_start && p < my_partitions_start + my_partition_count) continue;
+            if (remote_arena_slot[p] < 0) continue;
             remote_arenas.emplace_back(
                 get_extracted_fields_ptr(idx, p), get_local_regions_ptr(idx, p), regions_nelems_per_solver,
                 /*is_remote_shadow=*/true);
@@ -1163,8 +1196,12 @@ pm::GraphFillRegionArena& pm::DecodingUnit::region_arena_for(int shot_container_
     if (global_partition >= my_partitions_start && global_partition < my_partitions_start + my_partition_count) {
         return solver_for(shot_container_id, global_partition)->flooder.region_arena;
     }
-    size_t num_remote = (size_t)graph.num_partitions - (size_t)my_partition_count;
-    return remote_arenas[num_remote * (size_t)shot_container_id + (size_t)remote_index(global_partition)];
+    if (remote_arena_slot[global_partition] < 0) {
+        throw std::logic_error(
+            "Rank " + std::to_string(pid) + ": partition " + std::to_string(global_partition) +
+            " has no remote arena (outside the partitions this PE built)");
+    }
+    return remote_arenas[num_remote_arenas * (size_t)shot_container_id + (size_t)remote_arena_slot[global_partition]];
 }
 #endif
 
