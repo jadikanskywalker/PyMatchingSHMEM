@@ -27,7 +27,7 @@
 
 if [ $# -le 7 ]
   then
-    echo "Args: [surgery_preset] [d] [p_dec] [shots] [rounds] [M] [k] [L] [cache_suffix (optional)] [parent_dir (optional)]"
+    echo "Args: [surgery_preset] [d] [p_dec] [shots] [rounds] [M] [k] [L] [cache_suffix (optional)] [parent_dir (optional)] [shmem_impl: sos|osss (optional, default sos)]"
     exit 1
 else
     surgery_preset=$1
@@ -56,6 +56,14 @@ det_suffix=${dem_suffix}_${shots}s
 # depth without breaking the old "../scripts/..." assumption that dirname sits one level under
 # PyMatchingSHMEM/.
 parent_dir=${10:-.}
+# shmem_impl (11th arg, optional): which OpenSHMEM implementation to launch and run -- "sos" (default; $SOS_DIR's oshrun with
+# build_sos/pymatching) or "osss" ($OSSS_DIR's oshrun with build_osss/pymatching). Forwarded to
+# benchmark_shmem_obs_call_cached.sh via the SHMEM_IMPL environment variable.
+shmem_impl=${11:-sos}
+case $shmem_impl in
+    sos|osss) ;;
+    *) echo "shmem_impl must be sos or osss (got '$shmem_impl')"; exit 1 ;;
+esac
 dirname=$parent_dir/bench_${det_suffix}_L${L}
 
 mkdir -p $dirname
@@ -138,8 +146,9 @@ NODE_MEM=1490GB
 repeats=1
 
 serial_build=~/PyMatchingSHMEM/build/pymatching
-shmem_build=~/PyMatchingSHMEM/build_sos/pymatching
+if [ "$shmem_impl" = osss ]; then shmem_build=~/PyMatchingSHMEM/build_osss/pymatching; else shmem_build=~/PyMatchingSHMEM/build_sos/pymatching; fi
 echo "serial_build:  $serial_build" >> bench.out
+echo "shmem_impl: $shmem_impl" >> bench.out
 echo "shmem_build: $shmem_build" >> bench.out
 echo "----------" >> bench.out
 echo "shots: $shots    rounds: $rounds" >> bench.out
@@ -155,6 +164,7 @@ for ((m=0; m<${#M[@]}; m++ )); do
         # # single socket runs
         for ((r=0; r<repeats; r++)); do
         sbatch \
+            --export=ALL,SHMEM_IMPL=$shmem_impl,SURGERY_PRESET=$surgery_preset \
             --nodes=1 \
             --exclusive \
             --mem=$NODE_MEM \
@@ -167,6 +177,7 @@ for ((m=0; m<${#M[@]}; m++ )); do
         thisNTPN=${shmem_ntasks2_ntpn[$i]}
         for ((r=0; r<repeats; r++)); do
         sbatch \
+            --export=ALL,SHMEM_IMPL=$shmem_impl,SURGERY_PRESET=$surgery_preset \
             --nodes=$thisNodes \
             --exclusive \
             --mem=$NODE_MEM \
@@ -179,6 +190,7 @@ for ((m=0; m<${#M[@]}; m++ )); do
         thisNTPN=${shmem_ntasks4_ntpn[$i]}
         for ((r=0; r<repeats; r++)); do
         sbatch \
+            --export=ALL,SHMEM_IMPL=$shmem_impl,SURGERY_PRESET=$surgery_preset \
             --nodes=$thisNodes \
             --exclusive \
             --mem=$NODE_MEM \
@@ -191,6 +203,7 @@ for ((m=0; m<${#M[@]}; m++ )); do
         thisNTPN=${shmem_ntasks8_ntpn[$i]}
         for ((r=0; r<repeats; r++)); do
         sbatch \
+            --export=ALL,SHMEM_IMPL=$shmem_impl,SURGERY_PRESET=$surgery_preset \
             --nodes=$thisNodes \
             --exclusive \
             --mem=$NODE_MEM \

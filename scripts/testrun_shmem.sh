@@ -5,7 +5,7 @@
 #SBATCH --partition=zen4
 #SBATCH --time=03:00:00
 #SBATCH --nodes=2
-#SBATCH --ntasks=4
+#SBATCH --ntasks=2
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=1000GB
 
@@ -15,10 +15,9 @@ conda activate pymatching
 # module unload python
 # module load python
 
-# export FI_LOG_LEVEL=trace/
+# export FI_LOG_LEVEL=debug
 # export SHMEM_OFI_PROVIDER="verbs"
-export FI_VERBS_DEVICE_NAME="mlx5_2"
-# unset FI_VERBS_DEVICE_NAME
+# export FI_VERBS_DEVICE_NAME="mlx5_2"
 # export SHMEM_OFI_PROVIDER=shm
 
 if [ $# -le 7 ]
@@ -170,8 +169,12 @@ echo "Starting SHMEM run..."
 start_parallel=$(date +%s)
 export OMP_NUM_THREADS=$nthreads_shmem
 export SHMEM_SYMMETRIC_SIZE=16G
+# export UCX_LOG_LEVEL=trace
 # export LIBFABRIC_DEBUG=0
-$SWHOME/sos_1.5_scalable/bin/oshrun  \
+# OSSS oshrun has a hardcoded `env python3.12` shebang; the pymatching env is 3.13, so append base miniforge (has 3.12)
+export PATH="$PATH:$HOME/miniforge3/bin"
+# $SWHOME/osss-ucx_1.5/bin/oshrun \
+$SWHOME/sos_1.5/bin/oshrun \
     -n $n \
     --map-by ppr:$ppn:package:PE=$nthreads_shmem \
     --bind-to core \
@@ -189,7 +192,6 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --use_threads \
     --extraction_unit_size 4 \
     --extract_preemptively \
-    --draw_frames \
     --num_repeats $num_repeats \
     > log_shmem.out 2>log_shmem.err
 

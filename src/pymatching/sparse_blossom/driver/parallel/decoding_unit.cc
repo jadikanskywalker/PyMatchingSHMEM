@@ -16,6 +16,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <cstdlib>
 #include <fstream>
 #include <malloc.h>
 #include <functional>
@@ -123,38 +124,44 @@ pm::DecodingUnit::DecodingUnit(
         // Partial build: work out which partitions / virtual boundaries this PE needs using the seam spec
         if (subset && subset->enabled) {
 #ifdef USE_SHMEM
-            if (config_parallel::division_strategy != config_parallel::OBS) {
-                throw std::invalid_argument("The subset graph build requires --task_division_strategy observable.");
-            }
             const int P = (int)ug.num_obs_patches, K_p = (int)ug.p_per_obs_patch, K_vb = (int)ug.vb_per_obs_patch;
             const int num_seams = (int)ug.num_virtual_boundaries - K_vb * P;
-            if ((int)subset->surgeries.size() != num_seams) {
-                throw std::invalid_argument(
-                    "The seam spec has " + std::to_string(subset->surgeries.size()) + " seams but the graph has " +
-                    std::to_string(num_seams) + ": pass the same surgery preset/spec the graph was generated from.");
-            }
-            for (const auto& sg : subset->surgeries) {
-                if (sg.obs_a < 0 || sg.obs_b < 0 || sg.obs_a >= P || sg.obs_b >= P) {
-                    throw std::invalid_argument("The seam spec references an observable outside the graph's " +
-                                                std::to_string(P) + " observables.");
+            std::string why_not;
+            if (config_parallel::division_strategy != config_parallel::OBS) {
+                why_not = "it requires --task_division_strategy observable";
+            } else if ((int)subset->surgeries.size() != num_seams) {
+                why_not = "the seam spec has " + std::to_string(subset->surgeries.size()) + " seams but the graph has " +
+                          std::to_string(num_seams) + " (pass the --gen_surgery_preset/--gen_surgery_spec the graph was generated from)";
+            } else {
+                for (const auto& sg : subset->surgeries) {
+                    if (sg.obs_a < 0 || sg.obs_b < 0 || sg.obs_a >= P || sg.obs_b >= P) {
+                        why_not = "the seam spec references an observable outside the graph's " + std::to_string(P) + " observables";
+                        break;
+                    }
                 }
             }
-            subset_seam_infos = compute_seam_infos_from_spec(
-                subset->surgeries, (int)ug.num_rounds, config_parallel::M, K_p, K_vb, config_parallel::k);
-            const int base = P / n_pes, rem = P % n_pes;
-            const int my_obs_start = base * pid + std::min(pid, rem);
-            const int my_obs_count = base + (pid < rem ? 1 : 0);
-            held = std::make_unique<HeldSet>(compute_held_set_obs(
-                ug.num_partitions, ug.num_virtual_boundaries, P, K_p, K_vb, my_obs_start, my_obs_count,
-                subset_seam_infos));
-            held->poison = subset->poison_unheld;
-            held_partitions = held->part_held;
-            subset_graph_build = true;
-            if (pid == 0) std::cout << "Subset graph build: PE-local observables " << my_obs_start << ".."
-                                    << (my_obs_start + my_obs_count - 1) << " of " << P << " (poison="
-                                    << subset->poison_unheld << ")" << std::endl << std::flush;
-#else
-            throw std::invalid_argument("The subset graph build requires a SHMEM build.");
+            if (!why_not.empty()) {
+                if (subset->required) throw std::invalid_argument("The subset graph build is not possible: " + why_not + ".");
+                if (pid == 0) std::cout << "NOTE: using the full graph build because " << why_not << "." << std::endl;
+            } else if (n_pes == 1) {
+                // One PE holds every node: a subset build would only add overhead.
+                if (pid == 0 && subset->required) std::cout << "NOTE: single PE, using the full graph build." << std::endl;
+            } else {
+                subset_seam_infos = compute_seam_infos_from_spec(
+                    subset->surgeries, (int)ug.num_rounds, config_parallel::M, K_p, K_vb, config_parallel::k);
+                const int base = P / n_pes, rem = P % n_pes;
+                const int my_obs_start = base * pid + std::min(pid, rem);
+                const int my_obs_count = base + (pid < rem ? 1 : 0);
+                held = std::make_unique<HeldSet>(compute_held_set_obs(
+                    ug.num_partitions, ug.num_virtual_boundaries, P, K_p, K_vb, my_obs_start, my_obs_count,
+                    subset_seam_infos));
+                held->poison = subset->poison_unheld;
+                held_partitions = held->part_held;
+                subset_graph_build = true;
+                if (pid == 0) std::cout << "Subset graph build: PE-local observables " << my_obs_start << ".."
+                                        << (my_obs_start + my_obs_count - 1) << " of " << P << " (poison="
+                                        << subset->poison_unheld << ")" << std::endl << std::flush;
+            }
 #endif
         }
         graph = ug.to_shared_matching_graph(
@@ -183,7 +190,7 @@ pm::DecodingUnit::DecodingUnit(
         };
         std::string rss_before, rss_after, hwm;
         read_status(rss_before, hwm);
-        malloc_trim(0);
+        if (!std::getenv("PM_NO_MALLOC_TRIM")) malloc_trim(0);  // debug: PM_NO_MALLOC_TRIM=1 skips it
         read_status(rss_after, hwm);
         std::cout << "PE" << pid << " graphs built" << (subset_graph_build ? " (subset)" : " (full)") << when
                   << ": VmRSS=" << rss_before << " -> " << rss_after << " after malloc_trim, VmHWM=" << hwm
@@ -201,7 +208,7 @@ pm::DecodingUnit::DecodingUnit(
                 build_graphs(ug);
             }
             // Return the freed UserGraph to the OS before the next PE on this node starts its turn.
-            malloc_trim(0);
+            if (!std::getenv("PM_NO_MALLOC_TRIM")) malloc_trim(0);  // debug: PM_NO_MALLOC_TRIM=1 skips it
         });
         trim_and_report(" (limited_memory_mode)");
         shmem_barrier_all();

@@ -85,11 +85,14 @@ int main_predict(int argc, const char** argv) {
             "--task_division_strategy", // ROUND or OBS partitioning
             "--extraction_unit_size",
             "--extract_preemptively",
-            "--subset_graph_build", // OBS + SHMEM: only build the graph nodes this PE needs (needs the surgery preset/spec flags)
-            "--limited_memory_mode", // subset build where the PEs of a node take turns loading the graph cache (needs --graph_cache_path)
-            "--poison_unheld", // debug: make every node outside the subset crash on access
             "--seam_buffer_size", // OBS only: extra partitions around seams to include for solution extraction / cross-rank fusion windows
 #ifdef USE_SHMEM
+            // The subset graph build (each PE builds only the graph nodes it needs) is on by default; it needs the surgery
+            // preset/spec flags and otherwise falls back to a full build.
+            "--subset_graph_build", // require it (error instead of falling back)
+            "--full_graph_build", // turn the subset build off
+            "--limited_memory_mode", // subset build where the PEs of a node take turns loading the graph cache (needs --graph_cache_path)
+            "--poison_unheld", // debug: make every node outside the subset crash on access
             "--prefault_windows", // touch the symmetric-heap pages cross-rank fusions use before decoding (for on-demand-paging NICs)
             "--cross_rank_fusion_window_size", // ROUND: number of partitions to send;
                                                //   OBS: extra partitions to include for cross-rank fusion windows (if different than seam_buffer_size)
@@ -186,7 +189,11 @@ int main_predict(int argc, const char** argv) {
 
     pm::UserGraph user_graph;
     bool loaded_from_graph_cache = false;
+#ifdef USE_SHMEM
     const bool limited_memory_mode = stim::find_bool_argument("--limited_memory_mode", argc, argv);
+#else
+    const bool limited_memory_mode = false;
+#endif
     pm::GraphCacheHeader cache_header;
 
     const char* graph_cache_arg = stim::find_argument("--graph_cache_path", argc, argv);
@@ -347,20 +354,28 @@ int main_predict(int argc, const char** argv) {
 #endif
 
     if (config_parallel::use_threads) {
+        const pm::SubsetOptions* subset_arg = nullptr;
+#ifdef USE_SHMEM
         pm::SubsetOptions subset_opts;
-        if (stim::find_bool_argument("--subset_graph_build", argc, argv) || limited_memory_mode) {
-            subset_opts.enabled = true;
-            subset_opts.limited_memory = limited_memory_mode;
-            if (limited_memory_mode) {
-                subset_opts.load_user_graph = [&]() {
-                    return pm::read_user_graph_cache(
-                        graph_cache_path, enable_correlations, config_parallel::M,
-                        (int)config_parallel::division_strategy);
-                };
-            }
-            subset_opts.surgeries = resolve_surgery_specs(argc, argv);
-            subset_opts.poison_unheld = stim::find_bool_argument("--poison_unheld", argc, argv);
+        const bool full_graph_build = stim::find_bool_argument("--full_graph_build", argc, argv);
+        const bool subset_requested = stim::find_bool_argument("--subset_graph_build", argc, argv);
+        if (full_graph_build && (subset_requested || limited_memory_mode)) {
+            throw std::invalid_argument("--full_graph_build conflicts with --subset_graph_build / --limited_memory_mode.");
         }
+        subset_opts.enabled = !full_graph_build;
+        subset_opts.required = subset_requested || limited_memory_mode;
+        subset_opts.limited_memory = limited_memory_mode;
+        if (limited_memory_mode) {
+            subset_opts.load_user_graph = [&]() {
+                return pm::read_user_graph_cache(
+                    graph_cache_path, enable_correlations, config_parallel::M,
+                    (int)config_parallel::division_strategy);
+            };
+        }
+        subset_opts.surgeries = resolve_surgery_specs(argc, argv);
+        subset_opts.poison_unheld = stim::find_bool_argument("--poison_unheld", argc, argv);
+        subset_arg = &subset_opts;
+#endif
         pm::DecodingUnit decoding_unit(
             std::move(reader),
             std::move(writer),
@@ -368,7 +383,7 @@ int main_predict(int argc, const char** argv) {
             num_buckets,
             enable_correlations,
             enable_correlations,
-            &subset_opts
+            subset_arg
 #ifdef ENABLE_DRAW_FLAGS
             , draw_frames
             , (loaded_from_graph_cache ? nullptr : &dem)

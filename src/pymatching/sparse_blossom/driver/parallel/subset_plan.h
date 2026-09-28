@@ -28,8 +28,13 @@ struct SeamInfo {
 /// limited_memory: the UserGraph is not loaded up front. Instead each PE calls `load_user_graph` inside its turn on
 /// its node (PEs of a node take turns, see node_turns.h), builds its partial graphs, and frees the UserGraph before
 /// the next PE on the node starts, so a node never holds more than one UserGraph.
+///
+/// enabled: build only the partitions this PE needs when possible. It quietly falls back to a full build when it
+/// cannot help or cannot be done (one PE, not the observable strategy, or a seam spec that does not match the graph).
+/// required: the subset build was asked for explicitly, so those last two cases throw instead of falling back.
 struct SubsetOptions {
     bool enabled{false};
+    bool required{false};
     std::vector<SurgerySpec> surgeries;
     bool poison_unheld{false};
     bool limited_memory{false};

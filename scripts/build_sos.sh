@@ -8,8 +8,8 @@ cd ~/PyMatchingSHMEM/
 
 # rm -rf build_sos
 
-CC=/mnt/DISCL/home/jadhicks/sw/el9-x86_64/sos_1.5_scalable/bin/oshcc
-CXX=/mnt/DISCL/home/jadhicks/sw/el9-x86_64/sos_1.5_scalable/bin/oshc++
+CC=/mnt/DISCL/home/jadhicks/sw/el9-x86_64/sos_1.5/bin/oshcc
+CXX=/mnt/DISCL/home/jadhicks/sw/el9-x86_64/sos_1.5/bin/oshc++
 
 export CMAKE_EXPORT_COMPILE_COMMANDS=1
 if [ "$BUILD_TYPE" = "release" ]; then

@@ -4,10 +4,12 @@
 #SBATCH --partition=zen4
 #SBATCH --time=08:00:00
 # Known-bad nodes (comma-separated): rpc-96-1's ~/sw/$PLATFORM resolved to a dir without
+# rpc-91-7 (2026-09-25): UCX context creation stalls for minutes there (ibv_reg_mr / uct_ud_iface init), on both baseline and
+# no-trim runs, while other nodes finish it quickly.
 # oshrun at job start (2026-09-16, jobs 155973/155978) -- PATH silently missing it isn't
 # fatal to the script (no set -e), so the job "succeeds" with 0/N predictions. Add more
 # node names here, comma-separated, as they're confirmed bad.
-#SBATCH --exclude=rpc-96-1
+#SBATCH --exclude=rpc-96-1,rpc-91-7
 
 # Graph-cache variant of benchmark_shmem_obs_call.sh -- see benchmark_shmem_obs_cached.sh for
 # why (presets too large to keep a raw .dem around) and the M-must-match-the-cache caveat.
@@ -47,7 +49,28 @@ echo "Job ID: $SLURM_JOB_ID" >> $log
 source ~/.bash_profile
 conda activate pymatching
 
-export FI_VERBS_DEVICE_NAME="mlx5_2"
+# SHMEM_IMPL (exported by benchmark_shmem_obs_cached.sh): sos (default) or osss. Picks that implementation's launcher
+# ($SOS_DIR / $OSSS_DIR from ~/.bash_profile) and the binary built against it (build_sos / build_osss).
+shmem_impl=${SHMEM_IMPL:-sos}
+case $shmem_impl in
+    # impl_env: per-implementation environment, set on the command line through env so it reaches every PE whatever the
+    # launcher forwards.
+    #  SOS (libfabric verbs): SHMEM_OFI_PROVIDER=ofi_rxm and FI_VERBS_DEVICE_NAME=mlx5_2 are required (repacss
+    #    test_sos_1.5.sh uses them; without the provider named, multi-PE init fails -- 2026-09-25: 8 and 16 real PEs on one
+    #    node start with them). FI_MR_CACHE_MAX_COUNT=0 is SOS's own workaround for a libfabric memory-registration-cache
+    #    bug with multithreaded SHMEM.
+    #  OSSS (UCX): UCX_MEM_EVENTS=no -- without it 4+ PE runs fail with UCX memory-key deregistration errors
+    #    (debug_tmp/osss_crash, 2026-09-25).
+    sos)  shmem_dir=$SOS_DIR;  shmem_build=~/PyMatchingSHMEM/build_sos;  impl_env="SHMEM_OFI_PROVIDER=verbs;ofi_rxm FI_VERBS_DEVICE_NAME=mlx5_2 FI_MR_CACHE_MAX_COUNT=0" ;;
+    osss) shmem_dir=$OSSS_DIR; shmem_build=~/PyMatchingSHMEM/build_osss; impl_env="UCX_MEM_EVENTS=no" ;;
+    *)    echo "Unknown SHMEM_IMPL '$shmem_impl' (expected sos or osss)" >> $log; exit 1 ;;
+esac
+# OSSS's oshrun is a python3.12 script; conda activate above replaces miniforge3/bin (which has it) on PATH.
+export PATH="$shmem_dir/bin:$PATH:$HOME/miniforge3/bin"
+# SURGERY_PRESET (exported by the driver): the seam spec the graph cache was generated from; it lets each PE build only the
+# graph nodes it needs (the default subset build). Unset, the run falls back to a full graph build.
+echo "SHMEM implementation: $shmem_impl ($shmem_dir), binary: $shmem_build/pymatching" >> $log
+
 # Bigger than benchmark_shmem_obs_call.sh's 16G: these graphs (72/128/256/144obs) are larger
 # than the 36obs one that value was tuned against -- regions_ptr/child_edges_ptr scale with
 # the GLOBAL partition count (they do NOT shrink with more PEs, see gen_36obsx4.sh's own
@@ -57,7 +80,7 @@ export FI_VERBS_DEVICE_NAME="mlx5_2"
 # 256obs (18176 partitions, needed heap size 32G + ~25GB overrun before failing) -- 144obs has
 # even more partitions (24108). Matching the largest gen_*obs.sh's own SHMEM_SYMMETRIC_SIZE
 # (gen_144obs.sh uses 256G) rather than hand-tuning per preset again.
-export SHMEM_SYMMETRIC_SIZE=256G
+export SHMEM_SYMMETRIC_SIZE=32G
 
 export OMP_NUM_THREADS=$nthreads
 export OMP_PLACES="cores($nthreads)"
@@ -80,13 +103,13 @@ if [ $threads_per_task -gt 128 ]; then
 fi
 
 start_parallel=$(date +%s)
-oshrun  \
+$shmem_dir/bin/oshrun  \
     -n $ntasks \
     --map-by $map_by \
     --bind-to $bind_to \
     --report-bindings \
     ~/PyMatchingSHMEM/scripts/pe_output_wrapper.sh \
-    ~/PyMatchingSHMEM/build_sos/pymatching predict \
+    env $impl_env $shmem_build/pymatching predict \
         --graph_cache_path $graph_cache \
         --in $det \
         --in_format b8 \
@@ -98,6 +121,7 @@ oshrun  \
         --extraction_unit_size $L \
         --extract_preemptively \
         --use_threads \
+        ${SURGERY_PRESET:+--gen_surgery_preset $SURGERY_PRESET} \
         --num_repeats 10 \
     &>> $log
 
