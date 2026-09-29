@@ -301,7 +301,9 @@ struct DecodingUnit {
     // t_out: optional per-thread debug stream; when DEBUG and non-null, logs the vb being divided and
     // the solver/prune_target so divide timing can be traced end-to-end (see this-is-a-broader-
     // purrfect-crystal.md).
-    void divide_vb(ShotContainer& shot, int shot_container_id, size_t shot_id, TaskBase* range_task, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
+    // force=true bypasses the in_crt_window skip -- for the two boundary_fusions callers, which must
+    // still divide these now-in_crt_window-marked tasks themselves (see mark_crt_window).
+    void divide_vb(ShotContainer& shot, int shot_container_id, size_t shot_id, TaskBase* range_task, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr, bool force = false);
     // Core of divide_vb, usable directly with an explicit vb id when no TaskBase exists there --
     // see definition for the full rationale and set_vb_to_part's meaning. divide_vb itself is a
     // thin wrapper over this (bounds_source == range_task, set_vb_to_part == true).

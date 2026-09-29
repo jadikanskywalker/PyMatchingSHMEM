@@ -463,9 +463,98 @@ MatchingResult Mwpm::shatter_blossom_and_extract_matches(
     return res;
 }
 
+namespace {
+// Shared diagnostic for every match_edges push (and the one unconditional loc_from deref in
+// pair_and_shatter_subblossoms_and_extract_match_edges) in the extended (SearchGraph) path -- an
+// edge with a null loc_from should never occur; this dumps the region and its match state so we
+// can see how one got here, tagged with which call site produced it.
+void warn_if_null_edge(
+    const char *site, GraphFillRegion *region, const CompressedEdge &edge, DetectorNode *nodes0,
+    size_t num_nodes, int rotating_buffer_idx, const std::vector<int> *node_part_id) {
+    if (edge.loc_from) return;
+    auto describe = [&](DetectorNode *n) -> std::string {
+        if (!n) return "null";
+        std::ostringstream os;
+        os << n << " idx=" << (n - nodes0) << " vb=" << n->vb;
+        size_t idx = (size_t)(n - nodes0);
+        if (idx < num_nodes) {
+            auto &st = n->state(rotating_buffer_idx);
+            os << " region_that_arrived=" << st.region_that_arrived
+               << " region_that_arrived_top=" << st.region_that_arrived_top;
+        } else {
+            os << " (index out of [0, " << num_nodes << "), not dereferenced)";
+        }
+        return os.str();
+    };
+    // node_part_id[i] >= 0 is a partition id; < 0 is a virtual boundary -(vb_id+1) (held_set.h
+    // convention) -- if these land on vb/seam nodes rather than ordinary interior nodes, that
+    // points at a race between this task's extraction and a neighbouring task/CRT still growing
+    // into the same shared boundary node (plausible given --extract_preemptively is on here).
+    auto describe_part = [&](DetectorNode *sn) -> std::string {
+        ptrdiff_t idx = sn - nodes0;
+        std::ostringstream os;
+        os << "idx=" << idx;
+        if (node_part_id && idx >= 0 && (size_t)idx < node_part_id->size()) {
+            int part = (*node_part_id)[idx];
+            if (part >= 0)
+                os << " partition=" << part;
+            else
+                os << " virtual_boundary=" << (-part - 1);
+        } else {
+            os << " node_part_id=unavailable";
+        }
+        return os.str();
+    };
+    auto &m = region->state();
+    std::cerr << "WARNING: T" << omp_get_thread_num() << " NULL MATCH EDGE at " << site
+              << "\n  region=" << region << " blossom_parent=" << m.blossom_parent
+              << " blossom_parent_top=" << m.blossom_parent_top << " radius=" << m.radius
+              << " blossom_children.size()=" << region->blossom_children.size()
+              << " shell_area.size()=" << region->shell_area.size()
+              << " constructed=" << region->constructed << " destructed=" << region->destructed
+              << " alt_tree_node=" << region->alt_tree_node
+              << "\n  region->state().match.region=" << m.match.region
+              << " region->state().match.edge: loc_from=" << describe(m.match.edge.loc_from)
+              << " loc_to=" << describe(m.match.edge.loc_to)
+              << " obs_mask=" << (int)m.match.edge.obs_mask
+              << "\n  edge being handled here: loc_from=" << describe(edge.loc_from)
+              << " loc_to=" << describe(edge.loc_to) << " obs_mask=" << (int)edge.obs_mask
+              << "\n  shell_area (" << region->shell_area.size() << " nodes):";
+    for (auto *sn : region->shell_area) std::cerr << "\n    node=" << sn << " " << describe_part(sn);
+    // If this region is (or was) part of an alternating tree, dump the whole tree: every
+    // inner/outer region's shell area and partitions -- checking the theory that an adjacent
+    // partition, flooding for the next shot, sees this still-matched-but-not-yet-extracted vb
+    // region and builds an alt tree against it before the previous shot's extraction ran.
+    if (region->alt_tree_node) {
+        AltTreeNode *root = region->alt_tree_node;
+        while (root->parent.alt_tree_node) root = root->parent.alt_tree_node;
+        std::cerr << "\n  alt_tree rooted at " << root << ":";
+        auto print_region = [&](const char *label, GraphFillRegion *r) {
+            if (!r) { std::cerr << "\n      " << label << "=null"; return; }
+            std::cerr << "\n      " << label << "=" << r << " shell_area(" << r->shell_area.size() << "):";
+            for (auto *sn : r->shell_area) std::cerr << " [" << describe_part(sn) << "]";
+        };
+        std::vector<AltTreeNode *> stack = {root};
+        while (!stack.empty()) {
+            AltTreeNode *n = stack.back();
+            stack.pop_back();
+            std::cerr << "\n    alt_tree_node=" << n;
+            print_region("inner_region", n->inner_region);
+            print_region("outer_region", n->outer_region);
+            for (auto &c : n->children) stack.push_back(c.alt_tree_node);
+        }
+    }
+    std::cerr << std::endl << std::flush;
+}
+}  // namespace
+
 GraphFillRegion *Mwpm::pair_and_shatter_subblossoms_and_extract_match_edges(
     GraphFillRegion *region, std::vector<CompressedEdge> &match_edges, TaskBase *prune_target,
     std::ofstream *t_out) {
+    warn_if_null_edge(
+        "pair_and_shatter_subblossoms_and_extract_match_edges (pre subblossom lookup)", region,
+        region->state().match.edge, &flooder.graph.nodes[0], flooder.graph.num_nodes, flooder.rotating_buffer_idx,
+        flooder.node_part_id_ptr);
     for (auto &r : region->blossom_children) {
         r.region->clear_blossom_parent_ignoring_wrapped_radius();
     }
@@ -500,6 +589,10 @@ void Mwpm::shatter_blossom_and_extract_match_edges(
         if (region->blossom_children.empty() && region->state().match.region->blossom_children.empty()) {
             // Neither region nor matched region have blossom children
             // No shattering required, so just return MatchingResult from this match.
+            warn_if_null_edge(
+                "shatter_blossom_and_extract_match_edges (real-to-real base case)", region,
+                region->state().match.edge, &flooder.graph.nodes[0], flooder.graph.num_nodes,
+                flooder.rotating_buffer_idx, flooder.node_part_id_ptr);
             match_edges.push_back(region->state().match.edge);
             region->state().match.region->owner_arena->del(region->state().match.region);
             region->owner_arena->del(region);
@@ -509,7 +602,18 @@ void Mwpm::shatter_blossom_and_extract_match_edges(
         // Region with no blossom children matched to boundary -- see the identical branch in
         // shatter_blossom_and_extract_matches for the vb-pruning rationale.
         // No shattering required, so just return MatchingResult from this match.
-        match_edges.push_back(region->state().match.edge);
+        CompressedEdge edge = region->state().match.edge;
+        // A boundary/vb match's edge should always have a real loc_from -- the loc_to=nullptr
+        // overwrite below would destroy it if it were somehow already null. Check (and dump)
+        // before that overwrite so we still see what loc_to originally was.
+        warn_if_null_edge(
+            "shatter_blossom_and_extract_match_edges (vb/boundary branch, pre loc_to overwrite)", region,
+            edge, &flooder.graph.nodes[0], flooder.graph.num_nodes, flooder.rotating_buffer_idx,
+            flooder.node_part_id_ptr);
+        // loc_to may point at a (possibly unbuilt) vb node; null it so this reads as a
+        // boundary match instead of a real search target.
+        edge.loc_to = nullptr;
+        match_edges.push_back(edge);
         // if (region->state().match.edge.loc_to != nullptr) {
         //     if (DEBUG && t_out) {
         //         std::ostringstream out_message;
@@ -591,6 +695,33 @@ void Mwpm::verify_invariants() const {
 void Mwpm::extract_paths_from_match_edges(
     const std::vector<CompressedEdge> &match_edges, uint8_t *obs_begin_ptr, total_weight_int &weight) {
     for (auto &edge : match_edges) {
+        // loc_from should never be null -- run_until_collision always needs a real node to grow
+        // from. Also flag a loc_to that isn't null but resolves outside the node array (same
+        // wild-pointer signature could come from either side, not just a null loc_from).
+        DetectorNode *nodes0 = &flooder.graph.nodes[0];
+        size_t loc_from_idx_check = edge.loc_from ? (size_t)(edge.loc_from - nodes0) : 0;
+        size_t loc_to_idx_check = edge.loc_to ? (size_t)(edge.loc_to - nodes0) : 0;
+        if (!edge.loc_from || (edge.loc_from && loc_from_idx_check >= flooder.graph.num_nodes) ||
+            (edge.loc_to && loc_to_idx_check >= flooder.graph.num_nodes)) {
+            auto describe = [&](DetectorNode *n) -> std::string {
+                if (!n) return "null";
+                std::ostringstream os;
+                os << n << " idx=" << (n - nodes0) << " vb=" << n->vb;
+                size_t idx = (size_t)(n - nodes0);
+                if (idx < flooder.graph.num_nodes) {
+                    auto &st = n->state(flooder.rotating_buffer_idx);
+                    os << " region_that_arrived=" << st.region_that_arrived
+                       << " region_that_arrived_top=" << st.region_that_arrived_top;
+                } else {
+                    os << " (index out of [0, " << flooder.graph.num_nodes << "), not dereferenced)";
+                }
+                return os.str();
+            };
+            std::cerr << "WARNING: T" << omp_get_thread_num()
+                      << " extract_paths_from_match_edges: bad match edge. loc_from="
+                      << describe(edge.loc_from) << " loc_to=" << describe(edge.loc_to)
+                      << " obs_mask=" << (int)edge.obs_mask << std::endl << std::flush;
+        }
         size_t loc_to_idx = edge.loc_to ? edge.loc_to - &flooder.graph.nodes[0] : SIZE_MAX;
         search_flooder.iter_edges_on_shortest_path_from_middle(
             edge.loc_from - &flooder.graph.nodes[0], loc_to_idx, [&](const pm::SearchGraphEdge &e) {
@@ -622,24 +753,40 @@ void Mwpm::prepare_for_extraction(TaskBase* t, bool set_vb_to_part) {
 Mwpm::Mwpm() {
 }
 
+namespace {
+void reset_node(DetectorNode &n) {
+#ifdef ENABLE_SHOT_BUFFERS
+    for (int solver_idx = 0; solver_idx < NUM_BUFFERS_PER_UNIT; ++solver_idx) n.reset(solver_idx);
+#else
+    n.reset(0);
+#endif
+}
+void reset_node(SearchDetectorNode &m) {
+#ifdef ENABLE_SHOT_BUFFERS
+    for (int solver_idx = 0; solver_idx < NUM_BUFFERS_PER_UNIT; ++solver_idx) m.reset(solver_idx);
+#else
+    m.reset(0);
+#endif
+}
+}  // namespace
+
 void Mwpm::reset() {
-    for (auto &n : flooder.graph.nodes) {
-#ifdef ENABLE_SHOT_BUFFERS
-        for (int solver_idx = 0; solver_idx < NUM_BUFFERS_PER_UNIT; ++solver_idx) {
-            n.reset(solver_idx);
-        }
-#else
-        n.reset(0);
+#ifdef USE_SHMEM
+    // Partial (held-set) build: only built_nodes were ever constructed; skip the rest (raw, unconstructed memory).
+    if (!flooder.graph.built_nodes.empty()) {
+        for (size_t i : flooder.graph.built_nodes) reset_node(flooder.graph.nodes[i]);
+    } else
 #endif
+    {
+        for (auto &n : flooder.graph.nodes) reset_node(n);
     }
-    for (auto &m : search_flooder.graph.nodes) {
-#ifdef ENABLE_SHOT_BUFFERS
-        for (int solver_idx = 0; solver_idx < NUM_BUFFERS_PER_UNIT; ++solver_idx) {
-            m.reset(solver_idx);
-        }
-#else
-        m.reset(0);
+#ifdef USE_SHMEM
+    if (!search_flooder.graph.built_nodes.empty()) {
+        for (size_t i : search_flooder.graph.built_nodes) reset_node(search_flooder.graph.nodes[i]);
+    } else
 #endif
+    {
+        for (auto &m : search_flooder.graph.nodes) reset_node(m);
     }
     flooder.queue.clear();
     node_arena.~Arena();

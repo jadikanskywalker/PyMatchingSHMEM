@@ -28,14 +28,6 @@ pm::SearchFlooder::SearchFlooder(std::shared_ptr<pm::SearchGraph> graph, int sol
     : graph_ptr(std::move(graph)), graph(*graph_ptr), rotating_buffer_idx(solver_set_idx), target_type(NO_TARGET) {
 }
 
-inline bool pm::SearchFlooder::is_active(const pm::SearchDetectorNode* node) const {
-    if (node->vb < 0)
-        return true;
-    if (node->vb > vb_left && node->vb < vb_right)
-        return true;
-    return (node->vb == vb);  // OBS seam vb
-}
-
 std::pair<size_t, pm::cumulative_time_int> pm::SearchFlooder::find_next_event_at_node_returning_neighbor_index_and_time(
     const pm::SearchDetectorNode &detector_node) const {
     pm::cumulative_time_int best_time = std::numeric_limits<cumulative_time_int>::max();
@@ -61,8 +53,17 @@ std::pair<size_t, pm::cumulative_time_int> pm::SearchFlooder::find_next_event_at
         auto weight = detector_node.neighbor_weights[i];
         auto neighbor = detector_node.neighbors[i];
 
-        if (!is_active(neighbor))  // never a candidate, never queued, never settled
+        if (!is_active(neighbor)) { 
+            if (target_type != BOUNDARY) // ignore vb, looking for dst
+                continue;
+            // found virtual boundary from a virtual boundary match
+            auto collision_time = queue.cur_time + weight - (queue.cur_time - detector_node_state.distance_from_source);
+            if (collision_time < best_time) {
+                best_time = collision_time;
+                best_neighbor = i;
+            }
             continue;
+        }
 
         auto &neighbor_state = neighbor->state(rotating_buffer_idx);
 
@@ -125,8 +126,9 @@ pm::SearchGraphEdge pm::SearchFlooder::do_look_at_node_event(pm::SearchDetectorN
     auto &node_state = node.state(rotating_buffer_idx);
     if (next.second == queue.cur_time) {
         auto dst = node.neighbors[next.first];
-        if (!dst) {
-            // Found boundary (and must have target_type == BOUNDARY). Return collision edge for search to terminate.
+        if (!dst || (target_type == BOUNDARY && !is_active(dst))) {
+            // Found the boundary, or (BOUNDARY mode only) an inactive vb -- same class of node
+            // find_next_event's special-cased above, not an ordinary active pass-through node.
             return {&node, next.first};
         } else if (node_state.reached_from_source && !dst->state(rotating_buffer_idx).reached_from_source) {
             do_search_exploring_empty_detector_node(*dst, dst->index_of_neighbor(&node));

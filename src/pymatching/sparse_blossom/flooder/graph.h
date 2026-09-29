@@ -81,6 +81,13 @@ class MatchingGraph {
     }
     MatchingGraph(size_t num_nodes, size_t num_observables, double normalising_constant);
     MatchingGraph(MatchingGraph&& graph) noexcept;
+
+#ifdef USE_SHMEM
+    /// Held+stub node indices for a partial build; empty means every node was built (full build).
+    /// Anything walking every node (e.g. Mwpm::reset()) must use this instead of iterating nodes directly.
+    std::vector<size_t> built_nodes;
+    void wire_ephemeral_fields(DetectorNodeEphemeralFields* base);
+#endif
     void add_edge(
         size_t u,
         size_t v,
@@ -154,10 +161,7 @@ struct SharedMatchingGraph {
     size_t p_per_obs_patch, vb_per_obs_patch;
 
 #ifdef USE_SHMEM
-    /// Nodes that were built (held nodes and their stubs) when the graph was built without wiring ephemeral fields
-    /// (nodes_ephemeral_fields_ptr == nullptr); empty means every node was built.
-    std::vector<size_t> built_nodes;
-    /// Points each built node's ephemeral_fields at its slot of the symmetric buffer `base` (indexed by global node id).
+    // Forwards to graph_ptr->wire_ephemeral_fields (see MatchingGraph::built_nodes).
     void wire_ephemeral_fields(DetectorNodeEphemeralFields* base);
 #endif
     

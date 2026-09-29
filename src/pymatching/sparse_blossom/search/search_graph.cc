@@ -32,8 +32,11 @@ pm::SearchGraph::SearchGraph(size_t num_nodes, LazyNodes)
 pm::SearchGraph::SearchGraph(pm::SearchGraph&& graph) noexcept
     : nodes(std::move(graph.nodes)),
       num_nodes(graph.num_nodes),
-      negative_weight_edges(std::move(graph.negative_weight_edges)
-      ) {
+      negative_weight_edges(std::move(graph.negative_weight_edges))
+#ifdef USE_SHMEM
+      , built_nodes(std::move(graph.built_nodes))
+#endif
+      {
 // #ifdef USE_SHMEM
 // // ===============
 //     num_partitions = graph.num_partitions;

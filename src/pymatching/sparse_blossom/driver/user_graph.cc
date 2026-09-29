@@ -284,15 +284,12 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
 #ifdef USE_SHMEM
     const int num_nodes = nodes.size();
 #endif
-#ifdef USE_SHMEM
-    std::vector<size_t> built_nodes;  // when ephemeral fields are wired later (ptr == nullptr)
-#endif
     auto init_node = [&](size_t i) {
         if (held) matching_graph.construct_node(i);
         matching_graph.nodes[i].obs_patch_id = nodes[i].observable_id;
 #ifdef USE_SHMEM
         if (node_ephemeral_fields_ptr == nullptr) {
-            if (held) built_nodes.push_back(i);
+            if (held) matching_graph.built_nodes.push_back(i);
         } else {
 #ifdef ENABLE_SHOT_BUFFERS
             for (int j = 0; j < NUM_BUFFERS_PER_UNIT; ++j) {
@@ -376,11 +373,7 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
         }
     }
 
-    SharedMatchingGraph shared_graph(matching_graph_ptr, node_part_id, num_partitions, num_virtual_boundaries, num_rounds, num_obs_patches, p_per_obs_patch, vb_per_obs_patch);
-#ifdef USE_SHMEM
-    shared_graph.built_nodes = std::move(built_nodes);
-#endif
-    return shared_graph;
+    return SharedMatchingGraph(matching_graph_ptr, node_part_id, num_partitions, num_virtual_boundaries, num_rounds, num_obs_patches, p_per_obs_patch, vb_per_obs_patch);
 }
 
 pm::MatchingGraph pm::UserGraph::to_matching_graph(pm::weight_int num_distinct_weights) {
@@ -455,7 +448,12 @@ std::shared_ptr<pm::SearchGraph> pm::UserGraph::to_shared_search_graph(
     if (held) {
         is_stub.assign(nodes.size(), false);
         for (size_t i = 0; i < nodes.size(); ++i) {
-            if (is_held(i)) search_graph.construct_node(i);
+            if (is_held(i)) {
+                search_graph.construct_node(i);
+#ifdef USE_SHMEM
+                search_graph.built_nodes.push_back(i);
+#endif
+            }
         }
     }
     auto is_built = [&](size_t i) { return is_held(i) || (held && is_stub[i]); };
@@ -473,6 +471,9 @@ std::shared_ptr<pm::SearchGraph> pm::UserGraph::to_shared_search_graph(
                 if (!is_stub[other]) {
                     is_stub[other] = true;
                     search_graph.construct_node(other);
+#ifdef USE_SHMEM
+                    search_graph.built_nodes.push_back(other);
+#endif
                 }
             }
             search_graph.add_edge_partial(u, v, weight, observables, implied_weights_for_other_edges, u_held, v_held);

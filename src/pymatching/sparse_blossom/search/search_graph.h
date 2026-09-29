@@ -35,6 +35,10 @@ class SearchGraph {
     NodeVec<SearchDetectorNode> nodes;
     size_t num_nodes;
     std::vector<std::pair<size_t, size_t>> negative_weight_edges;
+#ifdef USE_SHMEM
+    // See MatchingGraph::built_nodes.
+    std::vector<size_t> built_nodes;
+#endif
 
     // Used to restore weights after reweighting.
     std::vector<PreviousWeight> previous_weights;

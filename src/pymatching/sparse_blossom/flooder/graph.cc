@@ -164,7 +164,10 @@ MatchingGraph::MatchingGraph(MatchingGraph&& graph) noexcept
       normalising_constant(graph.normalising_constant),
       previous_weights(graph.previous_weights),
       edges_to_implied_weights_unconverted(graph.edges_to_implied_weights_unconverted),
-      loaded_from_dem_without_correlations(graph.loaded_from_dem_without_correlations) 
+      loaded_from_dem_without_correlations(graph.loaded_from_dem_without_correlations)
+#ifdef USE_SHMEM
+      , built_nodes(std::move(graph.built_nodes))
+#endif
       {
 }
 
@@ -286,13 +289,13 @@ pm::SharedMatchingGraph::SharedMatchingGraph(
 }
 
 #ifdef USE_SHMEM
-void pm::SharedMatchingGraph::wire_ephemeral_fields(DetectorNodeEphemeralFields* base) {
-    const size_t n = graph_ptr->nodes.size();
+void pm::MatchingGraph::wire_ephemeral_fields(DetectorNodeEphemeralFields* base) {
+    const size_t n = nodes.size();
     auto wire = [&](size_t i) {
 #ifdef ENABLE_SHOT_BUFFERS
-        for (int j = 0; j < NUM_BUFFERS_PER_UNIT; ++j) graph_ptr->nodes[i].ephemeral_fields[j] = base + i + j * n;
+        for (int j = 0; j < NUM_BUFFERS_PER_UNIT; ++j) nodes[i].ephemeral_fields[j] = base + i + j * n;
 #else
-        graph_ptr->nodes[i].ephemeral_fields = base + i;
+        nodes[i].ephemeral_fields = base + i;
 #endif
     };
     if (built_nodes.empty()) {
@@ -300,6 +303,10 @@ void pm::SharedMatchingGraph::wire_ephemeral_fields(DetectorNodeEphemeralFields*
     } else {
         for (size_t i : built_nodes) wire(i);
     }
+}
+
+void pm::SharedMatchingGraph::wire_ephemeral_fields(DetectorNodeEphemeralFields* base) {
+    graph_ptr->wire_ephemeral_fields(base);
 }
 #endif
 

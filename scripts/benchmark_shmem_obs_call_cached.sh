@@ -9,7 +9,7 @@
 # oshrun at job start (2026-09-16, jobs 155973/155978) -- PATH silently missing it isn't
 # fatal to the script (no set -e), so the job "succeeds" with 0/N predictions. Add more
 # node names here, comma-separated, as they're confirmed bad.
-#SBATCH --exclude=rpc-96-1,rpc-91-7
+#SBATCH --exclude=rpc-96-1,rpc-91-7,rpc-91-19
 
 # Graph-cache variant of benchmark_shmem_obs_call.sh -- see benchmark_shmem_obs_cached.sh for
 # why (presets too large to keep a raw .dem around) and the M-must-match-the-cache caveat.

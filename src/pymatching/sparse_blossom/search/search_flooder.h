@@ -97,7 +97,10 @@ void SearchFlooder::iter_edges_tracing_back_from_collision_edge(
     const SearchGraphEdge& collision_edge, Callable handle_edge) {
     iter_edges_on_path_traced_back_from_node(collision_edge.detector_node, handle_edge);
     auto other_node = collision_edge.detector_node->neighbors[collision_edge.neighbor_index];
-    if (other_node)
+    // An inactive-vb terminal (target_type == BOUNDARY) was never seeded/reached from this
+    // search's own growth -- its predecessor chain, if any, belongs to some other search.
+    bool other_node_is_vb_terminal = target_type == BOUNDARY && other_node && !is_active(other_node);
+    if (other_node && !other_node_is_vb_terminal)
         iter_edges_on_path_traced_back_from_node(other_node, handle_edge);
     handle_edge(collision_edge);
 }
@@ -156,6 +159,16 @@ void SearchFlooder::iter_edges_on_shortest_path_from_source(size_t src, size_t d
     }
 
     reset();
+}
+
+// Defined here (not search_flooder.cc) so the header-only iter_edges_tracing_back_from_collision_edge
+// template, instantiated in other translation units, can actually link against it.
+inline bool SearchFlooder::is_active(const SearchDetectorNode* node) const {
+    if (node->vb < 0)
+        return true;
+    if (node->vb > vb_left && node->vb < vb_right)
+        return true;
+    return (node->vb == vb);  // OBS seam vb
 }
 
 }  // namespace pm

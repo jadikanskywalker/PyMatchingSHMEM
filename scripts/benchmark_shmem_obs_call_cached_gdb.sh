@@ -4,15 +4,17 @@
 #SBATCH --partition=zen4
 #SBATCH --time=08:00:00
 # Known-bad nodes (comma-separated): rpc-96-1's ~/sw/$PLATFORM resolved to a dir without
+# rpc-91-7 (2026-09-25): UCX context creation stalls for minutes there (ibv_reg_mr / uct_ud_iface init).
 # oshrun at job start (2026-09-16, jobs 155973/155978) -- PATH silently missing it isn't
 # fatal to the script (no set -e), so the job "succeeds" with 0/N predictions. Add more
 # node names here, comma-separated, as they're confirmed bad.
-#SBATCH --exclude=rpc-96-1
+#SBATCH --exclude=rpc-96-1,rpc-91-7,rpc-91-19
 
 # gdb-wrapped variant of benchmark_shmem_obs_call_cached.sh -- see benchmark_shmem_obs_call_gdb.sh
 # for why (ASan incompatible with Sandia OpenSHMEM's PGAS model, PRTE's own stacktrace facility
 # confirmed not to fire for SOS binaries) and the known PRTE-liveness-kill risk under ptrace
-# overhead.
+# overhead. Build the target (build_sos or build_osss) as RelWithDebInfo first, or the "full"
+# backtrace this produces will be as address-only as the crash handler's own.
 
 if [ $# -le 8 ]
   then
@@ -39,13 +41,27 @@ cd $out
 log=log_shmem.out
 preds=../preds/preds_$suffix.01
 
+if [ ! -d ../preds ]
+  then
+    mkdir ../preds
+fi
+
 echo "Job ID: $SLURM_JOB_ID" >> $log
 
 source ~/.bash_profile
 conda activate pymatching
 
-export FI_VERBS_DEVICE_NAME="mlx5_2"
-export SHMEM_SYMMETRIC_SIZE=256G
+# SHMEM_IMPL/SURGERY_PRESET: same as benchmark_shmem_obs_call_cached.sh -- see its comment.
+shmem_impl=${SHMEM_IMPL:-sos}
+case $shmem_impl in
+    sos)  shmem_dir=$SOS_DIR;  shmem_build=~/PyMatchingSHMEM/build_sos;  impl_env="SHMEM_OFI_PROVIDER=verbs;ofi_rxm FI_VERBS_DEVICE_NAME=mlx5_2 FI_MR_CACHE_MAX_COUNT=0" ;;
+    osss) shmem_dir=$OSSS_DIR; shmem_build=~/PyMatchingSHMEM/build_osss; impl_env="UCX_MEM_EVENTS=no" ;;
+    *)    echo "Unknown SHMEM_IMPL '$shmem_impl' (expected sos or osss)" >> $log; exit 1 ;;
+esac
+export PATH="$shmem_dir/bin:$PATH:$HOME/miniforge3/bin"
+echo "SHMEM implementation: $shmem_impl ($shmem_dir), binary: $shmem_build/pymatching (gdb-wrapped)" >> $log
+
+export SHMEM_SYMMETRIC_SIZE=32G
 
 export OMP_NUM_THREADS=$nthreads
 export OMP_PLACES="cores($nthreads)"
@@ -63,13 +79,13 @@ if [ $threads_per_task -gt 128 ]; then
 fi
 
 start_parallel=$(date +%s)
-oshrun  \
+$shmem_dir/bin/oshrun  \
     -n $ntasks \
     --map-by $map_by \
     --bind-to $bind_to \
     --report-bindings \
     ~/PyMatchingSHMEM/debug_tmp/scripts/pe_gdb_wrapper.sh \
-    ~/PyMatchingSHMEM/build_sos/pymatching predict \
+    env $impl_env $shmem_build/pymatching predict \
         --graph_cache_path $graph_cache \
         --in $det \
         --in_format b8 \
@@ -81,6 +97,7 @@ oshrun  \
         --extraction_unit_size $L \
         --extract_preemptively \
         --use_threads \
+        ${SURGERY_PRESET:+--gen_surgery_preset $SURGERY_PRESET} \
         --num_repeats 10 \
     &>> $log
 
