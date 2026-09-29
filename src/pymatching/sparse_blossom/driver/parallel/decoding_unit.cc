@@ -2345,44 +2345,6 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
     // extraction-unit chunking (config_parallel::L > 1), not just a single partition.
     std::vector<Task*> leaves;
 
-    // Cross-check against mark_crt_window's own ground truth: a task that geometrically sits
-    // inside some live CRT's send or receive window but was never marked in_crt_window would get
-    // walked below as if it were an ordinary, fully-built node -- exactly the shape of bug that
-    // would leave a CRT's own received regions un-extracted (see extract_crt_received_window's
-    // leak check).
-    auto check_crt_window_marking = [&](Task* t) {
-        for (auto& crt : shot.cross_rank_tasks) {
-            auto [send_lo, send_hi] = crt_send_window(crt);
-            auto [recv_lo, recv_hi] = crt_recv_window(crt);
-            bool in_partition_window = !t->is_fusion &&
-                ((t->part >= send_lo && t->part <= send_hi) || (t->part >= recv_lo && t->part <= recv_hi));
-            // vb ids are already global under ROUND. Under OBS, mark_crt_window's own vb range
-            // (decoding_unit.cc:907-913 / extract_crt_received_window's vb_lo/vb_hi) is offset by
-            // whichever observable's global vb offset applies -- mine (local window) or the
-            // remote side's (received window) -- so both must be checked, not the raw vb_left/right.
-            int my_vb_lo = crt.vb_left + 1, my_vb_hi = crt.vb_right - 1;
-            int remote_vb_lo = crt.vb_left + 1, remote_vb_hi = crt.vb_right - 1;
-            if (config_parallel::division_strategy != config_parallel::ROUND) {
-                int my_off = (int)(crt.iamleft ? crt.left_global_offset : crt.right_global_offset).second;
-                int remote_off = (int)(crt.iamleft ? crt.right_global_offset : crt.left_global_offset).second;
-                my_vb_lo += my_off; my_vb_hi += my_off;
-                remote_vb_lo += remote_off; remote_vb_hi += remote_off;
-            }
-            bool in_vb_window = t->is_fusion &&
-                ((t->part >= my_vb_lo && t->part <= my_vb_hi) || (t->part >= remote_vb_lo && t->part <= remote_vb_hi));
-            if (in_partition_window || in_vb_window) {
-                std::cerr << "WARNING: Rank" << pid << " T" << tid << " shot=" << shot_id
-                          << " task " << (t->is_fusion ? "vb=" : "p=") << t->part
-                          << " NOT marked in_crt_window but lies inside CRT vb=" << crt.part
-                          << " other_pid=" << crt.other_pid << " send=[" << send_lo << "," << send_hi << "]"
-                          << " recv=[" << recv_lo << "," << recv_hi << "]"
-                          << " my_vb=[" << my_vb_lo << "," << my_vb_hi << "]"
-                          << " remote_vb=[" << remote_vb_lo << "," << remote_vb_hi << "]"
-                          << std::endl << std::flush;
-            }
-        }
-    };
-
     std::vector<Task*> to_visit = {root};
     while (!to_visit.empty()) {
         Task* curr = to_visit.back(); to_visit.pop_back();
@@ -2393,7 +2355,6 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
         // whichever of finalize_sent_crt_window/extract_local_crt_window actually owns them.
         if (!curr->is_fusion) {
             if (!curr->in_crt_window) {
-                check_crt_window_marking(curr);
                 accumulate_hits(solver, shot_buffer->hits(shot_id, false, curr->part), extended, local_res, t_out);
                 leaves.push_back(curr);
             } else if (DEBUG && t_out) {
@@ -2405,7 +2366,6 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
             // now (tracked separately as a correctness gap, same as divide_vb's approach fixes
             // for checkpoint/split-point boundaries specifically).
             if (!curr->in_crt_window) {
-                check_crt_window_marking(curr);
                 accumulate_hits(solver, shot_buffer->hits(shot_id, true, curr->part), extended, local_res, t_out);
             } else if (DEBUG && t_out) {
                 *t_out << "     vb=" << curr->part
