@@ -9,7 +9,7 @@
 # oshrun at job start (2026-09-16, jobs 155973/155978) -- PATH silently missing it isn't
 # fatal to the script (no set -e), so the job "succeeds" with 0/N predictions. Add more
 # node names here, comma-separated, as they're confirmed bad.
-#SBATCH --exclude=rpc-96-1,rpc-91-7,rpc-91-19
+#SBATCH --exclude=rpc-96-1,rpc-91-[1-20],rpc-94-3
 
 # Graph-cache variant of benchmark_shmem_obs_call.sh -- see benchmark_shmem_obs_cached.sh for
 # why (presets too large to keep a raw .dem around) and the M-must-match-the-cache caveat.
@@ -65,6 +65,9 @@ case $shmem_impl in
     osss) shmem_dir=$OSSS_DIR; shmem_build=~/PyMatchingSHMEM/build_osss; impl_env="UCX_MEM_EVENTS=no" ;;
     *)    echo "Unknown SHMEM_IMPL '$shmem_impl' (expected sos or osss)" >> $log; exit 1 ;;
 esac
+# SHMEM_BUILD_OVERRIDE (optional): use an alternate build dir (e.g. a RelWithDebInfo debug copy)
+# instead of the impl's default build_sos/build_osss, without touching the default for other runs.
+shmem_build=${SHMEM_BUILD_OVERRIDE:-$shmem_build}
 # OSSS's oshrun is a python3.12 script; conda activate above replaces miniforge3/bin (which has it) on PATH.
 export PATH="$shmem_dir/bin:$PATH:$HOME/miniforge3/bin"
 # SURGERY_PRESET (exported by the driver): the seam spec the graph cache was generated from; it lets each PE build only the
@@ -80,7 +83,7 @@ echo "SHMEM implementation: $shmem_impl ($shmem_dir), binary: $shmem_build/pymat
 # 256obs (18176 partitions, needed heap size 32G + ~25GB overrun before failing) -- 144obs has
 # even more partitions (24108). Matching the largest gen_*obs.sh's own SHMEM_SYMMETRIC_SIZE
 # (gen_144obs.sh uses 256G) rather than hand-tuning per preset again.
-export SHMEM_SYMMETRIC_SIZE=32G
+export SHMEM_SYMMETRIC_SIZE=48G
 
 export OMP_NUM_THREADS=$nthreads
 export OMP_PLACES="cores($nthreads)"

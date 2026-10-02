@@ -3,10 +3,9 @@
 #SBATCH --partition=zen4
 #SBATCH --time=02:00:00
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --sockets=1
-#SBATCH --cpus-per-task=128
-#SBATCH --mem-per-cpu=8G
+#SBATCH --exclusive
+#SBATCH --mem=512GB
+#SBATCH --exclude=rpc-96-1,rpc-91-[1-20],rpc-94-3
 
 thisM=$1
 thisThreads=$2

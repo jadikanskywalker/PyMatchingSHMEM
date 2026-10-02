@@ -87,8 +87,8 @@ echo $graph_cache
 echo $det
 echo $flips
 
-
-shmem_threads=(16 32 64 128 256)
+# shmem_threads=(0 36 72 144)
+shmem_threads=(0 0 64 128 256)
 
 # Fill sockets. threads: 16 32 64 128 256 (index-aligned below). sockets is the TOTAL count of
 # distinct sockets touched across the whole job (nodes * 2, since every node here is either fully
@@ -106,17 +106,13 @@ shmem_ntasks8_nodes=(  1 1 2 4 8)
 shmem_ntasks8_sockets=(1 2 4 8 16)
 shmem_ntasks8_ntpn=(   8 8 4 2 1)
 
-# shmem_ntasks16_nodes=(   1 1 2 4 8)
-# shmem_ntasks16_sockets=( 1 2 4 8 16)
-# shmem_ntasks16_ntps=(   16 8 4 2 1)
+shmem_ntasks16_nodes=(   1 2 4 8  16)
+shmem_ntasks16_sockets=( 2 4 8 16 32)
+shmem_ntasks16_ntpn=(   16 8 4 2  1)
 
-
-# shmem_quarter_threads=(16 32 32)
-# shmem_quarter_ntasks=( 4  4  2)
-# shmem_quarter_ntps=(   2  1  1)
-# shmem_quarter_sockets=(2  4  2)
-# shmem_quarter_nodes=(  1  2  1)
-
+shmem_ntasks32_nodes=(   2 4 8  16 0)
+shmem_ntasks32_sockets=( 4 8 16 32 0)
+shmem_ntasks32_ntpn=(   16 8 4  2  0)
 
 # shmem_half_threads=(32 64 64)
 # shmem_half_ntasks=(  4  4  2)
@@ -161,7 +157,6 @@ for ((m=0; m<${#M[@]}; m++ )); do
     for ((i=0; i<${#shmem_threads[@]}; i++ )); do
         thisThreads=${shmem_threads[$i]}
 
-        # # single socket runs
         for ((r=0; r<repeats; r++)); do
         sbatch \
             --export=ALL,SHMEM_IMPL=$shmem_impl,SURGERY_PRESET=$surgery_preset \
@@ -211,52 +206,32 @@ for ((m=0; m<${#M[@]}; m++ )); do
                 8 $thisSockets $thisNTPN $thisThreads $thisM $k $graph_cache $det $flips $L
         done
 
-        # thisNodes=${shmem_ntasks8_nodes[$i]}
-        # thisSockets=${shmem_ntasks8_sockets[$i]}
-        # thisSPN=$((thisSockets / thisNodes))
-        # thisNTPS=${shmem_ntasks8_ntps[$i]}
-        # thisNTPN=$((thisSPN * thisNTPS)) # ntasks per node
-        # thisMEM=$((8 * 160 / $thisNodes))
-        # for ((r=0; r<repeats; r++)); do
-        # sbatch \
-        #     --nodes=$thisNodes \
-        #     --exclusive \
-        #     --mem=${thisMEM}GB \
-        #     ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call_cached.sh \
-        #         8 $thisSockets $thisNTPS $thisThreads $thisM $k $graph_cache $det $flips
-        # done
+        thisNodes=${shmem_ntasks16_nodes[$i]}
+        thisSockets=${shmem_ntasks16_sockets[$i]}
+        thisNTPN=${shmem_ntasks16_ntpn[$i]}
+        for ((r=0; r<repeats; r++)); do
+        sbatch \
+            --export=ALL,SHMEM_IMPL=$shmem_impl,SURGERY_PRESET=$surgery_preset \
+            --nodes=$thisNodes \
+            --exclusive \
+            --mem=$NODE_MEM \
+            ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call_cached.sh \
+                16 $thisSockets $thisNTPN $thisThreads $thisM $k $graph_cache $det $flips $L
+        done
 
-        # thisNodes=${shmem_ntasks16_nodes[$i]}
-        # thisSockets=${shmem_ntasks16_sockets[$i]}
-        # thisSPN=$((thisSockets / thisNodes))
-        # thisNTPS=${shmem_ntasks16_ntps[$i]}
-        # thisNTPN=$((thisSPN * thisNTPS)) # ntasks per node
-        # thisMEM=$((1280))
-        # for ((r=0; r<repeats; r++)); do
-        # sbatch \
-        #     --nodes=$thisNodes \
-        #     --exclusive \
-        #     --mem=${thisMEM}GB \
-        #     ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call_cached.sh \
-        #         16 $thisSockets $thisNTPS $thisThreads $thisM $k $graph_cache $det $flips
-        # done
+        thisNodes=${shmem_ntasks32_nodes[$i]}
+        thisSockets=${shmem_ntasks32_sockets[$i]}
+        thisNTPN=${shmem_ntasks32_ntpn[$i]}
+        for ((r=0; r<repeats; r++)); do
+        sbatch \
+            --export=ALL,SHMEM_IMPL=$shmem_impl,SURGERY_PRESET=$surgery_preset \
+            --nodes=$thisNodes \
+            --exclusive \
+            --mem=$NODE_MEM \
+            ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call_cached.sh \
+                32 $thisSockets $thisNTPN $thisThreads $thisM $k $graph_cache $det $flips $L
+        done
     done
-    # for ((i=0; i<${#shmem_quarter_threads[@]}; i++ )); do
-    #     # Quarter subscribe sockets
-    #     thisThreads=${shmem_quarter_threads[$i]}
-    #     thisNTasks=${shmem_quarter_ntasks[$i]}
-    #     thisNodes=${shmem_quarter_nodes[$i]}
-    #     thisSockets=${shmem_quarter_sockets[$i]}
-    #     thisNTPS=${shmem_quarter_ntps[$i]}
-    #     for ((r=0; r<repeats; r++)); do
-    #     sbatch \
-    #         --nodes=$thisNodes \
-    #         --exclusive \
-    #         --mem=$NODE_MEM \
-    #         ~/PyMatchingSHMEM/scripts/benchmark_shmem_obs_call_cached.sh \
-    #             $thisNTasks $thisSockets $thisNTPS $thisThreads $thisM $k $graph_cache $det $flips
-    #     done
-
     #     # Half subsribe sockets
     #     thisThreads=${shmem_half_threads[$i]}
     #     thisNTasks=${shmem_half_ntasks[$i]}

@@ -8,7 +8,7 @@
 # oshrun at job start (2026-09-16, jobs 155973/155978) -- PATH silently missing it isn't
 # fatal to the script (no set -e), so the job "succeeds" with 0/N predictions. Add more
 # node names here, comma-separated, as they're confirmed bad.
-#SBATCH --exclude=rpc-96-1,rpc-91-7,rpc-91-19
+#SBATCH --exclude=rpc-96-1,rpc-91-[1-20],rpc-94-3
 
 # gdb-wrapped variant of benchmark_shmem_obs_call_cached.sh -- see benchmark_shmem_obs_call_gdb.sh
 # for why (ASan incompatible with Sandia OpenSHMEM's PGAS model, PRTE's own stacktrace facility

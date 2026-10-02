@@ -2,12 +2,9 @@
 #SBATCH --job-name=bench_threads
 #SBATCH --output=bench_threads-%j.out
 #SBATCH --partition=zen4
-#SBATCH --time=02:00:00
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --sockets=1
-#SBATCH --cpus-per-task=128
-#SBATCH --mem-per-cpu=8G
+#SBATCH --time=08:00:00
+#SBATCH --exclusive
+#SBATCH --mem=512GB
 
 if [ $# -le 3 ]
   then
@@ -37,11 +34,11 @@ fi
 cd $dir
 pwd > bench.out
 
-rounds=8192
-threads=(2 4 8 16 32 64 128 256)
+rounds=10000
+threads=(16 32 64 128 256)
 # threads=(32)
 # M=(64 32 16 8)
-M=(8 16 32 64)
+M=(16 32 64)
 # M=(128)
 # threads=(16)
 # M=(8)
@@ -76,19 +73,19 @@ if $build_circuit; then
         --out_format b8
 fi
 
-for ((m=0; m<${#M[@]}; m++ )); do
-    thisM=${M[$m]}
-    echo "----------"
-    echo "M: $thisM"
-    for ((i=0; i<${#threads[@]}; i++ )); do
-        thisThreads=${threads[$i]}
-        mkdir log_M${thisM}_${thisThreads}threads
-        sbatch \
-            --chdir=log_M${thisM}_${thisThreads}threads \
-            --output=../log_M${thisM}_${thisThreads}threads.out \
-            ~/PyMatchingSHMEM/scripts/benchmark_call.sh $thisM $thisThreads
-    done
-done
+# for ((m=0; m<${#M[@]}; m++ )); do
+#     thisM=${M[$m]}
+#     echo "----------"
+#     echo "M: $thisM"
+#     for ((i=0; i<${#threads[@]}; i++ )); do
+#         thisThreads=${threads[$i]}
+#         mkdir log_M${thisM}_${thisThreads}threads
+#         sbatch \
+#             --chdir=log_M${thisM}_${thisThreads}threads \
+#             --output=../log_M${thisM}_${thisThreads}threads.out \
+#             ~/PyMatchingSHMEM/scripts/benchmark_call.sh $thisM $thisThreads
+#     done
+# done
 
 start_serial=$(date +%s)
 $serial_build predict \

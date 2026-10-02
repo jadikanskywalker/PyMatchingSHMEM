@@ -582,8 +582,8 @@ int pm::main(int argc, const char** argv) {
         if (strcmp(command, "predict") == 0) {
 #ifdef USE_SHMEM
             int provided;
-            shmem_init_thread(SHMEM_THREAD_SERIALIZED, &provided);
-            if (provided < SHMEM_THREAD_SERIALIZED) {
+            shmem_init_thread(SHMEM_THREAD_MULTIPLE, &provided);
+            if (provided < SHMEM_THREAD_MULTIPLE) {
                 std::cerr << "Warning: OpenSHMEM failed to init with SHMEM_THREAD_SERIALED." << std::endl;
             }
             if (shmem_my_pe() == 0) {

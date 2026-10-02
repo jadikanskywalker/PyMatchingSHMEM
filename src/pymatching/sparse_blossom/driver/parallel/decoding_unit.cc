@@ -192,7 +192,11 @@ pm::DecodingUnit::DecodingUnit(
         read_status(rss_before, hwm);
         if (!std::getenv("PM_NO_MALLOC_TRIM")) malloc_trim(0);  // debug: PM_NO_MALLOC_TRIM=1 skips it
         read_status(rss_after, hwm);
-        std::cout << "PE" << pid << " graphs built" << (subset_graph_build ? " (subset)" : " (full)") << when
+        std::cout
+#ifdef USE_SHMEM
+                  << "PE" << pid
+#endif
+                  << " graph built" << (subset_graph_build ? " (subset)" : " (full)") << when
                   << ": VmRSS=" << rss_before << " -> " << rss_after << " after malloc_trim, VmHWM=" << hwm
                   << std::endl << std::flush;
     };
@@ -1128,7 +1132,9 @@ void pm::DecodingUnit::build_tasks_for_obs_patch_partitioning() {
                        + "    is_extraction_unit_root: " + std::to_string(t.is_extraction_unit_root)
                        + "  is_extraction_unit_connector: " + std::to_string(t.is_extraction_unit_connector)
                        + "  defer_division: " + std::to_string(t.defer_division)
+#ifdef USE_SHMEM
                        + "  in_crt_window: " + std::to_string(t.in_crt_window) + "\n"
+#endif
                        + "    left_child: " + format_ptr(static_cast<void*>(t.left_child)) + ((t.left_child) ? "(" + (std::string)(t.left_child->is_fusion ? "f" : "p") + std::to_string(t.left_child->part) + ")" : "")
                        + "  me: " + format_ptr(static_cast<void*>(&t))
                        + "  right_child: " + format_ptr(static_cast<void*>(t.right_child)) + ((t.right_child) ? "(" + (std::string)(t.right_child->is_fusion ? "f" : "p") + std::to_string(t.right_child->part) + ")" : "") + "\n"
@@ -1388,6 +1394,22 @@ bool check_pointers_for_self_and_all_descendents(
     return true;
 }
 
+// True if this region (or any blossom descendant) owns a node inside p_node_range. Used for
+// regions matched to a DIFFERENT vb than the current CRT's own (send_solution_to_remote_pe's
+// t.regions_matched_to_virtual_boundary, post-setup()) -- such a region is never itself stored in
+// this window's arenas, so the region_range check above doesn't apply; only whether it physically
+// overlaps the window does.
+bool region_touches_node_range(
+    pm::GraphFillRegion* root, std::pair<pm::DetectorNode*, pm::DetectorNode*> p_node_range) {
+    for (pm::DetectorNode* node : root->shell_area) {
+        if (ptr_in_range(node, p_node_range)) return true;
+    }
+    for (pm::RegionEdge edge : root->blossom_children) {
+        if (region_touches_node_range(edge.region, p_node_range)) return true;
+    }
+    return false;
+}
+
 void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size_t shot_id, pm::MatchingResult& res, CrossRankTask &t, Task &owner_task, int tid, std::ofstream &t_out) {
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_DEFINE(solution_isolation);
@@ -1465,9 +1487,23 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
 #ifdef SCOREP_USER_ENABLE
     SCOREP_USER_REGION_BEGIN(solution_isolation, "Sender Solution Isolation", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
-    // Validation Pass: scan all live regions in the k-partition send window to ensure 
+    // Validation Pass: scan all live regions in the k-partition send window to ensure
     // all sent blossom structures are contained in the window
     auto& solver = *solver_for(shot_container_id, p_start);
+
+    // Targeted check (experiment, trying to remove full scan below for now -- see warning below)
+    // regions_matched_to_virtual_boundary could contain regions in its window matched to a vb
+    // outside the window if, e.g., two seams touch the same partition.
+    for (auto* region : t.regions_matched_to_virtual_boundary) {
+        if (region_touches_node_range(region, p_node_range)) {
+            if (extended) {
+                solver.shatter_blossom_and_extract_match_edges(region, solver.flooder.match_edges, &t, &t_out);
+            } else {
+                res += solver.shatter_blossom_and_extract_matches(region, &t, &t_out);
+            }
+        }
+    }
+
     uint64_t* bitmap_base = (uint64_t*)((char*)fusion_summary_base->regions_to_unmatch);
     // reset to 1's for safety
     size_t bitmap_words = solver.flooder.region_arena.shmem_bitmap.size() * p_k;
@@ -1546,6 +1582,19 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
                     }
                 }
                 if (!valid) {
+                    // The targeted regions_matched_to_virtual_boundary pass above already ran, so
+                    // ideally this should never fire -- if it does, boundary_fusions isolation plus
+                    // the targeted pass aren't sufficient on their own, and the full scan below is
+                    // still catching a real edge case it doesn't cover. Print (not just DEBUG) so
+                    // this is visible in a normal run.
+                    std::cerr << "WARNING: Rank" << pid << " T" << omp_get_thread_num() << " shot=" << shot_id
+                              << " send_solution_to_remote_pe: full scan found an invalid blossom NOT"
+                                 " caught by the targeted regions_matched_to_virtual_boundary pass."
+                                 " Cross-Rank Fusion " << t.part << " other_pid=" << other_pid
+                              << " blossom_root=" << blossom_root
+                              << " match.region=" << blossom_root->state().match.region
+                              << " match.edge.loc_to=" << blossom_root->state().match.edge.loc_to
+                              << std::endl << std::flush;
                     if (DEBUG) t_out << "      SHATTERING blossom_root\n" << std::flush;
                     if (extended) {
                         solver.shatter_blossom_and_extract_match_edges(blossom_root, solver.flooder.match_edges, &t, &t_out);
@@ -2243,6 +2292,7 @@ void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, siz
     // process_extraction_job's ordinary walk leaves them alone), but they still need dividing here,
     // explicitly, by the two sides that actually isolate them -- this bypasses that same flag for
     // exactly those two call sites.
+#ifdef USE_SHMEM
     if (range_task->in_crt_window && !force) { // a CRT is responsible for isolating its local window
         if (DEBUG && t_out) {
             *t_out << "  DIVIDE_VB tid=" << tid << " vb=" << range_task->part
@@ -2251,6 +2301,7 @@ void pm::DecodingUnit::divide_vb(ShotContainer& shot, int shot_container_id, siz
         }
         return;
     }
+#endif
     int vb_id = range_task->part;
     if (DEBUG && t_out) {
         *t_out << "  DIVIDE_VB tid=" << tid << " vb=" << vb_id << " range_task=" << static_cast<void*>(range_task)
@@ -2354,23 +2405,31 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
         // push their children below, their whole subtree too), leaving mark_extraction_done() to
         // whichever of finalize_sent_crt_window/extract_local_crt_window actually owns them.
         if (!curr->is_fusion) {
+#ifdef USE_SHMEM
             if (!curr->in_crt_window) {
+#endif
                 accumulate_hits(solver, shot_buffer->hits(shot_id, false, curr->part), extended, local_res, t_out);
                 leaves.push_back(curr);
+#ifdef USE_SHMEM
             } else if (DEBUG && t_out) {
                 *t_out << "     p=" << curr->part
                     << " SKIPPED (in_crt_window)" << std::endl << std::flush;
             }
+#endif
         } else {
             // Internal (non-checkpoint) fusion vb -- still the simpler hits-list approach for
             // now (tracked separately as a correctness gap, same as divide_vb's approach fixes
             // for checkpoint/split-point boundaries specifically).
+#ifdef USE_SHMEM
             if (!curr->in_crt_window) {
+#endif
                 accumulate_hits(solver, shot_buffer->hits(shot_id, true, curr->part), extended, local_res, t_out);
+#ifdef USE_SHMEM
             } else if (DEBUG && t_out) {
                 *t_out << "     vb=" << curr->part
                     << " SKIPPED (in_crt_window)" << std::endl << std::flush;
             }
+#endif
             // left_child/right_child are TaskBase* (a preemptive-OBS chain-link's child can be a
             // CrossRankTask -- see decoding_task.h), but this walk only ever runs on non-preemptive/
             // ROUND subtrees, which never attach a CRT as a child (CRTs there sit above a subtree

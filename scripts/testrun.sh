@@ -154,8 +154,8 @@ $threads_build predict \
     --rounds_per_partition $M \
     --task_division_strategy round \
     --use_threads \
-    --extraction_unit_size 1 \
-    --draw_frames \
+    --extraction_unit_size 4 \
+    --extract_preemptively \
     > log_threads.out 2>log_threads.err
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))
