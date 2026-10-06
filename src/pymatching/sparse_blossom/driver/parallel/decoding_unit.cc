@@ -1394,21 +1394,21 @@ bool check_pointers_for_self_and_all_descendents(
     return true;
 }
 
-// True if this region (or any blossom descendant) owns a node inside p_node_range. Used for
-// regions matched to a DIFFERENT vb than the current CRT's own (send_solution_to_remote_pe's
-// t.regions_matched_to_virtual_boundary, post-setup()) -- such a region is never itself stored in
-// this window's arenas, so the region_range check above doesn't apply; only whether it physically
-// overlaps the window does.
-bool region_touches_node_range(
-    pm::GraphFillRegion* root, std::pair<pm::DetectorNode*, pm::DetectorNode*> p_node_range) {
-    for (pm::DetectorNode* node : root->shell_area) {
-        if (ptr_in_range(node, p_node_range)) return true;
-    }
-    for (pm::RegionEdge edge : root->blossom_children) {
-        if (region_touches_node_range(edge.region, p_node_range)) return true;
-    }
-    return false;
-}
+// // True if this region (or any blossom descendant) owns a node inside p_node_range. Used for
+// // regions matched to a DIFFERENT vb than the current CRT's own (send_solution_to_remote_pe's
+// // t.regions_matched_to_virtual_boundary, post-setup()) -- such a region is never itself stored in
+// // this window's arenas, so the region_range check above doesn't apply; only whether it physically
+// // overlaps the window does.
+// bool region_touches_node_range(
+//     pm::GraphFillRegion* root, std::pair<pm::DetectorNode*, pm::DetectorNode*> p_node_range) {
+//     for (pm::DetectorNode* node : root->shell_area) {
+//         if (ptr_in_range(node, p_node_range)) return true;
+//     }
+//     for (pm::RegionEdge edge : root->blossom_children) {
+//         if (region_touches_node_range(edge.region, p_node_range)) return true;
+//     }
+//     return false;
+// }
 
 void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size_t shot_id, pm::MatchingResult& res, CrossRankTask &t, Task &owner_task, int tid, std::ofstream &t_out) {
 #ifdef SCOREP_USER_ENABLE
@@ -1491,18 +1491,20 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
     // all sent blossom structures are contained in the window
     auto& solver = *solver_for(shot_container_id, p_start);
 
-    // Targeted check (experiment, trying to remove full scan below for now -- see warning below)
-    // regions_matched_to_virtual_boundary could contain regions in its window matched to a vb
-    // outside the window if, e.g., two seams touch the same partition.
-    for (auto* region : t.regions_matched_to_virtual_boundary) {
-        if (region_touches_node_range(region, p_node_range)) {
-            if (extended) {
-                solver.shatter_blossom_and_extract_match_edges(region, solver.flooder.match_edges, &t, &t_out);
-            } else {
-                res += solver.shatter_blossom_and_extract_matches(region, &t, &t_out);
-            }
-        }
-    }
+    // The below check is RACY: probably because of LocalSeamTask region propogation
+    //   leading this to destory a region that is being flooded for another observable
+    // // Targeted check (experiment, trying to remove full scan below for now -- see warning below)
+    // // regions_matched_to_virtual_boundary could contain regions in its window matched to a vb
+    // // outside the window if, e.g., two seams touch the same partition.
+    // for (auto* region : t.regions_matched_to_virtual_boundary) {
+    //     if (region_touches_node_range(region, p_node_range)) {
+    //         if (extended) {
+    //             solver.shatter_blossom_and_extract_match_edges(region, solver.flooder.match_edges, &t, &t_out);
+    //         } else {
+    //             res += solver.shatter_blossom_and_extract_matches(region, &t, &t_out);
+    //         }
+    //     }
+    // }
 
     uint64_t* bitmap_base = (uint64_t*)((char*)fusion_summary_base->regions_to_unmatch);
     // reset to 1's for safety
@@ -1582,19 +1584,19 @@ void pm::DecodingUnit::send_solution_to_remote_pe(size_t shot_container_id, size
                     }
                 }
                 if (!valid) {
-                    // The targeted regions_matched_to_virtual_boundary pass above already ran, so
-                    // ideally this should never fire -- if it does, boundary_fusions isolation plus
-                    // the targeted pass aren't sufficient on their own, and the full scan below is
-                    // still catching a real edge case it doesn't cover. Print (not just DEBUG) so
-                    // this is visible in a normal run.
-                    std::cerr << "WARNING: Rank" << pid << " T" << omp_get_thread_num() << " shot=" << shot_id
-                              << " send_solution_to_remote_pe: full scan found an invalid blossom NOT"
-                                 " caught by the targeted regions_matched_to_virtual_boundary pass."
-                                 " Cross-Rank Fusion " << t.part << " other_pid=" << other_pid
-                              << " blossom_root=" << blossom_root
-                              << " match.region=" << blossom_root->state().match.region
-                              << " match.edge.loc_to=" << blossom_root->state().match.edge.loc_to
-                              << std::endl << std::flush;
+                    // // The targeted regions_matched_to_virtual_boundary pass above already ran, so
+                    // // ideally this should never fire -- if it does, boundary_fusions isolation plus
+                    // // the targeted pass aren't sufficient on their own, and the full scan below is
+                    // // still catching a real edge case it doesn't cover. Print (not just DEBUG) so
+                    // // this is visible in a normal run.
+                    // std::cerr << "WARNING: Rank" << pid << " T" << omp_get_thread_num() << " shot=" << shot_id
+                    //           << " send_solution_to_remote_pe: full scan found an invalid blossom NOT"
+                    //              " caught by the targeted regions_matched_to_virtual_boundary pass."
+                    //              " Cross-Rank Fusion " << t.part << " other_pid=" << other_pid
+                    //           << " blossom_root=" << blossom_root
+                    //           << " match.region=" << blossom_root->state().match.region
+                    //           << " match.edge.loc_to=" << blossom_root->state().match.edge.loc_to
+                    //           << std::endl << std::flush;
                     if (DEBUG) t_out << "      SHATTERING blossom_root\n" << std::flush;
                     if (extended) {
                         solver.shatter_blossom_and_extract_match_edges(blossom_root, solver.flooder.match_edges, &t, &t_out);
@@ -2396,6 +2398,39 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
     // extraction-unit chunking (config_parallel::L > 1), not just a single partition.
     std::vector<Task*> leaves;
 
+#ifdef USE_SHMEM
+    // Diagnostic (restored from 88dad443^): warn if a task lies inside a CRT send/receive window
+    // but isn't marked in_crt_window, i.e. would be walked here as an ordinary node.
+    auto check_crt_window_marking = [&](Task* t) {
+        for (auto& crt : shot.cross_rank_tasks) {
+            auto [send_lo, send_hi] = crt_send_window(crt);
+            auto [recv_lo, recv_hi] = crt_recv_window(crt);
+            bool in_partition_window = !t->is_fusion &&
+                ((t->part >= send_lo && t->part <= send_hi) || (t->part >= recv_lo && t->part <= recv_hi));
+            int my_vb_lo = crt.vb_left + 1, my_vb_hi = crt.vb_right - 1;
+            int remote_vb_lo = crt.vb_left + 1, remote_vb_hi = crt.vb_right - 1;
+            if (config_parallel::division_strategy != config_parallel::ROUND) {
+                int my_off = (int)(crt.iamleft ? crt.left_global_offset : crt.right_global_offset).second;
+                int remote_off = (int)(crt.iamleft ? crt.right_global_offset : crt.left_global_offset).second;
+                my_vb_lo += my_off; my_vb_hi += my_off;
+                remote_vb_lo += remote_off; remote_vb_hi += remote_off;
+            }
+            bool in_vb_window = t->is_fusion &&
+                ((t->part >= my_vb_lo && t->part <= my_vb_hi) || (t->part >= remote_vb_lo && t->part <= remote_vb_hi));
+            if (in_partition_window || in_vb_window) {
+                std::cerr << "WARNING: Rank" << pid << " T" << tid << " shot=" << shot_id
+                          << " task " << (t->is_fusion ? "vb=" : "p=") << t->part
+                          << " NOT marked in_crt_window but lies inside CRT vb=" << crt.part
+                          << " other_pid=" << crt.other_pid << " send=[" << send_lo << "," << send_hi << "]"
+                          << " recv=[" << recv_lo << "," << recv_hi << "]"
+                          << " my_vb=[" << my_vb_lo << "," << my_vb_hi << "]"
+                          << " remote_vb=[" << remote_vb_lo << "," << remote_vb_hi << "]"
+                          << std::endl << std::flush;
+            }
+        }
+    };
+#endif
+
     std::vector<Task*> to_visit = {root};
     while (!to_visit.empty()) {
         Task* curr = to_visit.back(); to_visit.pop_back();
@@ -2407,6 +2442,7 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
         if (!curr->is_fusion) {
 #ifdef USE_SHMEM
             if (!curr->in_crt_window) {
+                check_crt_window_marking(curr);
 #endif
                 accumulate_hits(solver, shot_buffer->hits(shot_id, false, curr->part), extended, local_res, t_out);
                 leaves.push_back(curr);
@@ -2422,6 +2458,7 @@ void pm::DecodingUnit::process_extraction_job(ShotContainer& shot, size_t shot_i
             // for checkpoint/split-point boundaries specifically).
 #ifdef USE_SHMEM
             if (!curr->in_crt_window) {
+                check_crt_window_marking(curr);
 #endif
                 accumulate_hits(solver, shot_buffer->hits(shot_id, true, curr->part), extended, local_res, t_out);
 #ifdef USE_SHMEM

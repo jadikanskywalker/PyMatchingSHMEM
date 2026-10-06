@@ -62,7 +62,7 @@ case $shmem_impl in
     #  OSSS (UCX): UCX_MEM_EVENTS=no -- without it 4+ PE runs fail with UCX memory-key deregistration errors
     #    (debug_tmp/osss_crash, 2026-09-25).
     sos)  shmem_dir=$SOS_DIR;  shmem_build=~/PyMatchingSHMEM/build_sos;  impl_env="SHMEM_OFI_PROVIDER=verbs;ofi_rxm FI_VERBS_DEVICE_NAME=mlx5_2 FI_MR_CACHE_MAX_COUNT=0" ;;
-    osss) shmem_dir=$OSSS_DIR; shmem_build=~/PyMatchingSHMEM/build_osss; impl_env="UCX_MEM_EVENTS=no" ;;
+    osss) shmem_dir=$OSSS_DIR; shmem_build=~/PyMatchingSHMEM/build_osss; impl_env="UCX_MEM_EVENTS=no UCX_NET_DEVICES=mlx5_2:1 UCX_TLS=self,sm,rc_x UCX_UD_MLX5_TIMEOUT=300s" ;;
     *)    echo "Unknown SHMEM_IMPL '$shmem_impl' (expected sos or osss)" >> $log; exit 1 ;;
 esac
 # SHMEM_BUILD_OVERRIDE (optional): use an alternate build dir (e.g. a RelWithDebInfo debug copy)
@@ -83,7 +83,7 @@ echo "SHMEM implementation: $shmem_impl ($shmem_dir), binary: $shmem_build/pymat
 # 256obs (18176 partitions, needed heap size 32G + ~25GB overrun before failing) -- 144obs has
 # even more partitions (24108). Matching the largest gen_*obs.sh's own SHMEM_SYMMETRIC_SIZE
 # (gen_144obs.sh uses 256G) rather than hand-tuning per preset again.
-export SHMEM_SYMMETRIC_SIZE=48G
+export SHMEM_SYMMETRIC_SIZE=38G
 
 export OMP_NUM_THREADS=$nthreads
 export OMP_PLACES="cores($nthreads)"

@@ -17,11 +17,21 @@ def parse_log_file(filepath):
                 time = float(match.group(1))
     return time
 
+def rounds_and_shots(directory):
+    # shots = lines in actual_obs_flips.01; rounds = REPEAT count + 1 (matches detectors/(d^2-1))
+    with open(os.path.join(directory, 'actual_obs_flips.01')) as f:
+        shots = sum(1 for _ in f)
+    with open(os.path.join(directory, 'circuit.stim')) as f:
+        rep = max(int(m.group(1)) for m in re.finditer(r'^REPEAT (\d+)', f.read(), re.M))
+    return rep + 1, shots
+
+
 def main():
     directory = 'bench001'
     if len(sys.argv) > 1:
         directory = sys.argv[1]
         
+    num_rounds, num_shots = rounds_and_shots(directory)
     results = []
     
     for filepath in glob.glob(os.path.join(directory, 'log_*.out')):
@@ -75,13 +85,14 @@ def main():
     
     output_file = os.path.join(directory, 'results.csv')
     with open(output_file, 'w') as f:
-        f.write("M,nodes,ppn,nthreads,Decoding Time\n")
+        f.write("M,nodes,ppn,nthreads,Decoding Time,Time per Round (us)\n")
         
         prev_m = None
         for r in results:
             display_m = r['M'] if r['M'] != prev_m else ""
             prev_m = r['M']
-            f.write(f"{display_m},{r['nodes']},{r['ppn']},{r['nthreads']},{r['Decoding Time']}\n")
+            f.write(f"{display_m},{r['nodes']},{r['ppn']},{r['nthreads']},{r['Decoding Time']},"
+                    f"{r['Decoding Time'] / num_shots / num_rounds * 1000}\n")
             
     print(f"Results written to {output_file}")
 

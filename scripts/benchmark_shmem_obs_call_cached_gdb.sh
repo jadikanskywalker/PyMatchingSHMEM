@@ -55,13 +55,15 @@ conda activate pymatching
 shmem_impl=${SHMEM_IMPL:-sos}
 case $shmem_impl in
     sos)  shmem_dir=$SOS_DIR;  shmem_build=~/PyMatchingSHMEM/build_sos;  impl_env="SHMEM_OFI_PROVIDER=verbs;ofi_rxm FI_VERBS_DEVICE_NAME=mlx5_2 FI_MR_CACHE_MAX_COUNT=0" ;;
-    osss) shmem_dir=$OSSS_DIR; shmem_build=~/PyMatchingSHMEM/build_osss; impl_env="UCX_MEM_EVENTS=no" ;;
+    osss) shmem_dir=$OSSS_DIR; shmem_build=~/PyMatchingSHMEM/build_osss_debug; impl_env="UCX_MEM_EVENTS=no UCX_NET_DEVICES=mlx5_2:1 UCX_TLS=self,sm,rc_x UCX_UD_MLX5_TIMEOUT=300s" ;;
     *)    echo "Unknown SHMEM_IMPL '$shmem_impl' (expected sos or osss)" >> $log; exit 1 ;;
 esac
+# SHMEM_BUILD_OVERRIDE (optional): alternate build dir (e.g. build_osss_debug), as in benchmark_shmem_obs_call_cached.sh.
+shmem_build=${SHMEM_BUILD_OVERRIDE:-$shmem_build}
 export PATH="$shmem_dir/bin:$PATH:$HOME/miniforge3/bin"
 echo "SHMEM implementation: $shmem_impl ($shmem_dir), binary: $shmem_build/pymatching (gdb-wrapped)" >> $log
 
-export SHMEM_SYMMETRIC_SIZE=32G
+export SHMEM_SYMMETRIC_SIZE=38G
 
 export OMP_NUM_THREADS=$nthreads
 export OMP_PLACES="cores($nthreads)"

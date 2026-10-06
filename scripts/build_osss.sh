@@ -33,7 +33,7 @@ if [ "$BUILD_TYPE" = "release" ]; then
 elif [ "$BUILD_TYPE" = "debug" ]; then
     rm -rf build_threads
     echo "Configuring Debug build..."
-    cmake . -B build_osss \
+    cmake . -B build_osss_debug \
         -DCMAKE_BUILD_TYPE=Debug \
         -DCMAKE_CXX_FLAGS_DEBUG="-g -O0 -fsanitize=address" \
         -DCMAKE_CXX_FLAGS="$UNDEF_I" \
@@ -41,7 +41,7 @@ elif [ "$BUILD_TYPE" = "debug" ]; then
         -DCMAKE_C_COMPILER="$CC" \
         -DCMAKE_CXX_COMPILER="$CXX" \
         -DUSE_SHMEM=ON
-    cd build_osss || exit
+    cd build_osss_debug || exit
 else
     echo "Invalid build type: $BUILD_TYPE. Use 'debug' or 'release'."
     exit 1
