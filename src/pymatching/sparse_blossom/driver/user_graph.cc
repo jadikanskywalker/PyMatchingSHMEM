@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include <climits>
 #include "pymatching/sparse_blossom/driver/user_graph.h"
 
 #include "pymatching/rand/rand_gen.h"
@@ -271,26 +272,45 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
 #ifdef USE_SHMEM
     , DetectorNodeEphemeralFields* node_ephemeral_fields_ptr
 #endif
+    , const HeldSet* held
 ) {
-    std::shared_ptr<MatchingGraph> matching_graph_ptr = std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
+    std::shared_ptr<MatchingGraph> matching_graph_ptr =
+        held ? std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables, pm::MatchingGraph::LazyNodes{})
+             : std::make_shared<pm::MatchingGraph>(nodes.size(), _num_observables);
     pm::MatchingGraph& matching_graph = *matching_graph_ptr;
-    // Propagate each node's own observable id to the flooder's DetectorNode, for cross-observable
-    // region routing after a seam resolves.
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        matching_graph.nodes[i].obs_patch_id = nodes[i].observable_id;
-    }
+    auto is_held = [&](size_t i) { return held == nullptr || held->node_held(node_part_id[i]); };
+    // Sets the fields every built node needs: its observable (for cross-observable region routing after a
+    // seam resolves) and, under SHMEM, its ephemeral-fields slot.
 #ifdef USE_SHMEM
     const int num_nodes = nodes.size();
-    for (int i=0; i < num_nodes; ++i) {
+#endif
+    auto init_node = [&](size_t i) {
+        if (held) matching_graph.construct_node(i);
+        matching_graph.nodes[i].obs_patch_id = nodes[i].observable_id;
+#ifdef USE_SHMEM
+        if (node_ephemeral_fields_ptr == nullptr) {
+            if (held) matching_graph.built_nodes.push_back(i);
+        } else {
 #ifdef ENABLE_SHOT_BUFFERS
-        for (int j=0; j < NUM_BUFFERS_PER_UNIT; ++j) {
-            matching_graph.nodes[i].ephemeral_fields[j] = node_ephemeral_fields_ptr + i + j*num_nodes;
-        }
+            for (int j = 0; j < NUM_BUFFERS_PER_UNIT; ++j) {
+                matching_graph.nodes[i].ephemeral_fields[j] = node_ephemeral_fields_ptr + i + j * num_nodes;
+            }
 #else
-        matching_graph.nodes[i].ephemeral_fields = node_ephemeral_fields_ptr + i;
-#endif // ENABLE_SHOT_BUFFERS
+            matching_graph.nodes[i].ephemeral_fields = node_ephemeral_fields_ptr + i;
+#endif  // ENABLE_SHOT_BUFFERS
+        }
+#endif  // USE_SHMEM
+    };
+    // A held node's neighbour that is not itself held is built as a "stub": constructed, with its vb /
+    // observable stamped so the flooder's is_active() check on it is correct, but no neighbour list. The
+    // flooder only reads such a neighbour's vb (it is an inactive virtual boundary: another seam's node, or the
+    // vb just outside a window edge).
+    std::vector<bool> is_stub;
+    if (held) is_stub.assign(nodes.size(), false);
+    auto is_built = [&](size_t i) { return is_held(i) || (held && is_stub[i]); };
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (is_held(i)) init_node(i);
     }
-#endif // USE_SHMEM
     double normalising_constant = to_matching_or_search_graph_helper(
         num_distinct_weights,
         [&](size_t u,
@@ -298,13 +318,21 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
             pm::signed_weight_int weight,
             const std::vector<size_t>& observables,
             const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
-            matching_graph.add_edge(u, v, weight, observables, implied_weights_for_other_edges);
+            const bool u_held = is_held(u), v_held = is_held(v);
+            if (held && u_held != v_held) {
+                size_t other = u_held ? v : u;
+                if (!is_stub[other]) {
+                    is_stub[other] = true;
+                    init_node(other);
+                }
+            }
+            matching_graph.add_edge_partial(u, v, weight, observables, implied_weights_for_other_edges, u_held, v_held);
         },
         [&](size_t u,
             pm::signed_weight_int weight,
             const std::vector<size_t>& observables,
             const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
-            matching_graph.add_boundary_edge(u, weight, observables, implied_weights_for_other_edges);
+            matching_graph.add_boundary_edge(u, weight, observables, implied_weights_for_other_edges, is_held(u));
         });
 
     matching_graph.normalising_constant = normalising_constant;
@@ -325,14 +353,23 @@ pm::SharedMatchingGraph pm::UserGraph::to_shared_matching_graph(
             size_t vb_marker = vb + vb_per_obs_patch * (num_obs_patches - 1);
             if (DEBUG) std::cout << "  using " << vb_marker << std::endl << std::flush;
             for (int index : virtual_boundaries[vb]) {
-                matching_graph.nodes[index].vb = vb_marker;
+                if (is_built(index)) matching_graph.nodes[index].vb = vb_marker;
             }
         }
     }
 
     for (int vb=0; vb < num_regular_vb_masks; ++vb) {
         for (int index : virtual_boundaries[vb]) {
-            matching_graph.nodes[index].vb = vb;
+            if (is_built(index)) matching_graph.nodes[index].vb = vb;
+        }
+    }
+
+    if (held && held->poison) {
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            if (is_built(i)) continue;
+            matching_graph.construct_node(i);
+            matching_graph.nodes[i].vb = INT_MIN;
+            matching_graph.nodes[i].neighbors.push_back(reinterpret_cast<DetectorNode*>(1));
         }
     }
 
@@ -392,6 +429,91 @@ pm::SearchGraph pm::UserGraph::to_search_graph(pm::weight_int num_distinct_weigh
 
     search_graph.convert_implied_weights(normalizing_constant);
     return search_graph;
+}
+
+std::shared_ptr<pm::SearchGraph> pm::UserGraph::to_shared_search_graph(
+    pm::weight_int num_distinct_weights, const HeldSet* held) {
+    /// Structurally mirrors to_shared_matching_graph, minus the SHMEM ephemeral-fields wiring (never
+    /// needed here -- SearchDetectorNodeEphemeralFields never crosses the wire) and the partition/vb
+    /// bounds metadata SharedMatchingGraph carries (not needed either: extract_paths_from_match_edges
+    /// only ever runs on a single already-fused solver's own local match_edges). Only the per-node
+    /// vb stamping is shared, so SearchFlooder::is_active() sees the same virtual-boundary structure
+    /// GraphFlooder::is_active() does. With `held`, only held nodes (plus stubs for their unheld
+    /// neighbours) are constructed -- see to_shared_matching_graph.
+    auto search_graph_ptr = held ? std::make_shared<pm::SearchGraph>(nodes.size(), pm::LazyNodes{})
+                                 : std::make_shared<pm::SearchGraph>(nodes.size());
+    pm::SearchGraph& search_graph = *search_graph_ptr;
+    auto is_held = [&](size_t i) { return held == nullptr || held->node_held(node_part_id[i]); };
+    std::vector<bool> is_stub;
+    if (held) {
+        is_stub.assign(nodes.size(), false);
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            if (is_held(i)) {
+                search_graph.construct_node(i);
+#ifdef USE_SHMEM
+                search_graph.built_nodes.push_back(i);
+#endif
+            }
+        }
+    }
+    auto is_built = [&](size_t i) { return is_held(i) || (held && is_stub[i]); };
+
+    double normalizing_constant = to_matching_or_search_graph_helper(
+        num_distinct_weights,
+        [&](size_t u,
+            size_t v,
+            pm::signed_weight_int weight,
+            const std::vector<size_t>& observables,
+            const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
+            const bool u_held = is_held(u), v_held = is_held(v);
+            if (held && u_held != v_held) {
+                size_t other = u_held ? v : u;
+                if (!is_stub[other]) {
+                    is_stub[other] = true;
+                    search_graph.construct_node(other);
+#ifdef USE_SHMEM
+                    search_graph.built_nodes.push_back(other);
+#endif
+                }
+            }
+            search_graph.add_edge_partial(u, v, weight, observables, implied_weights_for_other_edges, u_held, v_held);
+        },
+        [&](size_t u,
+            pm::signed_weight_int weight,
+            const std::vector<size_t>& observables,
+            const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
+            search_graph.add_boundary_edge(u, weight, observables, implied_weights_for_other_edges, is_held(u));
+        });
+
+    search_graph.convert_implied_weights(normalizing_constant);
+
+    size_t num_regular_vb_masks = virtual_boundaries.size();
+    if (config_parallel::division_strategy == config_parallel::OBS) {
+        num_regular_vb_masks = vb_per_obs_patch;
+        for (int vb = vb_per_obs_patch; vb < virtual_boundaries.size(); ++vb) {
+            size_t vb_marker = vb + vb_per_obs_patch * (num_obs_patches - 1);
+            for (int index : virtual_boundaries[vb]) {
+                if (is_built(index)) search_graph.nodes[index].vb = vb_marker;
+            }
+        }
+    }
+
+    for (int vb = 0; vb < num_regular_vb_masks; ++vb) {
+        for (int index : virtual_boundaries[vb]) {
+            if (is_built(index)) search_graph.nodes[index].vb = vb;
+        }
+    }
+
+    if (held && held->poison) {
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            if (is_built(i)) continue;
+            search_graph.construct_node(i);
+            search_graph.nodes[i].vb = INT_MIN;
+            search_graph.nodes[i].neighbors.push_back(reinterpret_cast<SearchDetectorNode*>(1));
+        }
+    }
+
+    return search_graph_ptr;
 }
 
 pm::Mwpm pm::UserGraph::to_mwpm(pm::weight_int num_distinct_weights, bool ensure_search_graph_included) {

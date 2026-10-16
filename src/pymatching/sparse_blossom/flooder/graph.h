@@ -24,6 +24,7 @@
 
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
 #include "pymatching/sparse_blossom/flooder/detector_node.h"
+#include "pymatching/sparse_blossom/flooder/helpers/lazy_alloc.h"
 #include "pymatching/sparse_blossom/tracker/flood_check_event.h"
 
 namespace pm {
@@ -41,7 +42,9 @@ struct PreviousWeight {
 /// will only refer to other detector nodes within the same graph.
 class MatchingGraph {
    public:
-    std::vector<DetectorNode> nodes;
+    /// Global-indexed nodes: node i is nodes[i]. Lazy graphs (see LazyNodes) leave nodes unconstructed until
+    /// construct_node(i) is called, so only nodes a PE actually needs occupy memory.
+    NodeVec<DetectorNode> nodes;
 
     /// These are the detection events that would occur if an error occurred on every edge with a negative weight
     std::set<size_t> negative_weight_detection_events_set;
@@ -68,19 +71,46 @@ class MatchingGraph {
 
     MatchingGraph();
     MatchingGraph(size_t num_nodes, size_t num_observables);
+    /// Tag for the lazy constructor below.
+    using LazyNodes = pm::LazyNodes;
+    /// Graph whose node array is lazy (mmap-backed, nothing constructed): call construct_node(i) for each node
+    /// that will be used. Unconstructed nodes are all-zero bytes and must never be read.
+    MatchingGraph(size_t num_nodes, size_t num_observables, LazyNodes);
+    void construct_node(size_t i) {
+        ::new (static_cast<void*>(&nodes[i])) DetectorNode();
+    }
     MatchingGraph(size_t num_nodes, size_t num_observables, double normalising_constant);
     MatchingGraph(MatchingGraph&& graph) noexcept;
+
+#ifdef USE_SHMEM
+    /// Held+stub node indices for a partial build; empty means every node was built (full build).
+    /// Anything walking every node (e.g. Mwpm::reset()) must use this instead of iterating nodes directly.
+    std::vector<size_t> built_nodes;
+    void wire_ephemeral_fields(DetectorNodeEphemeralFields* base);
+#endif
     void add_edge(
         size_t u,
         size_t v,
         signed_weight_int weight,
         const std::vector<size_t>& observables,
         const std::vector<pm::ImpliedWeightUnconverted>& implied_weights_for_other_edges = {});
+    /// add_edge, but only attaches the edge to the endpoints that are held (the held side keeps a pointer to the
+    /// other endpoint's slot). Negative-weight bookkeeping is done regardless, so it matches a full build.
+    void add_edge_partial(
+        size_t u,
+        size_t v,
+        signed_weight_int weight,
+        const std::vector<size_t>& observables,
+        const std::vector<pm::ImpliedWeightUnconverted>& implied_weights_for_other_edges,
+        bool u_held,
+        bool v_held);
+    /// If !held, only the (global) negative-weight bookkeeping is done and nothing is attached to node u.
     void add_boundary_edge(
         size_t u,
         signed_weight_int weight,
         const std::vector<size_t>& observables,
-        const std::vector<pm::ImpliedWeightUnconverted>& implied_weights_for_other_edges = {});
+        const std::vector<pm::ImpliedWeightUnconverted>& implied_weights_for_other_edges = {},
+        bool held = true);
     void update_negative_weight_observables(const std::vector<size_t>& observables);
     void update_negative_weight_detection_events(size_t node_id);
     void convert_implied_weights(double normalising_constant);
@@ -129,6 +159,11 @@ struct SharedMatchingGraph {
 
     size_t num_obs_patches{ 0 };
     size_t p_per_obs_patch, vb_per_obs_patch;
+
+#ifdef USE_SHMEM
+    // Forwards to graph_ptr->wire_ephemeral_fields (see MatchingGraph::built_nodes).
+    void wire_ephemeral_fields(DetectorNodeEphemeralFields* base);
+#endif
     
     SharedMatchingGraph();
     SharedMatchingGraph(

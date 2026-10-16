@@ -20,6 +20,16 @@
 #include <memory>
 #include <vector>
 
+// Architecture-specific pause instruction for spin-wait loops
+#if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+    #include <immintrin.h>
+    #define CPU_PAUSE() _mm_pause()
+#elif defined(__aarch64__) || defined(__arm__)
+    #define CPU_PAUSE() __asm__ __volatile__("yield" ::: "memory")
+#else
+    #define CPU_PAUSE() do {} while(0)
+#endif
+
 #ifdef SCOREP_USER_ENABLE
 #include <scorep/SCOREP_User.h>
 #endif
@@ -51,6 +61,15 @@ struct TaskBase {
     int vb_left;
     int vb_right;
     bool is_fusion;
+
+#ifdef USE_SHMEM
+    // Set once at task-construction time (see mark_crt_window in decoding_unit.cc) on every
+    // ordinary Task -- leaf or fusion -- whose own part/vb id falls inside a local CrossRankTask's
+    // send/receive window. Lives here (not just on Task) so divide_vb's TaskBase* parameter can
+    // check it directly; only ever set true on plain Task objects, never on a SpecialTask
+    // (CrossRankTask/LocalSeamTask themselves are never "in" a window, they define one).
+    bool in_crt_window{false};
+#endif
 
     // Which concrete kind this task is. Replaces the old is_cross_rank_fusion bool with a 3-way tag --
     // scoped (enum class) so the enumerator names can mirror the actual class names (TaskType::Task,
@@ -95,7 +114,11 @@ struct TaskBase {
     TaskBase(TaskBase&& other) noexcept
         : part(other.part), vb_marker(other.vb_marker),
           vb_left(other.vb_left), vb_right(other.vb_right),
-          is_fusion(other.is_fusion), type(other.type),
+          is_fusion(other.is_fusion),
+#ifdef USE_SHMEM
+          in_crt_window(other.in_crt_window),
+#endif
+          type(other.type),
           solver(other.solver),
           regions_to_unmatch(std::move(other.regions_to_unmatch)),
           regions_matched_to_virtual_boundary(std::move(other.regions_matched_to_virtual_boundary))
@@ -107,6 +130,9 @@ struct TaskBase {
         vb_left = other.vb_left;
         vb_right = other.vb_right;
         is_fusion = other.is_fusion;
+#ifdef USE_SHMEM
+        in_crt_window = other.in_crt_window;
+#endif
         type = other.type;
         solver = other.solver;
         regions_to_unmatch = std::move(other.regions_to_unmatch);
@@ -181,6 +207,16 @@ struct Task : public TaskBase {
     // build_tasks_for_obs_patch_partitioning. -1 for ROUND partitioning.
     int obs_patch_id{-1};
 
+    // Decentralized shot sync (docs/decentralized_shot_sync_design.md §6): a plain, ever-
+    // incrementing counter of how many rounds' worth of extraction this partition leaf has
+    // completed. No reset is needed between shots (or even between rounds) -- try_to_steal's CAS
+    // already guarantees exactly one thread ever owns a given round for a given partition, so
+    // there is no reader/writer race on a stale value to protect against. Only Task::reset()
+    // (a full --num_repeats restart) puts it back to 0. Meaningful only for partition leaves
+    // (!is_fusion), but kept unconditional on Task for simplicity, mirroring how `status` itself
+    // is unconditional despite its two branches meaning different things.
+    alignas(64) std::atomic<int64_t> extraction_done{0};
+
     Task(int partition, pm::Mwpm* solver)
         : TaskBase(partition, partition - 1, partition, false, TaskType::Task, solver)
     {
@@ -209,6 +245,7 @@ struct Task : public TaskBase {
         : TaskBase(std::move(other))
     {
         status.store(other.status.load());
+        extraction_done.store(other.extraction_done.load());
         parent = other.parent;
         left_child = other.left_child;
         right_child = other.right_child;
@@ -221,6 +258,7 @@ struct Task : public TaskBase {
     Task& operator=(Task&& other) noexcept {
         TaskBase::operator=(std::move(other));
         status.store(other.status.load());
+        extraction_done.store(other.extraction_done.load());
         parent = other.parent;
         left_child = other.left_child;
         right_child = other.right_child;
@@ -238,7 +276,7 @@ struct Task : public TaskBase {
         regions_matched_to_virtual_boundary.clear();
         if (is_fusion) {
             for (auto& region : left_child->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker)
+                if (region->state().match.edge.loc_to && region->state().match.edge.loc_to->vb == vb_marker)
                     regions_to_unmatch.push_back(region);
                 else
                     regions_matched_to_virtual_boundary.push_back(region);
@@ -246,7 +284,7 @@ struct Task : public TaskBase {
             if (left_child == right_child)
                 return; // prevent double copy
             for (auto& region : right_child->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker)
+                if (region->state().match.edge.loc_to && region->state().match.edge.loc_to->vb == vb_marker)
                     regions_to_unmatch.push_back(region);
                 else
                     regions_matched_to_virtual_boundary.push_back(region);
@@ -291,15 +329,56 @@ struct Task : public TaskBase {
 
     void reset() override {
         status.store((is_fusion) ? 0 : -1, std::memory_order_release);
+        extraction_done.store(0, std::memory_order_release);
+    }
+
+    // Called by whichever thread just finished extracting this partition leaf's own previously-
+    // closed round. Plain increment, no round argument: the gating this enables (decode(R) can't
+    // start until extract(R-1) is marked done; extract(R) can't happen until decode(R) finishes)
+    // already forces every partition's own sequence of these calls to happen in strict round
+    // order, so a plain counter can never skip or reorder.
+    void mark_extraction_done() {
+        extraction_done.fetch_add(1, std::memory_order_release);
+    }
+
+    // Called immediately after winning try_to_steal(round) for this leaf, before proceeding to
+    // decode -- the CAS succeeding only means this thread now owns the partition going forward,
+    // not that its buffer is safe to reuse yet. Pure spin-wait, deliberately not
+    // std::atomic::wait()/.notify_all(): measured directly on this exact per-partition site (not
+    // just the old global current_buffer_round rendezvous in
+    // docs/decentralized_shot_sync_design.md §1) -- even with at most one waiter per atomic,
+    // futex wait/wake syscall volume at round-granularity call frequency (10,000 rounds/shot) made
+    // decode-only wall time 1.1x-4.2x worse (16->256 threads), dominated by `syscall` self-time
+    // (20,050 CPU-s at 256 threads, vs 8,767 CPU-s for the spin it replaced).
+    //
+    // Exponential CPU_PAUSE() backoff, not a single pause per check: PAUSE's latency is wildly
+    // architecture-dependent (measured ~18.5s of self-time on Intel Sapphire Rapids at 32 threads,
+    // doesn't even register on AMD Zen4 -- Zen4's PAUSE is only a few cycles vs 100+ on many
+    // recent Intel parts), so a fixed one-pause-per-check delay is Intel-tuned by accident. Scaling
+    // the *count* of pauses per check instead makes the achieved delay self-calibrating to
+    // whatever a PAUSE actually costs on the running core, on either architecture, with no syscall
+    // involved (so it can't reproduce the wait/notify regression above). Capped, not unbounded:
+    // an uncapped backoff would trade check latency for spin cost on a long wait; 1024 keeps the
+    // worst-case delay between checks small relative to a round's own decode work.
+    //
+    // Exact match against `round` itself, no -1 offset: extraction_done starts at 0, so claiming
+    // round 0 checks 0 == 0 and never waits.
+    void wait_until_previous_extraction_done(int64_t round) {
+        int spin_count = 1;
+        constexpr int max_spin_count = 1024;
+        while (extraction_done.load(std::memory_order_acquire) != round) {
+            for (int i = 0; i < spin_count; ++i) {
+                CPU_PAUSE();
+            }
+            if (spin_count < max_spin_count) {
+                spin_count *= 2;
+            }
+        }
     }
 };
 
-// N-ary local convergence -- generalizes the old binary local-seam Task to any number of converging
-// observables sharing one boundary, so a 3+-way convergence is one LocalSeamTask, not a cascade of
-// nested binary seams (which was the actual source of the child_bit-reliability problems worked
-// through earlier -- see now-its-time-to-jazzy-turing.md Phase 2 (REVISED) Context). children starts
-// empty and is populated by each converging Task's own Task::add_special_task(this) call (task-
-// building pass concern, not this file's) rather than being passed in at construction.
+// Generalized to support N observables connected to single seam
+// (probably not needed, but what the heck)
 struct LocalSeamTask : public SpecialTask {
    private:
     // Arrival counter, same fetch_add race as Task::status's own fusion branch, generalized from a
@@ -328,7 +407,10 @@ struct LocalSeamTask : public SpecialTask {
     // match the current one, mirroring how Task::try_to_steal's own leaf-claim CAS (`expected = val -
     // 1`) avoids the identical class of bug. -1 = never resolved yet. Set by whichever thread wins
     // this seam's own try_to_steal race, as its last action (after that seam's own mark_solved()).
-    std::atomic<int64_t> ready{-1};
+    // Named decode_done (not the old `ready`) to distinguish this purely intra-shot, inter-thread
+    // signal from the unrelated per-partition extraction_done added to Task for shot-advancement
+    // gating (docs/decentralized_shot_sync_design.md §7) -- different purpose, different state.
+    std::atomic<int64_t> decode_done{-1};
 
     LocalSeamTask(int vb, int vb_left, int vb_right, pm::Mwpm* solver)
         : SpecialTask(vb, vb_left, vb_right, true, TaskType::LocalSeamTask, solver)
@@ -344,7 +426,7 @@ struct LocalSeamTask : public SpecialTask {
 #ifdef ENABLE_DRAW_FLAGS
         obs_patch_ids = std::move(other.obs_patch_ids);
 #endif
-        ready.store(other.ready.load());
+        decode_done.store(other.decode_done.load());
     }
     LocalSeamTask& operator=(LocalSeamTask&& other) noexcept {
         SpecialTask::operator=(std::move(other));
@@ -353,7 +435,7 @@ struct LocalSeamTask : public SpecialTask {
 #ifdef ENABLE_DRAW_FLAGS
         obs_patch_ids = std::move(other.obs_patch_ids);
 #endif
-        ready.store(other.ready.load());
+        decode_done.store(other.decode_done.load());
         return *this;
     }
 
@@ -368,7 +450,7 @@ struct LocalSeamTask : public SpecialTask {
         regions_matched_to_virtual_boundary.clear();
         for (TaskBase* c : children) {
             for (auto& region : c->regions_matched_to_virtual_boundary) {
-                if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker) {
+                if (region->state().match.edge.loc_to && region->state().match.edge.loc_to->vb == vb_marker) {
                     if (std::find(regions_to_unmatch.begin(), regions_to_unmatch.end(), region) == regions_to_unmatch.end())
                         regions_to_unmatch.push_back(region);
                 } else {
@@ -393,37 +475,33 @@ struct LocalSeamTask : public SpecialTask {
     }
 
     // Should only be called after seam vb is divided
-    void mark_ready(size_t shot_buffer_round) {
-        ready.store(shot_buffer_round, std::memory_order_release);
+    void mark_decode_done(size_t shot_buffer_round) {
+        decode_done.store(shot_buffer_round, std::memory_order_release);
     }
 
-    void wait_until_ready(size_t shot_buffer_round) {
-        while (ready.load(std::memory_order_acquire) != shot_buffer_round) {}
+    void wait_until_decode_done(size_t shot_buffer_round) {
+        while (decode_done.load(std::memory_order_acquire) != shot_buffer_round) {}
     }
 
     void reset() override {
         status.store(0, std::memory_order_release);
-        ready.store(-1, std::memory_order_release);
+        decode_done.store(-1, std::memory_order_release);
     }
 };
 
 #ifdef USE_SHMEM
 struct CrossRankTask : public SpecialTask {
 public:
-    // Cross-rank tasks only ever have one local child -- no N-ary generalization needed here the way
-    // LocalSeamTask needed one. TaskBase*, not Task*, for the same reason as LocalSeamTask::children
-    // above: the predecessor is the plain Task if this is the first SpecialTask attached to it, or the
-    // previously-attached SpecialTask if not. Populated via Task::add_special_task(this), not the
-    // constructor.
+    // Cross-rank tasks currently only allowed one child
     TaskBase* child{nullptr};
     bool iamleft;
 
     size_t other_pid{ 0 };
 
     // SHMEM resources
-    uint64_t* status_shm{ nullptr };
-    uint64_t* signal_shm{ nullptr };
-    uint64_t* done_shm{ nullptr };
+    unsigned long* status_shm{ nullptr };
+    unsigned long* signal_shm{ nullptr };
+    unsigned long* extraction_done_shm{ nullptr };
     pm::FusionSummary* fusion_summary_shm { nullptr };
 
     shmem_ctx_t context_shm;
@@ -433,15 +511,19 @@ public:
     std::pair<size_t, size_t> left_global_offset{  0, 0 };   // obsA (lower obs) {p_offset, vb_offset}
     std::pair<size_t, size_t> right_global_offset{ 0, 0 };   // obsB (higher obs) {p_offset, vb_offset}
 
+    // ROUND: fusion task to right of CRT on left or left of CRT on right
+    //   OBS: fusion tasks at local observable's vb_left/vb_right
+    std::vector<Task*> boundary_fusions;
+
     CrossRankTask(
         int vb,
         bool iamleft,
         int vb_left,
         int vb_right,
         size_t other_pid,
-        uint64_t* status_ptr,
-        uint64_t* signal_ptr,
-        uint64_t* done_ptr,
+        unsigned long* status_ptr,
+        unsigned long* signal_ptr,
+        unsigned long* extraction_done_ptr,
         pm::FusionSummary* fusion_summary_ptr,
         pm::Mwpm* solver
     ) : SpecialTask(vb, vb_left, vb_right, true, TaskType::CrossRankTask, solver),
@@ -449,7 +531,7 @@ public:
         other_pid(other_pid),
         status_shm(status_ptr),
         signal_shm(signal_ptr),
-        done_shm(done_ptr),
+        extraction_done_shm(extraction_done_ptr),
         fusion_summary_shm(fusion_summary_ptr)
     {
         if (status_shm == nullptr) {
@@ -462,11 +544,7 @@ public:
         }
         *status_shm = 0;
         *signal_shm = 0;
-        *done_shm = 0;
-        // No more "walk to top of child's own parent chain and attach there" -- CrossRankTasks no
-        // longer sit in the tree at all, and no longer take `child` as a constructor argument: the
-        // task-building pass sets it via the triggering Task's own add_special_task(this) call
-        // instead (mirroring however LocalSeamTask attaches).
+        *extraction_done_shm = 0;
     }
 
     CrossRankTask(CrossRankTask&& other) noexcept : SpecialTask(std::move(other)) {
@@ -476,7 +554,7 @@ public:
         other_pid = other.other_pid;
         status_shm = other.status_shm;
         signal_shm = other.signal_shm;
-        done_shm = other.done_shm;
+        extraction_done_shm = other.extraction_done_shm;
         fusion_summary_shm = other.fusion_summary_shm;
         context_shm = other.context_shm;
         owns_context = other.owns_context;
@@ -492,102 +570,133 @@ public:
             shmem_ctx_destroy(context_shm);
     }
 
-
     /* Helper Methods */
-    // Symmetric with LocalSeamTask::setup() -- combines regions from its one predecessor (child),
-    // splitting into regions_to_unmatch (matched to this CRT's own vb, to be sent/unmatched) vs
-    // regions_matched_to_virtual_boundary (everything else, kept live for a later setup() -- the next
-    // attached special task on the same Task, or (via the write-back in decode_shots()) that Task's
-    // own future parent). The else branch used to be commented out (this list was never read, since
-    // nothing propagated it back to child); restored now that the predecessor chain + write-back make
-    // it a genuinely consumed list again.
     void setup() override {
         regions_to_unmatch.clear();
         regions_matched_to_virtual_boundary.clear();
         for (auto& region : child->regions_matched_to_virtual_boundary) {
-            if (region->match.edge.loc_to && region->match.edge.loc_to->vb == vb_marker) // seam vbs are marked with global part
+            if (region->state().match.edge.loc_to && region->state().match.edge.loc_to->vb == vb_marker) // seam vbs are marked with global part
                 regions_to_unmatch.push_back(region);
             else
                 regions_matched_to_virtual_boundary.push_back(region);
         }
     };
 
-
     /* Sychronization Methods */
-    // Should be called on PE who solved fusion
+    void signal_when_data_received(size_t my_pid) {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_DEFINE(send_fence);
+        SCOREP_USER_REGION_DEFINE(send_signal);
+        SCOREP_USER_REGION_BEGIN(send_fence, "Sender Fence", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+        shmem_ctx_fence(context_shm);
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(send_fence);
+#endif
+
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_BEGIN(send_signal, "Sender Signal Atomics", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+        shmem_ctx_ulong_atomic_inc(context_shm, signal_shm, other_pid);
+        // increment my signal in case I am next receiver
+        shmem_ctx_ulong_atomic_inc(context_shm, signal_shm, my_pid); 
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(send_signal);
+#endif
+    }
+
+    void wait_until_data_received(int shot_buffer_round) {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_DEFINE(receiver_wait);
+        SCOREP_USER_REGION_BEGIN(receiver_wait, "Receiver Wait Until", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+        shmem_ulong_wait_until(signal_shm, SHMEM_CMP_EQ, (unsigned long)(shot_buffer_round + 1));
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(receiver_wait);
+#endif
+    }
+
+    void wait_until_data_sent() {
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_DEFINE(finalize_wait);
+        SCOREP_USER_REGION_BEGIN(finalize_wait, "Sender Ctx Quiet", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+        // Ensure our sends have completed so we can safely destroy sent regions
+        shmem_ctx_quiet(context_shm);
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(finalize_wait);
+#endif
+    }
+
     void mark_solved(size_t my_pid) override {
+        throw std::logic_error("CrossRankTask::mark_solved: signal_shm is never reset; this should never be called");
+    }
+
+    inline void report_extraction_done(int shot_buffer_round) {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
 #endif
-        shmem_ctx_uint64_atomic_set(context_shm, status_shm, 0, (iamleft) ? my_pid : other_pid);
-        shmem_ctx_uint64_atomic_set(context_shm, signal_shm, 0, my_pid); // reset my signal
+        shmem_ctx_ulong_atomic_set(context_shm, extraction_done_shm, shot_buffer_round+1, other_pid); // notify other PE we are done
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_END();
 #endif
     }
 
-    inline void report_done(int shot_buffer_round) {
+    inline void wait_until_extraction_done(size_t my_pid, int shot_buffer_round) {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
+        SCOREP_USER_REGION_DEFINE(wait_until_done_named);
+        SCOREP_USER_REGION_BEGIN(wait_until_done_named, "wait_until_done", SCOREP_USER_REGION_TYPE_COMMON);
 #endif
-        shmem_ctx_uint64_atomic_set(context_shm, done_shm, shot_buffer_round+1, other_pid); // notify other PE we are done
+        shmem_ulong_wait_until(extraction_done_shm, SHMEM_CMP_GE, shot_buffer_round + 1);
 #ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(wait_until_done_named);
         SCOREP_USER_FUNC_END();
 #endif
     }
 
-    inline void wait_until_done(size_t my_pid, int shot_buffer_round) {
-#ifdef SCOREP_USER_ENABLE
-        SCOREP_USER_FUNC_BEGIN();
-#endif
-        shmem_wait_until(done_shm, SHMEM_CMP_GE, shot_buffer_round + 1);
-#ifdef SCOREP_USER_ENABLE
-        SCOREP_USER_FUNC_END();
-#endif
+    bool try_to_steal(size_t val) override {
+        throw std::logic_error("CrossRankTask::try_to_steal(size_t): call try_to_steal(my_pid, shot_buffer_round) instead");
     }
 
-    bool try_to_steal(size_t my_pid
-        // , std::ostream* t_out = nullptr
-    ) override {
+    bool try_to_steal(size_t my_pid, int shot_buffer_round) {
 #ifdef SCOREP_USER_ENABLE
         SCOREP_USER_FUNC_BEGIN();
 #endif
-        uint64_t old, news;
-        if (iamleft) {
-            old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 1, my_pid);
-            news = old | 1;
-        } else {
-            old = shmem_ctx_uint64_atomic_fetch_or(context_shm, status_shm, 2, other_pid);
-            news = old | 2;
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_DEFINE(tts_wait);
+        SCOREP_USER_REGION_DEFINE(tts_atomics);
+        SCOREP_USER_REGION_BEGIN(tts_wait, "TTS Wait Until", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+        if (iamleft) shmem_ulong_wait_until(status_shm, SHMEM_CMP_GE, (unsigned long)(2 * shot_buffer_round));
+        else         shmem_ulong_wait_until(status_shm, SHMEM_CMP_EQ, shot_buffer_round);
+#ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(tts_wait);
+        SCOREP_USER_REGION_BEGIN(tts_atomics, "TTS Atomics", SCOREP_USER_REGION_TYPE_COMMON);
+#endif
+        unsigned long old = shmem_ctx_ulong_atomic_fetch_add(context_shm, status_shm, 1, iamleft ? my_pid : other_pid);
+        bool won = (old == 2 * (unsigned long)shot_buffer_round + 1);
+        if (won) {
+            shmem_ctx_ulong_atomic_inc(context_shm, status_shm, (iamleft) ? other_pid : my_pid);
         }
-        if (news == 3) {
 #ifdef SCOREP_USER_ENABLE
+        SCOREP_USER_REGION_END(tts_atomics);
         SCOREP_USER_FUNC_END();
 #endif
-            return old != 3;
-        } else {
-#ifdef SCOREP_USER_ENABLE
-        SCOREP_USER_FUNC_END();
-#endif
-            return false;
-        }
+        return won;
     }
 
     void reset() override {
         *status_shm = 0;
         *signal_shm = 0;
-        *done_shm = 0;
+        *extraction_done_shm = 0;
     }
 
 };
 #endif
 
 inline void Task::add_special_task(SpecialTask* st) {
-    // The predecessor is this Task itself only if st is the first special task attached to it; if
-    // this Task already has one or more special tasks attached, the previously-attached one is the
-    // correct predecessor instead -- its own regions_matched_to_virtual_boundary is what's actually
-    // up to date (this Task's own list, populated by its setup() before any special task ran, is
-    // stale the moment a first special task's own divide_vb call prunes something from it).
+    // The predecessor is the Task if this is the first special task, or the previous special task
     TaskBase* predecessor = special_tasks.empty()
         ? static_cast<TaskBase*>(this)
         : static_cast<TaskBase*>(special_tasks.back());

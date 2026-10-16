@@ -1,0 +1,6 @@
+SCOREP_FILE_NAMES_BEGIN
+  EXCLUDE
+    */_deps/*
+    */stim-src/*
+    */stim-build/*
+SCOREP_FILE_NAMES_END

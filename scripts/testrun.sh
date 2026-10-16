@@ -8,16 +8,17 @@
 
 if [ $# -le 3 ]
   then
-    echo "Args: [nthreads] [shots] [rounds] [M] ... [skip_stim]"
+    echo "Args: [nthreads] [shots] [rounds] [M] [num_repeats] [skip_stim]"
     exit 1
 else
     nthreads=$1
     shots=$2
     rounds=$(($3-1))
     M=$4
+    num_repeats=${5:-1}
 fi
 
-if [[ -n ${5+x} ]]; then
+if [[ -n ${6+x} ]]; then
     build_circuit=false
 else
     build_circuit=true
@@ -51,46 +52,46 @@ fi
 
 if $build_circuit; then
     rm *.01 circuit.stim *.b8 *.dem
-    python3 ../dem_gen/scripts/gen_multi_obs.py \
-        --num_observables 4 \
+    # python3 ../dem_gen/scripts/gen_multi_obs.py \
+    #     --num_observables 4 \
+    #     --rounds $rounds \
+    #     --distance 7 \
+    #     --after_clifford_depolarization 0.1 \
+    #     --code repetition_code \
+    #     --task memory \
+    #     --num_surgery_gates 5 \
+    #     --surgery_duration 5 \
+    #     --circuit_out circuit.stim \
+    #     > error_model.dem
+    # # Sample detection events FROM THE DEM (not the circuit) so seam errors fire
+    # stim sample_dem \
+    #     --in error_model.dem \
+    #     --shots $shots \
+    #     --out detection_events.b8 \
+    #     --out_format b8 \
+    #     --obs_out actual_obs_flips.01 \
+    #     --obs_out_format 01
+
+
+    stim gen \
         --rounds $rounds \
         --distance 7 \
         --after_clifford_depolarization 0.1 \
         --code repetition_code \
         --task memory \
-        --num_surgery_gates 5 \
-        --surgery_duration 5 \
-        --circuit_out circuit.stim \
+        > circuit.stim
+    stim analyze_errors \
+        --decompose_errors \
+        --fold_loops \
+        --in circuit.stim \
         > error_model.dem
-    # Sample detection events FROM THE DEM (not the circuit) so seam errors fire
-    stim sample_dem \
-        --in error_model.dem \
+    stim detect \
+        --in circuit.stim \
         --shots $shots \
-        --out detection_events.b8 \
-        --out_format b8 \
         --obs_out actual_obs_flips.01 \
-        --obs_out_format 01
-
-
-    # stim gen \
-    #     --rounds $rounds \
-    #     --distance 5 \
-    #     --after_clifford_depolarization 0.1 \
-    #     --code repetition_code \
-    #     --task memory \
-    #     > circuit.stim
-    # stim analyze_errors \
-    #     --decompose_errors \
-    #     --fold_loops \
-    #     --in circuit.stim \
-    #     > error_model.dem
-    # stim detect \
-    #     --in circuit.stim \
-    #     --shots $shots \
-    #     --obs_out actual_obs_flips.01 \
-    #     --obs_out_format 01 \
-    #     --out detection_events.b8 \
-    #     --out_format b8
+        --obs_out_format 01 \
+        --out detection_events.b8 \
+        --out_format b8
 
     # stim gen \
     #     --rounds=$rounds \
@@ -151,12 +152,10 @@ $threads_build predict \
     --out predicted_obs_flips__threads.01 \
     --out_format 01 \
     --rounds_per_partition $M \
-    --seam_buffer_size $k \
-    --task_division_strategy observable \
+    --task_division_strategy round \
     --use_threads \
     --extraction_unit_size 4 \
     --extract_preemptively \
-    --draw_frames \
     > log_threads.out 2>log_threads.err
 end_parallel=$(date +%s)
 parallel_time=$((end_parallel - start_parallel))

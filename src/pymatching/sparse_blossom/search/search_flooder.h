@@ -15,8 +15,9 @@
 #ifndef PYMATCHING2_SEARCH_FLOODER_H
 #define PYMATCHING2_SEARCH_FLOODER_H
 
+#include <memory>
+
 #include "pymatching/sparse_blossom/search/search_graph.h"
-// #include <set>
 #include "pymatching/sparse_blossom/tracker/radix_heap_queue.h"
 
 namespace pm {
@@ -26,9 +27,20 @@ enum TargetType : uint8_t { DETECTOR_NODE, BOUNDARY, NO_TARGET };
 class SearchFlooder {
    public:
     SearchFlooder();
-    explicit SearchFlooder(SearchGraph graph);
+    explicit SearchFlooder(SearchGraph graph_val);
+    // Construct with a shared graph pointer (shared across solvers within one PE). Unlike
+    // GraphFlooder, there's no USE_SHMEM-specific parameter here: SearchDetectorNode's ephemeral
+    // fields never cross the wire, so no shmem arena/buffer is needed.
+    explicit SearchFlooder(std::shared_ptr<SearchGraph> graph, int solver_set_idx);
     SearchFlooder(SearchFlooder&& other) noexcept;
-    SearchGraph graph;
+
+    /// The graph of detector nodes that is being searched.
+    std::shared_ptr<SearchGraph> graph_ptr;
+    SearchGraph& graph;
+
+    const int rotating_buffer_idx{-1};
+    int vb_left, vb_right, vb;
+
     pm::radix_heap_queue<false> queue;
     /// The reached_nodes are the nodes that need to be reset after each search completes
     std::vector<SearchDetectorNode*> reached_nodes;
@@ -41,6 +53,14 @@ class SearchFlooder {
     void do_search_exploring_empty_detector_node(SearchDetectorNode& empty_node, size_t empty_to_from_index);
     SearchGraphEdge do_look_at_node_event(SearchDetectorNode& node);
     SearchGraphEdge run_until_collision(SearchDetectorNode* src, SearchDetectorNode* dst);
+
+    // Mirrors GraphFlooder::is_active: a neighbor on a virtual boundary this solver's task doesn't
+    // currently own is invisible to the search -- never a collision candidate, never queued, never
+    // settled. This keeps the search's Dijkstra-settled region bounded to the same partition growth
+    // already used to establish the match, so concurrently-running searches over the same shared
+    // SearchGraph can never touch the same node.
+    bool is_active(const SearchDetectorNode* node) const;
+
     template <typename Callable>
     void iter_edges_on_path_traced_back_from_node(SearchDetectorNode* detector_node, Callable handle_edge);
     template <typename Callable>
@@ -59,20 +79,13 @@ class SearchFlooder {
     void iter_edges_on_shortest_path_from_source(size_t src, size_t dst, Callable handle_edge);
     void reset_graph();
     void reset();
-
-// #ifdef USE_SHMEM
-// // ===============
-//     // Set of active partitions. Should have 1 for partition solving, 2 for fusing
-//     std::set<long> active_partitions;
-// // ===============
-// #endif
 };
 
 template <typename Callable>
 void SearchFlooder::iter_edges_on_path_traced_back_from_node(SearchDetectorNode* detector_node, Callable handle_edge) {
     auto current_node = detector_node;
-    while (current_node->index_of_predecessor != SIZE_MAX) {
-        auto pred_idx = current_node->index_of_predecessor;
+    while (current_node->state(rotating_buffer_idx).index_of_predecessor != SIZE_MAX) {
+        auto pred_idx = current_node->state(rotating_buffer_idx).index_of_predecessor;
         SearchGraphEdge edge = {current_node, pred_idx};
         handle_edge(edge);
         current_node = current_node->neighbors[pred_idx];
@@ -84,7 +97,10 @@ void SearchFlooder::iter_edges_tracing_back_from_collision_edge(
     const SearchGraphEdge& collision_edge, Callable handle_edge) {
     iter_edges_on_path_traced_back_from_node(collision_edge.detector_node, handle_edge);
     auto other_node = collision_edge.detector_node->neighbors[collision_edge.neighbor_index];
-    if (other_node)
+    // An inactive-vb terminal (target_type == BOUNDARY) was never seeded/reached from this
+    // search's own growth -- its predecessor chain, if any, belongs to some other search.
+    bool other_node_is_vb_terminal = target_type == BOUNDARY && other_node && !is_active(other_node);
+    if (other_node && !other_node_is_vb_terminal)
         iter_edges_on_path_traced_back_from_node(other_node, handle_edge);
     handle_edge(collision_edge);
 }
@@ -143,6 +159,16 @@ void SearchFlooder::iter_edges_on_shortest_path_from_source(size_t src, size_t d
     }
 
     reset();
+}
+
+// Defined here (not search_flooder.cc) so the header-only iter_edges_tracing_back_from_collision_edge
+// template, instantiated in other translation units, can actually link against it.
+inline bool SearchFlooder::is_active(const SearchDetectorNode* node) const {
+    if (node->vb < 0)
+        return true;
+    if (node->vb > vb_left && node->vb < vb_right)
+        return true;
+    return (node->vb == vb);  // OBS seam vb
 }
 
 }  // namespace pm

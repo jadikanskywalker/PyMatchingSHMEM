@@ -34,7 +34,6 @@ if [ "$BUILD_TYPE" = "release" ]; then
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DCMAKE_C_COMPILER="$CC" \
         -DCMAKE_CXX_COMPILER="$CXX" \
-        -DUSE_THREADS=ON \
         -DUSE_SHMEM=OFF
     cd build_threads_release || exit
 elif [ "$BUILD_TYPE" = "debug" ]; then
@@ -46,7 +45,6 @@ elif [ "$BUILD_TYPE" = "debug" ]; then
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DCMAKE_C_COMPILER="$CC" \
         -DCMAKE_CXX_COMPILER="$CXX" \
-        -DUSE_THREADS=ON \
         -DUSE_SHMEM=OFF
     cd build_threads || exit
 else

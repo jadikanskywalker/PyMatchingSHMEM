@@ -50,7 +50,7 @@ struct MwpmAltTreeTestData {
     }
 };
 
-bool regions_matched(std::vector<DetectorNode>& ns, size_t i, size_t j) {
+bool regions_matched(pm::NodeVec<DetectorNode>& ns, size_t i, size_t j) {
     bool regions_correct = ns[i].region_that_arrived->match.region == ns[j].region_that_arrived &&
                            ns[j].region_that_arrived->match.region == ns[i].region_that_arrived;
     bool edge_locs_correct = ns[i].region_that_arrived->match.edge.loc_from == &ns[i] &&
@@ -60,11 +60,11 @@ bool regions_matched(std::vector<DetectorNode>& ns, size_t i, size_t j) {
     return regions_correct && edge_locs_correct;
 }
 
-MwpmEvent rhr(std::vector<DetectorNode>& ns, size_t i, size_t j) {
+MwpmEvent rhr(pm::NodeVec<DetectorNode>& ns, size_t i, size_t j) {
     return RegionHitRegionEventData{ns[i].region_that_arrived, ns[j].region_that_arrived, {&ns[i], &ns[j], 0}};
 }
 
-MwpmEvent rhr(std::vector<DetectorNode>& ns, size_t i, size_t j, obs_int obs_mask) {
+MwpmEvent rhr(pm::NodeVec<DetectorNode>& ns, size_t i, size_t j, obs_int obs_mask) {
     return RegionHitRegionEventData{ns[i].region_that_arrived, ns[j].region_that_arrived, {&ns[i], &ns[j], obs_mask}};
 }
 

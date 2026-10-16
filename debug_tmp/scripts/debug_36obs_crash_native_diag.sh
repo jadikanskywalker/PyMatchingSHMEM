@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=debug_36obs_native_diag
-#SBATCH --output=debug_tmp/out/debug_36obs_native_diag-%j.out
-#SBATCH --error=debug_tmp/out/debug_36obs_native_diag-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/debug_36obs_native_diag-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/debug_36obs_native_diag-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=01:00:00
 #SBATCH --nodes=1

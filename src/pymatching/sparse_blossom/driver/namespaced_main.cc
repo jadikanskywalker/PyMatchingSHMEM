@@ -44,6 +44,31 @@
 
 // #include "profiling/profiling_json.h"
 
+// The seam spec named by --gen_surgery_preset / --gen_surgery_spec (empty if neither is given).
+static std::vector<pm::SurgerySpec> resolve_surgery_specs(int argc, const char** argv) {
+    int gen_surgery_dur = (int)stim::find_int64_argument("--gen_surgery_duration", 8, 1, INT64_MAX, argc, argv);
+    const char* preset_arg = stim::find_argument("--gen_surgery_preset", argc, argv);
+    const char* spec_arg = stim::find_argument("--gen_surgery_spec", argc, argv);
+    std::vector<pm::SurgerySpec> surgeries;
+    if (preset_arg) {
+        std::string preset = preset_arg;
+        if (preset == "18obs") surgeries = pm::MultiObsDemGenerator::preset_18obs();
+        else if (preset == "24obs") surgeries = pm::MultiObsDemGenerator::preset_24obs();
+        else if (preset == "36obs") surgeries = pm::MultiObsDemGenerator::preset_36obs();
+        else if (preset == "48obs") surgeries = pm::MultiObsDemGenerator::preset_48obs();
+        else if (preset == "64obs") surgeries = pm::MultiObsDemGenerator::preset_64obs();
+        else if (preset == "72obs") surgeries = pm::MultiObsDemGenerator::preset_72obs();
+        else if (preset == "144obs") surgeries = pm::MultiObsDemGenerator::preset_144obs();
+        else if (preset == "128obs") surgeries = pm::MultiObsDemGenerator::preset_128obs();
+        else if (preset == "256obs") surgeries = pm::MultiObsDemGenerator::preset_256obs();
+        else if (preset == "36obsx4") surgeries = pm::MultiObsDemGenerator::preset_36obs_repeated(4);
+        else throw std::invalid_argument("Unknown --gen_surgery_preset: " + preset);
+    } else if (spec_arg) {
+        surgeries = pm::MultiObsDemGenerator::parse_spec(spec_arg, gen_surgery_dur);
+    }
+    return surgeries;
+}
+
 int main_predict(int argc, const char** argv) {
     stim::check_for_unknown_arguments(
         {
@@ -62,6 +87,13 @@ int main_predict(int argc, const char** argv) {
             "--extract_preemptively",
             "--seam_buffer_size", // OBS only: extra partitions around seams to include for solution extraction / cross-rank fusion windows
 #ifdef USE_SHMEM
+            // The subset graph build (each PE builds only the graph nodes it needs) is on by default; it needs the surgery
+            // preset/spec flags and otherwise falls back to a full build.
+            "--subset_graph_build", // require it (error instead of falling back)
+            "--full_graph_build", // turn the subset build off
+            "--limited_memory_mode", // subset build where the PEs of a node take turns loading the graph cache (needs --graph_cache_path)
+            "--poison_unheld", // debug: make every node outside the subset crash on access
+            "--prefault_windows", // touch the symmetric-heap pages cross-rank fusions use before decoding (for on-demand-paging NICs)
             "--cross_rank_fusion_window_size", // ROUND: number of partitions to send;
                                                //   OBS: extra partitions to include for cross-rank fusion windows (if different than seam_buffer_size)
 #endif
@@ -129,7 +161,7 @@ int main_predict(int argc, const char** argv) {
     bool append_obs = stim::find_bool_argument("--in_includes_appended_observables", argc, argv);
     bool enable_correlations = stim::find_bool_argument("--enable_correlations", argc, argv);
 #ifdef OUTPUT_DECODING_TIME
-    int num_repeats = (int)stim::find_int64_argument("--num_repeats", 1, 1, INT64_MAX, argc, argv);
+    int num_repeats = (int)stim::find_int64_argument("--num_repeats", 0, 0, INT64_MAX, argc, argv);
 #endif
     // multi-threaded runtime flags
     config_parallel::use_threads = stim::find_bool_argument("--use_threads", argc, argv);
@@ -149,6 +181,7 @@ int main_predict(int argc, const char** argv) {
     config_parallel::seam_buffer_size = stim::find_int64_argument("--seam_buffer_size", 1, 0, INT64_MAX, argc, argv); // not yet implemented
 #ifdef USE_SHMEM
     config_parallel::k = stim::find_int64_argument("--cross_rank_fusion_window_size", 1, 0, INT64_MAX, argc, argv);
+    config_parallel::prefault_windows = stim::find_bool_argument("--prefault_windows", argc, argv);
 #endif
 #ifdef ENABLE_DRAW_FLAGS    
     bool draw_frames = stim::find_bool_argument("--draw_frames", argc, argv);
@@ -156,11 +189,25 @@ int main_predict(int argc, const char** argv) {
 
     pm::UserGraph user_graph;
     bool loaded_from_graph_cache = false;
+#ifdef USE_SHMEM
+    const bool limited_memory_mode = stim::find_bool_argument("--limited_memory_mode", argc, argv);
+#else
+    const bool limited_memory_mode = false;
+#endif
+    pm::GraphCacheHeader cache_header;
 
     const char* graph_cache_arg = stim::find_argument("--graph_cache_path", argc, argv);
     std::string graph_cache_path = graph_cache_arg ? graph_cache_arg : "";
 
-    if (!graph_cache_path.empty()) {
+    if (limited_memory_mode) {
+        // The graph is loaded later, inside each PE's turn (DecodingUnit); here only the cache header is needed.
+        if (graph_cache_path.empty() || !config_parallel::use_threads) {
+            throw std::invalid_argument("--limited_memory_mode needs --graph_cache_path and --use_threads.");
+        }
+        cache_header = pm::read_user_graph_cache_header(
+            graph_cache_path, enable_correlations, config_parallel::M, (int)config_parallel::division_strategy);
+        loaded_from_graph_cache = true;
+    } else if (!graph_cache_path.empty()) {
         FILE* gcache_check = fopen(graph_cache_path.c_str(), "rb");
         if (gcache_check) {
             fclose(gcache_check);
@@ -208,7 +255,6 @@ int main_predict(int argc, const char** argv) {
                 int gen_rounds = (int)stim::find_int64_argument("--gen_rounds", 10, 1, INT64_MAX, argc, argv);
                 int gen_num_obs = (int)stim::find_int64_argument("--gen_num_obs", 2, 1, INT64_MAX, argc, argv);
                 double gen_depol = stim::find_float_argument("--gen_depolarization", 0.01, 0.0, 1.0, argc, argv);
-                int gen_surgery_dur = (int)stim::find_int64_argument("--gen_surgery_duration", 8, 1, INT64_MAX, argc, argv);
                 double gen_p_cross_val = stim::find_float_argument("--gen_p_cross", -1.0, -1.0, 1.0, argc, argv);
                 double gen_p_cross = (gen_p_cross_val < 0) ? std::min(0.4, 0.2 * gen_depol) : gen_p_cross_val;
                 int gen_boundary_depth = (int)stim::find_int64_argument("--gen_boundary_depth", 2, 0, INT64_MAX, argc, argv);
@@ -216,23 +262,7 @@ int main_predict(int argc, const char** argv) {
                 auto base_dem = pm::MultiObsDemGenerator::generate_base_dem(
                     gen_code, gen_task, gen_distance, gen_rounds, gen_depol);
 
-                std::vector<pm::SurgerySpec> surgeries;
-                const char* preset_arg = stim::find_argument("--gen_surgery_preset", argc, argv);
-                const char* spec_arg = stim::find_argument("--gen_surgery_spec", argc, argv);
-
-                if (preset_arg) {
-                    std::string preset = preset_arg;
-                    if (preset == "18obs") surgeries = pm::MultiObsDemGenerator::preset_18obs();
-                    else if (preset == "24obs") surgeries = pm::MultiObsDemGenerator::preset_24obs();
-                    else if (preset == "36obs") surgeries = pm::MultiObsDemGenerator::preset_36obs();
-                    else if (preset == "48obs") surgeries = pm::MultiObsDemGenerator::preset_48obs();
-                    else if (preset == "64obs") surgeries = pm::MultiObsDemGenerator::preset_64obs();
-                    else if (preset == "72obs") surgeries = pm::MultiObsDemGenerator::preset_72obs();
-                    else if (preset == "36obsx4") surgeries = pm::MultiObsDemGenerator::preset_36obs_repeated(4);
-                    else throw std::invalid_argument("Unknown --gen_surgery_preset: " + preset);
-                } else if (spec_arg) {
-                    surgeries = pm::MultiObsDemGenerator::parse_spec(spec_arg, gen_surgery_dur);
-                }
+                std::vector<pm::SurgerySpec> surgeries = resolve_surgery_specs(argc, argv);
 
                 pm::MultiObsDemGenerator generator(
                     std::move(base_dem), gen_num_obs, std::move(surgeries), gen_p_cross, gen_boundary_depth);
@@ -269,6 +299,13 @@ int main_predict(int argc, const char** argv) {
 
     if (!loaded_from_graph_cache) {
         user_graph = pm::detector_error_model_to_user_graph(dem, enable_correlations, num_buckets);
+#ifdef ENABLE_DRAW_FLAGS
+        if (!draw_frames)
+#endif
+        {
+            // Only frame drawing reads the DEM after this point; release it before graph construction.
+            dem = stim::DetectorErrorModel();
+        }
         if (!graph_cache_path.empty()) {
             // Only one rank writes: every PE independently re-parses the same DEM and would
             // otherwise fopen(..., "wb") + fwrite the same path concurrently, corrupting it
@@ -300,8 +337,8 @@ int main_predict(int argc, const char** argv) {
 #endif
 
     FILE* shots_in = stim::find_open_file_argument("--in", stdin, "rb", argc, argv);
-    size_t num_obs = user_graph.get_num_observables();
-    size_t num_detectors = user_graph.get_num_detectors();
+    size_t num_obs = limited_memory_mode ? (size_t)cache_header.num_observables : user_graph.get_num_observables();
+    size_t num_detectors = limited_memory_mode ? (size_t)cache_header.num_detectors() : user_graph.get_num_detectors();
     auto reader = stim::MeasureRecordReader<stim::MAX_BITWORD_WIDTH>::make(
         shots_in, shots_in_format.id, 0, num_detectors, append_obs * num_obs);
     auto writer = stim::MeasureRecordWriter::make(predictions_out, predictions_out_format.id);
@@ -313,16 +350,40 @@ int main_predict(int argc, const char** argv) {
     using std::chrono::milliseconds;
     using std::chrono::steady_clock;
     double total_ms = 0.0;
+    double total_decode_only_ms = 0.0;
 #endif
 
     if (config_parallel::use_threads) {
+        const pm::SubsetOptions* subset_arg = nullptr;
+#ifdef USE_SHMEM
+        pm::SubsetOptions subset_opts;
+        const bool full_graph_build = stim::find_bool_argument("--full_graph_build", argc, argv);
+        const bool subset_requested = stim::find_bool_argument("--subset_graph_build", argc, argv);
+        if (full_graph_build && (subset_requested || limited_memory_mode)) {
+            throw std::invalid_argument("--full_graph_build conflicts with --subset_graph_build / --limited_memory_mode.");
+        }
+        subset_opts.enabled = !full_graph_build;
+        subset_opts.required = subset_requested || limited_memory_mode;
+        subset_opts.limited_memory = limited_memory_mode;
+        if (limited_memory_mode) {
+            subset_opts.load_user_graph = [&]() {
+                return pm::read_user_graph_cache(
+                    graph_cache_path, enable_correlations, config_parallel::M,
+                    (int)config_parallel::division_strategy);
+            };
+        }
+        subset_opts.surgeries = resolve_surgery_specs(argc, argv);
+        subset_opts.poison_unheld = stim::find_bool_argument("--poison_unheld", argc, argv);
+        subset_arg = &subset_opts;
+#endif
         pm::DecodingUnit decoding_unit(
             std::move(reader),
             std::move(writer),
             std::move(user_graph),
             num_buckets,
             enable_correlations,
-            enable_correlations
+            enable_correlations,
+            subset_arg
 #ifdef ENABLE_DRAW_FLAGS
             , draw_frames
             , (loaded_from_graph_cache ? nullptr : &dem)
@@ -352,10 +413,10 @@ int main_predict(int argc, const char** argv) {
             decoding_unit.reset();
 
             auto t1 = steady_clock::now();
-
             decoding_unit.decode_shots();
-            
             auto t2 = steady_clock::now();
+
+            total_decode_only_ms += decoding_unit.last_decode_shots_wall_ms;
             total_ms += duration<double, std::milli>(t2 - t1).count();
             std::cout << duration<double, std::milli>(t2 - t1).count() << "ms\n" << std::flush;
         }
@@ -387,7 +448,10 @@ int main_predict(int argc, const char** argv) {
             auto t1 = steady_clock::now();
 
             while (pm::start_and_read_entire_record_buffered(*reader, sparse_shot)) {
+                auto dt1 = steady_clock::now();
                 pm::decode_detection_events(mwpm, sparse_shot.hits, res.obs_crossed.data(), res.weight, enable_correlations);
+                auto dt2 = steady_clock::now();
+                total_decode_only_ms += duration<double, std::milli>(dt2 - dt1).count();
                 for (size_t k = 0; k < num_obs; k++) {
                     writer->write_bit(res.obs_crossed[k]);
                 }
@@ -405,6 +469,7 @@ int main_predict(int argc, const char** argv) {
 
 #ifdef OUTPUT_DECODING_TIME
     std::cout << "Average decoding time: " << total_ms / (double)num_repeats << "ms\n";
+    std::cout << "Average decode-only time: " << total_decode_only_ms / (double)num_repeats << "ms\n";
 #endif
 
     if (predictions_out != stdout) {
@@ -517,9 +582,20 @@ int pm::main(int argc, const char** argv) {
         if (strcmp(command, "predict") == 0) {
 #ifdef USE_SHMEM
             int provided;
-            shmem_init_thread(SHMEM_THREAD_SERIALIZED, &provided);
-            if (provided < SHMEM_THREAD_SERIALIZED) {
+            shmem_init_thread(SHMEM_THREAD_MULTIPLE, &provided);
+            if (provided < SHMEM_THREAD_MULTIPLE) {
                 std::cerr << "Warning: OpenSHMEM failed to init with SHMEM_THREAD_SERIALED." << std::endl;
+            }
+            if (shmem_my_pe() == 0) {
+                // Resident memory right after init: shows whether the runtime populates or pins the symmetric heap.
+                std::ifstream status("/proc/self/status");
+                std::string line;
+                while (std::getline(status, line)) {
+                    if (line.rfind("VmRSS:", 0) == 0)
+                        std::cout << "SHMEM init done: VmRSS=" << line.substr(6) << " (symmetric heap "
+                                  << (std::getenv("SHMEM_SYMMETRIC_SIZE") ? std::getenv("SHMEM_SYMMETRIC_SIZE") : "default")
+                                  << ")" << std::endl << std::flush;
+                }
             }
 #endif
             int status = main_predict(argc, argv);

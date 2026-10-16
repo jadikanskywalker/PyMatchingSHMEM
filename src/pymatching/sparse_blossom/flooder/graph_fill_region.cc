@@ -19,32 +19,66 @@
 
 using namespace pm;
 
+GraphFillRegionExtractedFields::GraphFillRegionExtractedFields(GraphFillRegion *owning_region)
+    : blossom_parent(nullptr), blossom_parent_top(owning_region), radius((0 << 2) + 1) {
+#ifdef USE_SHMEM
+    owning_region->extracted_fields = this;
+#endif
+}
+
+void GraphFillRegionExtractedFields::reset(GraphFillRegion *owning_region) {
+    blossom_parent = nullptr;
+    blossom_parent_top = owning_region;
+    radius = pm::VaryingCT((0 << 2) + 1);
+    match.clear();
+}
+
 GraphFillRegion::GraphFillRegion()
-    : blossom_parent(nullptr),
-      blossom_parent_top(this),
+    :
+#ifndef USE_SHMEM
+      extracted_fields(this),
+#endif
       alt_tree_node(nullptr),
-      radius((0 << 2) + 1),
       shrink_event_tracker(),
       owner_arena(nullptr),
       rotating_buffer_idx(-1)
-{}
+{
+    // Deliberately not in the initializer list above -- see constructed/destructed's own comment in
+    // graph_fill_region.h.
+    constructed = 1;
+    destructed = 0;
+}
 
+void GraphFillRegion::reset() {
+    shell_area.clear();
+    blossom_children.clear();
+    shrink_event_tracker.clear();
+    alt_tree_node = nullptr;
+    state().reset(this);
+    rotating_buffer_idx = -1;
+}
+
+#ifndef USE_SHMEM
 GraphFillRegion::GraphFillRegion(GraphFillRegion &&other)
-    : blossom_parent(other.blossom_parent),
-      blossom_parent_top(other.blossom_parent_top == &other ? this : other.blossom_parent_top),
+    : extracted_fields(this),
       alt_tree_node(std::move(other.alt_tree_node)),
-      radius(std::move(other.radius)),
       shrink_event_tracker(std::move(other.shrink_event_tracker)),
-      match(std::move(other.match)),
       blossom_children(std::move(other.blossom_children)),
       shell_area(std::move(other.shell_area)),
       owner_arena(other.owner_arena),
-      rotating_buffer_idx(other.rotating_buffer_idx),
-      allocated(other.allocated)
-{}
+      rotating_buffer_idx(other.rotating_buffer_idx)
+{
+    state().blossom_parent = other.state().blossom_parent;
+    state().blossom_parent_top = other.state().blossom_parent_top == &other ? this : other.state().blossom_parent_top;
+    state().radius = std::move(other.state().radius);
+    state().match = std::move(other.state().match);
+    constructed = 1;
+    destructed = 0;
+}
+#endif
 
 bool GraphFillRegion::tree_equal(const GraphFillRegion &other) const {
-    if (alt_tree_node != other.alt_tree_node || radius != other.radius ||
+    if (alt_tree_node != other.alt_tree_node || state().radius != other.state().radius ||
         blossom_children.size() != other.blossom_children.size() || shell_area != other.shell_area) {
         return false;
     }
@@ -68,8 +102,8 @@ bool GraphFillRegion::operator!=(const GraphFillRegion &rhs) const {
 }
 
 void GraphFillRegion::add_match(GraphFillRegion *region, const CompressedEdge &edge) {
-    match = Match{region, edge};
-    region->match = Match{this, edge.reversed()};
+    state().match = Match{region, edge};
+    region->state().match = Match{this, edge.reversed()};
 }
 
 void GraphFillRegion::cleanup_shell_area() {
@@ -79,9 +113,9 @@ void GraphFillRegion::cleanup_shell_area() {
 }
 
 void GraphFillRegion::clear_blossom_parent() {
-    blossom_parent = nullptr;
+    state().blossom_parent = nullptr;
     do_op_for_each_descendant_and_self([&](GraphFillRegion *descendant) {
-        descendant->blossom_parent_top = this;
+        descendant->state().blossom_parent_top = this;
         for (DetectorNode *n : descendant->shell_area) {
             auto &node_state = n->state(rotating_buffer_idx);
             node_state.region_that_arrived_top = this;
@@ -91,9 +125,9 @@ void GraphFillRegion::clear_blossom_parent() {
 }
 
 void GraphFillRegion::clear_blossom_parent_ignoring_wrapped_radius() {
-    blossom_parent = nullptr;
+    state().blossom_parent = nullptr;
     do_op_for_each_descendant_and_self([&](GraphFillRegion *descendant) {
-        descendant->blossom_parent_top = this;
+        descendant->state().blossom_parent_top = this;
         for (DetectorNode *n : descendant->shell_area) {
             n->state(rotating_buffer_idx).region_that_arrived_top = this;
         }
@@ -101,9 +135,9 @@ void GraphFillRegion::clear_blossom_parent_ignoring_wrapped_radius() {
 }
 
 void GraphFillRegion::wrap_into_blossom(GraphFillRegion *new_blossom_parent_and_top) {
-    blossom_parent = new_blossom_parent_and_top;
+    state().blossom_parent = new_blossom_parent_and_top;
     do_op_for_each_descendant_and_self([&](GraphFillRegion *descendant) {
-        descendant->blossom_parent_top = new_blossom_parent_and_top;
+        descendant->state().blossom_parent_top = new_blossom_parent_and_top;
         for (DetectorNode *n : descendant->shell_area) {
             auto &node_state = n->state(rotating_buffer_idx);
             node_state.region_that_arrived_top = new_blossom_parent_and_top;
@@ -115,7 +149,7 @@ void GraphFillRegion::wrap_into_blossom(GraphFillRegion *new_blossom_parent_and_
 bool GraphFillRegion::operator<=(const GraphFillRegion &rhs) const {
     const GraphFillRegion *r = this;
     while (r != nullptr && r != &rhs) {
-        r = r->blossom_parent;
+        r = r->state().blossom_parent;
     }
     return r == &rhs;
 }

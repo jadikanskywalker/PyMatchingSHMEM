@@ -2,12 +2,9 @@
 #SBATCH --job-name=bench_threads
 #SBATCH --output=bench_threads-%j.out
 #SBATCH --partition=zen4
-#SBATCH --time=02:00:00
-#SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --sockets=1
-#SBATCH --cpus-per-task=128
-#SBATCH --mem-per-cpu=8G
+#SBATCH --time=12:00:00
+#SBATCH --exclusive
+#SBATCH --mem=512GB
 
 if [ $# -le 3 ]
   then
@@ -37,11 +34,11 @@ fi
 cd $dir
 pwd > bench.out
 
-rounds=8192
-threads=(2 4 8 16 32)
+rounds=10000
+threads=(16 32 64 128 256)
 # threads=(32)
 # M=(64 32 16 8)
-M=(8 16 32 64)
+M=(16 32 64)
 # M=(128)
 # threads=(16)
 # M=(8)
@@ -50,7 +47,7 @@ task=rotated_memory_x
 p=0.$p_dec
 
 serial_build=~/PyMatchingSHMEM/build/pymatching
-threads_build=~/PyMatchingSHMEM/build_threads/pymatching
+threads_build=~/PyMatchingSHMEM/build_threads_release/pymatching
 echo "serial_build:  $serial_build" >> bench.out
 echo "threads_build: $threads_build"
 

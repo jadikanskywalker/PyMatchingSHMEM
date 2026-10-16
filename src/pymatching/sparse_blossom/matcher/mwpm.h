@@ -15,6 +15,8 @@
 #ifndef PYMATCHING2_MWPM_H
 #define PYMATCHING2_MWPM_H
 
+#include <fstream>
+
 #include "pymatching/sparse_blossom/flooder/graph_flooder.h"
 #include "pymatching/sparse_blossom/matcher/alternating_tree.h"
 #include "pymatching/sparse_blossom/search/search_flooder.h"
@@ -84,19 +86,51 @@ struct Mwpm {
     // Removes matchings to virtual boundaries, turning matched regions into alternating trees
     void unmatch_virtual_boundaries_between_partitions();
     void prepare_for_task(TaskBase* task, int shot_id);
-    // Liveness of a possibly-stale GraphFillRegion* after a shatter is now tracked directly on the
-    // region itself (GraphFillRegion::allocated, maintained solely by Arena/SHMEMArena's own
-    // alloc_unconstructed()/del()) -- callers that need to prune a stale-pointer list after a shatter
-    // (DecodingUnit::divide_vb, DecodingUnit::send_solution_to_remote_pe) just check ->allocated
-    // afterward instead of threading an explicit "what got destroyed this call" list through here.
+    // Sets search_flooder's vb/vb_left/vb_right from the given task, bounding
+    // extract_paths_from_match_edges' Dijkstra search to the task's own partition (see
+    // SearchFlooder::is_active). Separate from prepare_for_task: the task an extraction job is
+    // scoped to isn't necessarily the task the solver last grew for, and extraction is a distinct
+    // concern from task solving.
+    // set_vb_to_part controls whether search_flooder.vb is set to task->vb_marker (default) or left
+    // at -1 (never matches a real seam id): a received CRT window is bounded to [vb_left, vb_right]
+    // but must NOT re-include the CRT's own seam id, since that seam was already divided -- the
+    // local window on this side and the received window on the other side are extracted separately.
+    void prepare_for_extraction(TaskBase* task, bool set_vb_to_part = true);
+    // Removes region from task->regions_matched_to_virtual_boundary if present (swap-with-back +
+    // pop_back -- the same removal handle_tree_hitting_virtual_boundary_match already does when a
+    // vb match gets superseded by a region-region match; this is the shared implementation both use).
+    // No-op if task is nullptr (the serial, non-parallel mwpm_decoding.cc path, which has no
+    // TaskBase/regions_matched_to_virtual_boundary concept at all) or region isn't present (e.g.
+    // already removed by handle_tree_hitting_virtual_boundary_match earlier this shot).
+    static void remove_from_regions_matched_to_virtual_boundary(TaskBase* task, GraphFillRegion* region);
+    // A region shattered here that's matched to a virtual boundary (region->match.edge.loc_to !=
+    // nullptr -- the same convention DecodingUnit::send_solution_to_remote_pe already uses) must be
+    // pruned from prune_target->regions_matched_to_virtual_boundary at the exact moment it's deleted
+    // below: that list is populated during growth (handle_tree_hitting_virtual_boundary) and was
+    // otherwise only ever pruned on the "matched to another region instead" path
+    // (handle_tree_hitting_virtual_boundary_match) -- this closes the missing removal for the
+    // ordinary extraction-time deletion path (the old workaround for that gap,
+    // DecodingUnit::prune_stale_regions_matched_to_vb, is removed now that this makes the list never
+    // go stale in the first place). prune_target is the caller's own already-correct target
+    // (divide_vb's prune_target, send_solution_to_remote_pe's t) -- deliberately NOT Mwpm::task,
+    // which is only kept current by prepare_for_task() (called exclusively from the climb loop) and
+    // would be stale at every one of these call sites.
+    // t_out: optional per-thread debug stream (decode_shots' own already-open one, threaded through
+    // rather than opening a separate stream on the same file -- see the call sites in decoding_unit.cc
+    // for how it's passed down). When DEBUG and non-null, logs a detected vb-matched region here (see
+    // the print inside shatter_blossom_and_extract_matches/_match_edges below).
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_matches(
-        GraphFillRegion* region, MatchingResult& res);
-    MatchingResult shatter_blossom_and_extract_matches(GraphFillRegion* region);
+        GraphFillRegion* region, MatchingResult& res, TaskBase* prune_target = nullptr,
+        std::ofstream* t_out = nullptr);
+    MatchingResult shatter_blossom_and_extract_matches(
+        GraphFillRegion* region, TaskBase* prune_target = nullptr, std::ofstream* t_out = nullptr);
 
     GraphFillRegion* pair_and_shatter_subblossoms_and_extract_match_edges(
-        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges);
+        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges, TaskBase* prune_target = nullptr,
+        std::ofstream* t_out = nullptr);
     void shatter_blossom_and_extract_match_edges(
-        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges);
+        GraphFillRegion* region, std::vector<CompressedEdge>& match_edges, TaskBase* prune_target = nullptr,
+        std::ofstream* t_out = nullptr);
     void extract_paths_from_match_edges(
         const std::vector<CompressedEdge>& match_edges, uint8_t* obs_begin_ptr, pm::total_weight_int& weight);
 

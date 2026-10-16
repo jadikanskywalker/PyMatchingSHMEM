@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=debug_36obs_2pe_32t
-#SBATCH --output=debug_tmp/out/debug_36obs_2pe_32t-%j.out
-#SBATCH --error=debug_tmp/out/debug_36obs_2pe_32t-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/debug_36obs_2pe_32t-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/debug_36obs_2pe_32t-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=01:00:00
 #SBATCH --nodes=1

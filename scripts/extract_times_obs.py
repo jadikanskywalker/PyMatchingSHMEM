@@ -16,6 +16,7 @@ import sys
 
 CONFIG_DIR_RE = re.compile(
     r'^out_M(\d+)_ntasks(\d+)_sockets(\d+)_ntps(\d+)_nthreads(\d+)_k\d+(?:_\d+)?$')
+DIR_RE = re.compile(r'_(\d+)r_(\d+)s(?:_|$)')
 AVG_RE = re.compile(r'Average decoding time:\s*([0-9.]+)\s*ms')
 SERIAL_RE = re.compile(r'Decoding time:\s*([0-9.]+)\s*ms')
 
@@ -43,10 +44,20 @@ def serial_decoding_time(filepath):
     return time
 
 
+def rounds_and_shots(directory):
+    # Parsed from the bench dir name, e.g. bench_72obs_d21_p001_2751r_100s_L16
+    m = DIR_RE.search(os.path.basename(os.path.abspath(directory)))
+    return (int(m.group(1)), int(m.group(2))) if m else (None, None)
+
+
 def main():
     directory = 'bench_obs_001'
     if len(sys.argv) > 1:
         directory = sys.argv[1]
+
+    num_rounds, num_shots = rounds_and_shots(directory)
+    if num_rounds is None:
+        sys.exit(f"Can't parse <R>r_<S>s from dir name: {directory}")
 
     results = []
 
@@ -84,13 +95,15 @@ def main():
 
     output_file = os.path.join(directory, 'results.csv')
     with open(output_file, 'w') as f:
-        f.write("M,ntasks,sockets,nodes,ntps,nthreads,Decoding Time (ms)\n")
+        f.write("M,ntasks,sockets,nodes,ntps,nthreads,Decoding Time (ms),"
+                "Time per Round (us)\n")
         prev_m = None
         for r in results:
             display_m = r['M'] if r['M'] != prev_m else ""
             prev_m = r['M']
             f.write(f"{display_m},{r['ntasks']},{r['sockets']},{r['nodes']},{r['ntps']},"
-                    f"{r['nthreads']},{r['Decoding Time (ms)']}\n")
+                    f"{r['nthreads']},{r['Decoding Time (ms)']},"
+                    f"{r['Decoding Time (ms)'] / num_shots / num_rounds * 1000}\n")
 
     print(f"Results written to {output_file} ({len(results)} rows)")
 

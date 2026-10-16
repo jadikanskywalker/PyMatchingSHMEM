@@ -117,7 +117,7 @@ pm::pick_coords_for_drawing_from_dem(const stim::DetectorErrorModel &dem, float 
 /// Helper class for drawing frames.
 struct StateHelper {
     const Mwpm &mwpm;
-    const std::vector<DetectorNode> &ns;
+    const NodeVec<DetectorNode> &ns;
     const cumulative_time_int &t;
     const std::vector<std::pair<float, float>> &coords;
     const std::vector<std::pair<float, float>> &boundary_coords;
@@ -292,7 +292,7 @@ struct StateHelper {
             GraphFillRegion *r = region_that_arrived(n);
             while (r != nullptr) {
                 regions.insert(r);
-                r = r->blossom_parent;
+                r = r->state().blossom_parent;
             }
         }
         return regions;
@@ -357,14 +357,14 @@ struct StateHelper {
 
     void draw_match_edges() {
         for (auto *r : find_all_regions()) {
-            if (r->blossom_parent_top == r && r->radius.is_frozen()) {
-                size_t k1 = r->match.edge.loc_from - &ns[0];
-                if (r->match.edge.loc_to == nullptr) {
+            if (r->state().blossom_parent_top == r && r->state().radius.is_frozen()) {
+                size_t k1 = r->state().match.edge.loc_from - &ns[0];
+                if (r->state().match.edge.loc_to == nullptr) {
                     out << " <line x1=\"" << coords[k1].first << "\" x2=\"" << boundary_coords[k1].first << "\" y1=\""
                         << coords[k1].second << "\" y2=\"" << boundary_coords[k1].second << "\" stroke-width=\"" << 4
                         << "\" stroke=\"#000\"/>\n";
                 } else {
-                    size_t k2 = r->match.edge.loc_to - &ns[0];
+                    size_t k2 = r->state().match.edge.loc_to - &ns[0];
                     out << " <line x1=\"" << coords[k1].first << "\" x2=\"" << coords[k2].first << "\" y1=\""
                         << coords[k1].second << "\" y2=\"" << coords[k2].second << "\" stroke-width=\"" << 4
                         << "\" stroke=\"#000\"/>\n";
@@ -449,10 +449,10 @@ void pm::write_decoder_state_as_svg(
 
     for (auto *r : regions) {
         std::string color;
-        if (r->blossom_parent_top->radius.is_growing()) {
+        if (r->state().blossom_parent_top->state().radius.is_growing()) {
             color = "#FF0000";
-        } else if (r->blossom_parent_top->radius.is_frozen()) {
-            if (r->blossom_parent_top->match.edge.loc_to == nullptr) {
+        } else if (r->state().blossom_parent_top->state().radius.is_frozen()) {
+            if (r->state().blossom_parent_top->state().match.edge.loc_to == nullptr) {
                 color = "#002000";
             } else {
                 color = "#00FF00";
@@ -460,7 +460,7 @@ void pm::write_decoder_state_as_svg(
         } else {
             color = "#0000FF";
         }
-        if (r->blossom_parent == nullptr) {
+        if (r->state().blossom_parent == nullptr) {
             color += "80";
         } else {
             color += "80";
@@ -514,7 +514,7 @@ void pm::write_animated_decoding_svg_frames(
     auto check_if_done = [&]() {
         for (auto &detection : detection_events) {
             auto *region_top = region_top_for_node(mwpm.flooder.graph.nodes[detection]);
-            if (region_top == nullptr || !region_top->radius.is_frozen()) {
+            if (region_top == nullptr || !region_top->state().radius.is_frozen()) {
                 return false;
             }
         }

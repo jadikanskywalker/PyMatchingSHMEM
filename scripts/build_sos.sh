@@ -8,8 +8,8 @@ cd ~/PyMatchingSHMEM/
 
 # rm -rf build_sos
 
-CC=/mnt/DISCL/home/jadhicks/sw/el9-x86_64/sos_1.5_scalable/bin/oshcc
-CXX=/mnt/DISCL/home/jadhicks/sw/el9-x86_64/sos_1.5_scalable/bin/oshc++
+CC=/mnt/DISCL/home/jadhicks/sw/el9-x86_64/sos_1.5/bin/oshcc
+CXX=/mnt/DISCL/home/jadhicks/sw/el9-x86_64/sos_1.5/bin/oshc++
 
 export CMAKE_EXPORT_COMPILE_COMMANDS=1
 if [ "$BUILD_TYPE" = "release" ]; then
@@ -21,7 +21,6 @@ if [ "$BUILD_TYPE" = "release" ]; then
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DCMAKE_C_COMPILER="$CC" \
         -DCMAKE_CXX_COMPILER="$CXX" \
-        -DUSE_THREADS=ON \
         -DUSE_SHMEM=ON
     cd build_sos|| exit
 elif [ "$BUILD_TYPE" = "debug" ]; then
@@ -33,7 +32,6 @@ elif [ "$BUILD_TYPE" = "debug" ]; then
         -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
         -DCMAKE_C_COMPILER=$CC \
         -DCMAKE_CXX_COMPILER=$CXX \
-        -DUSE_THREADS=ON \
         -DUSE_SHMEM=ON
     cd build_sos_debug || exit
 elif [ "$BUILD_TYPE" = "profile" ]; then
@@ -49,7 +47,6 @@ elif [ "$BUILD_TYPE" = "profile" ]; then
         -DCMAKE_CXX_COMPILER_LAUNCHER="scorep;--user;--nocompiler;--mpp=none;--thread=none" \
         -DCMAKE_C_LINKER_LAUNCHER="scorep;--user;--nocompiler;--mpp=none;--thread=none" \
         -DCMAKE_CXX_LINKER_LAUNCHER="scorep;--user;--nocompiler;--mpp=none;--thread=none" \
-        -DUSE_THREADS=ON \
         -DUSE_SHMEM=ON
     cd build_sos_profile || exit
 else

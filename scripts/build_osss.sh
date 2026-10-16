@@ -1,22 +1,52 @@
 #!/bin/bash
 
-# module unload intel-oneapi-compilers
-# module load gcc/14.2.0
+# Default to debug build if no argument is provided
+BUILD_TYPE=${1:-debug}
+FLAG_TYPE=${1:-fast}
 
 cd ~/PyMatchingSHMEM/
 
+rm -rf build_osss
+
 CC=/mnt/DISCL/home/jadhicks/sw/el9-x86_64/osss-ucx_1.5/bin/oshcc
 CXX=/mnt/DISCL/home/jadhicks/sw/el9-x86_64/osss-ucx_1.5/bin/oshcxx
+UNDEF_I="-include $HOME/PyMatchingSHMEM/scripts/osss_undef_complex_I.h"
 
-export CMAKE_EXPORT_COMPILE_COMMANDS=1
-cmake . -B build_osss \
-  -DUSE_SHMEM=ON \
-  -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_CXX_FLAGS_DEBUG="-g -O0 -fsanitize=address" \
-  -DCMAKE_C_COMPILER=$CC \
-  -DCMAKE_CXX_COMPILER=$CXX \
-  -DCMAKE_EXPORT_COMPILE_COMMANDS=1
+if ["$FLAG_TYPE" = "fast"]; then
+    RELEASE_FLAGS="-O2 -fno-omit-frame-pointer -g"
+else
+    RELEASE_FLAGS="-O3 -DNDEBUG"
+fi
 
-# cd build_osss
-# make pymatching -j $CORES
-# cd ..
+if [ "$BUILD_TYPE" = "release" ]; then
+    rm -rf build_threads_release
+    echo "Configuring Release build..."
+    cmake . -B build_osss \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_FLAGS_RELEASE="$RELEASE_FLAGS" \
+        -DCMAKE_CXX_FLAGS="$UNDEF_I" \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
+        -DCMAKE_C_COMPILER="$CC" \
+        -DCMAKE_CXX_COMPILER="$CXX" \
+        -DUSE_SHMEM=ON
+    cd build_osss|| exit
+elif [ "$BUILD_TYPE" = "debug" ]; then
+    rm -rf build_threads
+    echo "Configuring Debug build..."
+    cmake . -B build_osss_debug \
+        -DCMAKE_BUILD_TYPE=Debug \
+        -DCMAKE_CXX_FLAGS_DEBUG="-g -O0 -fsanitize=address" \
+        -DCMAKE_CXX_FLAGS="$UNDEF_I" \
+        -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
+        -DCMAKE_C_COMPILER="$CC" \
+        -DCMAKE_CXX_COMPILER="$CXX" \
+        -DUSE_SHMEM=ON
+    cd build_osss_debug || exit
+else
+    echo "Invalid build type: $BUILD_TYPE. Use 'debug' or 'release'."
+    exit 1
+fi
+
+cores=$(($(nproc)-1))
+make pymatching -j "$cores"
+cd ..

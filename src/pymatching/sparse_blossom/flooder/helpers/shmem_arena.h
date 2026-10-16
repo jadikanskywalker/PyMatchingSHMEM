@@ -14,112 +14,185 @@
 #ifndef PYMATCHING2_SHMEM_ARENA_H
 #define PYMATCHING2_SHMEM_ARENA_H
 
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <limits>
+#include <new>
+#include <vector>
 
 #include <omp.h>
 #include <shmem.h>
 
 #include "pymatching/sparse_blossom/config_parallel.h"
+#include "pymatching/sparse_blossom/flooder/graph_fill_region.h"
 
-// The SHMEMArena, for typename T, :
-//   - references a shmem array with SHMEM_ARENA_BUFFER_NELEMS slots for T
-//   - assigns new elements at the leftmost available index
-//   - tracks which slots are available/taken
-//   - falls back to standard heap memory in the case of overflow
-template <typename T>
-struct SHMEMArena {
-    // SHMEM array buffer and availability bitmap
-    T* shmem_buffer;
+namespace pm {
+
+// The GraphFillRegionArena:
+//   - references a shmem array of GraphFillRegionExtractedFields (extracted_field) and a same-length
+//     process-local array of GraphFillRegions (local_regions); slot i of each belongs to the same region
+//   - assigns new slots at the leftmost available index, tracked by one shared bitmap
+//   - falls back to heap memory in the case of overflow
+struct GraphFillRegionArena {
+    GraphFillRegionExtractedFields* extracted_field;
+    // Raw (unconstructed, uninitialized) memory: slot i is only valid once i < constructed_count.
+    GraphFillRegion* local_regions;
     std::vector<uint64_t> shmem_bitmap;  // 1 = free; 0 = taken
-    size_t shmem_buffer_size; // must be a multiple of 64
+    size_t shmem_buffer_size;            // must be a multiple of 64
+    // One past the highest slot index ever constructed. Allocation always takes the lowest free bit, so
+    // every slot below this has been constructed at least once and every slot at or above it never has.
+    size_t constructed_count{0};
+    // Highest slab index currently taken, or -1 if none: a sender only needs to put extracted_field up to here.
+    ptrdiff_t last_allocated_id{-1};
 
-    // Heap fallback
-    std::vector<T*> allocated;
-    std::vector<T*> available;
+    // Heap fallback. heap_extracted_fields[i] belongs to allocated[i].
+    std::vector<GraphFillRegion*> allocated;
+    std::vector<GraphFillRegion*> available;
+    std::vector<GraphFillRegionExtractedFields*> heap_extracted_fields;
 
     int num_overflows_tracker{0};
 
-    SHMEMArena() : shmem_buffer(nullptr), shmem_buffer_size(0), allocated(), available(), shmem_bitmap() {
+    // True only for a remote-partition shadow arena (decoding_unit.cc's remote_arenas). The sender's put
+    // overwrites the whole extracted_field slab, taken and free slots alike, and its bitmap replaces this
+    // one, so received regions never pass through alloc_default_constructed(): their constructed/destructed
+    // counters are not maintained (and not checked), and a free slot's extracted fields can hold the
+    // sender's stale bytes, so they are re-initialized on every alloc here.
+    bool is_remote_shadow{false};
+
+    GraphFillRegionArena()
+        : extracted_field(nullptr), local_regions(nullptr), shmem_bitmap(), shmem_buffer_size(0) {
     }
-    SHMEMArena(T* shmem_buffer_, size_t shmem_buffer_size_)
-        : shmem_buffer(shmem_buffer_), shmem_buffer_size(shmem_buffer_size_), allocated(), available() {
-        shmem_bitmap.resize(shmem_buffer_size/64, std::numeric_limits<uint64_t>::max());
-        // Could set 0's to support SHMEM_ARENA_BUFFER_NELEMS not a multiple of 64
+    GraphFillRegionArena(
+        GraphFillRegionExtractedFields* extracted_field_,
+        GraphFillRegion* local_regions_,
+        size_t shmem_buffer_size_,
+        bool is_remote_shadow_ = false)
+        : extracted_field(extracted_field_),
+          local_regions(local_regions_),
+          shmem_buffer_size(shmem_buffer_size_),
+          is_remote_shadow(is_remote_shadow_) {
+        shmem_bitmap.resize(shmem_buffer_size / 64, std::numeric_limits<uint64_t>::max());
     }
-    SHMEMArena(const SHMEMArena&) = delete;
-    SHMEMArena(SHMEMArena&& other)
-        : shmem_buffer(other.shmem_buffer),
+    GraphFillRegionArena(const GraphFillRegionArena&) = delete;
+    GraphFillRegionArena(GraphFillRegionArena&& other)
+        : extracted_field(other.extracted_field),
+          local_regions(other.local_regions),
           shmem_bitmap(std::move(other.shmem_bitmap)),
           shmem_buffer_size(other.shmem_buffer_size),
+          constructed_count(other.constructed_count),
           allocated(std::move(other.allocated)),
-          available(std::move(other.available)) {
+          available(std::move(other.available)),
+          heap_extracted_fields(std::move(other.heap_extracted_fields)),
+          is_remote_shadow(other.is_remote_shadow) {
+        // Slot regions point at their owning arena, so they must follow it to its new address.
+        for (size_t i = 0; i < constructed_count; ++i) {
+            local_regions[i].owner_arena = this;
+        }
+        for (GraphFillRegion* r : allocated) {
+            r->owner_arena = this;
+        }
     }
 
-    T* alloc_unconstructed() {
-        T* result = nullptr;
+    // Rescans backwards from last_allocated_id for the highest taken slot.
+    void recompute_last_allocated_id() {
+        ptrdiff_t word_id = last_allocated_id / 64;
+        for (; word_id >= 0; --word_id) {
+            uint64_t taken = ~shmem_bitmap[word_id];
+            if (taken) {
+                last_allocated_id = word_id * 64 + 63 - __builtin_clzll(taken);
+                return;
+            }
+        }
+        last_allocated_id = -1;
+    }
+
+    // Replaces the bitmap with a sender's (num_words words).
+    void adopt_bitmap(const uint64_t* src) {
+        std::memcpy(shmem_bitmap.data(), src, shmem_bitmap.size() * sizeof(uint64_t));
+        last_allocated_id = (ptrdiff_t)shmem_bitmap.size() * 64 - 1;
+        recompute_last_allocated_id();
+    }
+
+    // Constructs every slot up to and including idx that has never been constructed. keep_extracted
+    // leaves the extracted fields bytes alone (they were put there by a remote sender).
+    void ensure_constructed(size_t idx, bool keep_extracted) {
+        while (constructed_count <= idx) {
+            GraphFillRegion* r = new (local_regions + constructed_count) GraphFillRegion();
+            if (keep_extracted) {
+                r->extracted_fields = extracted_field + constructed_count;
+            } else {
+                new (extracted_field + constructed_count) GraphFillRegionExtractedFields(r);
+            }
+            r->owner_arena = this;
+            ++constructed_count;
+        }
+    }
+
+    GraphFillRegion* alloc_default_constructed() {
+        GraphFillRegion* result = nullptr;
         for (size_t word_id = 0; word_id < shmem_bitmap.size(); ++word_id) {
             uint64_t word = shmem_bitmap[word_id];
             if (word != 0) {
                 size_t available_bit = __builtin_ctzll(word);       // find first bit == 1
                 shmem_bitmap[word_id] &= ~(1ULL << available_bit);  // set bit to 0 (taken)
-                result = shmem_buffer + word_id * 64 + available_bit;
-                break;
+                size_t idx = word_id * 64 + available_bit;
+                if ((ptrdiff_t)idx > last_allocated_id) {
+                    last_allocated_id = (ptrdiff_t)idx;
+                }
+                if (idx >= constructed_count) {
+                    ensure_constructed(idx, false);
+                } else {
+                    local_regions[idx].constructed++;  // already reset by its last del()
+                    if (is_remote_shadow) {
+                        local_regions[idx].state().reset(local_regions + idx);
+                    }
+                }
+                return local_regions + idx;
             }
         }
-        if (result == nullptr) {  // fall back to heap memory
-            // std::cout << "ERROR: Fallback to heap" << std::endl
-            //           << "  Thread: " << omp_get_thread_num() << "    PE: " << shmem_my_pe() << std::endl;
-            if (available.empty()) {
-                T* p = (T*)malloc(sizeof(T));
-                allocated.push_back(p);
-                available.push_back(p);
-            }
+        // fall back to heap memory
+        if (available.empty()) {
+            result = (GraphFillRegion*)calloc(1, sizeof(GraphFillRegion));
+            allocated.push_back(result);
+            new (result) GraphFillRegion();
+            heap_extracted_fields.push_back(new GraphFillRegionExtractedFields(result));
+            result->owner_arena = this;
+        } else {
             result = available.back();
             available.pop_back();
-        }
-        if constexpr (requires (T t) { t.allocated; }) {
-            result->allocated = true;
+            result->constructed++;  // already reset by its last del()
         }
         return result;
     }
 
-    T* alloc_default_constructed() {
-        T* result = alloc_unconstructed();
-        new (result) T();
-        if constexpr (requires (T t) { t.allocated; }) {
-            result->allocated = true;
-        }
-        return result;
-    }
-
-    void del(T* p) {
-        // Mark stale before destroying -- see arena.h's own del() for why (write must land while the
-        // object is still formally alive, and before anything else could observe it as reused).
-        if constexpr (requires (T t) { t.allocated; }) {
-            // Atomic check-and-clear: a plain "if (!p->allocated) ...; p->allocated = false;" has a
-            // TOCTOU gap that a genuine concurrent double-del() (two threads racing to del() the same
-            // region) sails straight through -- both read allocated==true before either writes false,
-            // so neither trips a naive check. __atomic_exchange_n makes the read-and-clear one step,
-            // so exactly one caller can ever observe was_allocated==true for a given transition.
-            bool was_allocated = __atomic_exchange_n(&p->allocated, false, __ATOMIC_ACQ_REL);
-            if (!was_allocated) {
-                if (DEBUG) {
-                    // Lost the race (or this is a same-thread double-del()): p is already gone -- do
-                    // NOT destruct/free it again, that's exactly what corrupts the heap.
-                    std::cout << "ERROR: T" << omp_get_thread_num() << " called SHMEMArena::del() on deleted pointer p=" << p << std::endl << std::flush;
-                }
+    void del(GraphFillRegion* p) {
+        if (DEBUG && !is_remote_shadow) {
+            // A genuinely live region always has constructed == destructed + 1.
+            if (p->constructed != p->destructed + 1) {
+                std::cout << "ERROR: T" << omp_get_thread_num() << " called GraphFillRegionArena::del() on p=" << p
+                          << " with constructed=" << p->constructed
+                          << " destructed=" << p->destructed
+                          << " (expected constructed == destructed + 1)"
+                          << std::endl << std::flush;
                 return;
             }
         }
-        p->~T();
-        if (p >= shmem_buffer && p < shmem_buffer + shmem_buffer_size) {
-            size_t idx = p - shmem_buffer;
-            shmem_bitmap[idx/64] |= (1ULL << (idx%64));  // set bit to 1 (free)
+        p->destructed++;
+        p->reset();
+        if (p >= local_regions && p < local_regions + shmem_buffer_size) {
+            size_t idx = p - local_regions;
+            shmem_bitmap[idx / 64] |= (1ULL << (idx % 64));  // set bit to 1 (free)
+            if ((ptrdiff_t)idx == last_allocated_id) {
+                recompute_last_allocated_id();
+            }
         } else {
             available.push_back(p);
         }
     }
 };
+
+}  // namespace pm
 
 #endif

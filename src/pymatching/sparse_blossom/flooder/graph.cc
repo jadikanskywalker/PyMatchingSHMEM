@@ -20,6 +20,7 @@
 
 #include "graph.h"
 #include "pymatching/sparse_blossom/driver/implied_weights.h"
+#include "pymatching/sparse_blossom/driver/parallel/subset_plan.h"
 #include "pymatching/sparse_blossom/flooder_matcher_interop/mwpm_event.h"
 
 #include <iostream>
@@ -33,6 +34,17 @@ void MatchingGraph::add_edge(
     signed_weight_int weight,
     const std::vector<size_t>& observables,
     const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
+    add_edge_partial(u, v, weight, observables, implied_weights_for_other_edges, true, true);
+}
+
+void MatchingGraph::add_edge_partial(
+    size_t u,
+    size_t v,
+    signed_weight_int weight,
+    const std::vector<size_t>& observables,
+    const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges,
+    bool u_held,
+    bool v_held) {
     size_t larger_node = std::max(u, v);
     if (larger_node + 1 > nodes.size()) {
         throw std::invalid_argument(
@@ -64,24 +76,28 @@ void MatchingGraph::add_edge(
     // all_edges_to_implied_weights_unconverted[u][v] for a node u corresponds to the edge weights conditioned by (u, v)
     // where v is the v'th neighbour of u in nodes[u].neighbors.
 
-    nodes[u].neighbors.push_back(&(nodes[v]));
-    nodes[u].neighbor_weights.push_back(std::abs(weight));
-    nodes[u].neighbor_observables.push_back(obs_mask);
-    nodes[u].neighbor_implied_weights.push_back({});
-    edges_to_implied_weights_unconverted[u].emplace_back(implied_weights_for_other_edges);
-
-    nodes[v].neighbors.push_back(&(nodes[u]));
-    nodes[v].neighbor_weights.push_back(std::abs(weight));
-    nodes[v].neighbor_observables.push_back(obs_mask);
-    nodes[v].neighbor_implied_weights.push_back({});
-    edges_to_implied_weights_unconverted[v].emplace_back(implied_weights_for_other_edges);
+    if (u_held) {
+        nodes[u].neighbors.push_back(&(nodes[v]));
+        nodes[u].neighbor_weights.push_back(std::abs(weight));
+        nodes[u].neighbor_observables.push_back(obs_mask);
+        nodes[u].neighbor_implied_weights.push_back({});
+        edges_to_implied_weights_unconverted[u].emplace_back(implied_weights_for_other_edges);
+    }
+    if (v_held) {
+        nodes[v].neighbors.push_back(&(nodes[u]));
+        nodes[v].neighbor_weights.push_back(std::abs(weight));
+        nodes[v].neighbor_observables.push_back(obs_mask);
+        nodes[v].neighbor_implied_weights.push_back({});
+        edges_to_implied_weights_unconverted[v].emplace_back(implied_weights_for_other_edges);
+    }
 }
 
 void MatchingGraph::add_boundary_edge(
     size_t u,
     signed_weight_int weight,
     const std::vector<size_t>& observables,
-    const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges) {
+    const std::vector<ImpliedWeightUnconverted>& implied_weights_for_other_edges,
+    bool held) {
     if (u >= nodes.size()) {
         throw std::invalid_argument(
             "Node " + std::to_string(u) +
@@ -101,6 +117,7 @@ void MatchingGraph::add_boundary_edge(
         update_negative_weight_detection_events(u);
         negative_weight_sum += weight;
     }
+    if (!held) return;
 
     auto& n = nodes[u];
     if (!n.neighbors.empty() && n.neighbors[0] == nullptr) {
@@ -117,6 +134,15 @@ void MatchingGraph::add_boundary_edge(
 MatchingGraph::MatchingGraph(size_t num_nodes, size_t num_observables)
     : negative_weight_sum(0), num_nodes(num_nodes), num_observables(num_observables), normalising_constant(0) {
     nodes.resize(num_nodes);
+}
+
+MatchingGraph::MatchingGraph(size_t num_nodes, size_t num_observables, LazyNodes)
+    : nodes(LazyNodeAllocator<DetectorNode>(true)),
+      negative_weight_sum(0),
+      num_nodes(num_nodes),
+      num_observables(num_observables),
+      normalising_constant(0) {
+    nodes.resize(num_nodes);  // lazy allocator: reserves address space only, constructs nothing
 }
 
 MatchingGraph::MatchingGraph(size_t num_nodes, size_t num_observables, double normalising_constant)
@@ -138,7 +164,10 @@ MatchingGraph::MatchingGraph(MatchingGraph&& graph) noexcept
       normalising_constant(graph.normalising_constant),
       previous_weights(graph.previous_weights),
       edges_to_implied_weights_unconverted(graph.edges_to_implied_weights_unconverted),
-      loaded_from_dem_without_correlations(graph.loaded_from_dem_without_correlations) 
+      loaded_from_dem_without_correlations(graph.loaded_from_dem_without_correlations)
+#ifdef USE_SHMEM
+      , built_nodes(std::move(graph.built_nodes))
+#endif
       {
 }
 
@@ -168,7 +197,7 @@ void MatchingGraph::update_negative_weight_detection_events(size_t node_id) {
 namespace {
 
 ImpliedWeight convert_rule(
-        std::vector<DetectorNode>& nodes,
+        NodeVec<DetectorNode>& nodes,
         const ImpliedWeightUnconverted& rule, const double normalising_constant) {
     const size_t& i = rule.node1;
     const size_t& j = rule.node2;
@@ -189,9 +218,9 @@ ImpliedWeight convert_rule(
 }  // namespace
 
 void MatchingGraph::convert_implied_weights(double normalising_constant) {
-    for (size_t u = 0; u < nodes.size(); u++) {
-        const std::vector<std::vector<ImpliedWeightUnconverted>>& rules_for_node =
-            edges_to_implied_weights_unconverted[u];
+    // Only nodes that had edges added have an entry (all of them for a full graph, only held nodes for a
+    // partial one); iterating the map avoids creating an empty entry for every node.
+    for (const auto& [u, rules_for_node] : edges_to_implied_weights_unconverted) {
         for (size_t v = 0; v < nodes[u].neighbors.size(); v++) {
             for (const auto& rule : rules_for_node[v]) {
                 ImpliedWeight converted = convert_rule(nodes, rule, normalising_constant);
@@ -248,7 +277,7 @@ pm::SharedMatchingGraph::SharedMatchingGraph(
     size_t vb_per_obs_patch_
 )
 : graph_ptr(graph_ptr_),
-    node_part_id(node_part_id_),
+    node_part_id(std::move(node_part_id_)),
     num_partitions(num_partitions_),
     num_virtual_boundaries(num_virtual_boundaries_),
     num_rounds(num_rounds_),
@@ -259,52 +288,31 @@ pm::SharedMatchingGraph::SharedMatchingGraph(
     construct_partition_vb_bounds();
 }
 
-// Scans node_part_id sequentially and fills partition_bounds / vb_bounds.
-// Handles four transition types:
-//   p → vb : close current partition, open new vb entry
-//   vb → p : close current vb entry, open new partition
-//   p → p  : close current partition, open next partition (obs boundary with no vb between)
-//   vb → vb: close current vb entry, open next vb entry (adjacent seam sections)
-void pm::SharedMatchingGraph::construct_partition_vb_bounds() {
-    if (num_partitions <= 0) {
-        throw std::invalid_argument("SharedMatchingGraph requires at least one partition.");
-    }
-    if (node_part_id.empty()) {
-        throw std::invalid_argument("SharedMatchingGraph requires node partition assignments.");
-    }
-    partition_bounds.resize(num_partitions);
-    vb_bounds.resize(num_virtual_boundaries);
-    partition_bounds[0].first = 0;
-    size_t partition_bounds_idx = 0;
-    size_t vb_bounds_idx = 0;
-    int last_part_id = node_part_id[0];
-    for (int i = 1; i < (int)node_part_id.size(); ++i) {
-        if (node_part_id[i] == last_part_id) {
-            continue;
-        } else if (last_part_id < 0 && node_part_id[i] < 0) { // vb → vb
-            vb_bounds[vb_bounds_idx++].second = i - 1;
-            vb_bounds[vb_bounds_idx].first = i;
-            last_part_id = node_part_id[i];
-        } else if (node_part_id[i] < 0) {                     // p → vb
-            partition_bounds[partition_bounds_idx].second = i - 1;
-            vb_bounds[vb_bounds_idx].first = i;
-            last_part_id = node_part_id[i];
-        } else if (last_part_id < 0) {                        // vb → p
-            vb_bounds[vb_bounds_idx++].second = i - 1;
-            partition_bounds[++partition_bounds_idx].first = i;
-            last_part_id = node_part_id[i];
-        } else {                                               // p → p (obs boundary)
-            partition_bounds[partition_bounds_idx].second = i - 1;
-            partition_bounds[++partition_bounds_idx].first = i;
-            last_part_id = node_part_id[i];
-        }
-    }
-    // Close the final block (partition or vb if cross-obs nodes are last).
-    if (last_part_id < 0) {
-        vb_bounds[vb_bounds_idx].second = (int)node_part_id.size() - 1;
+#ifdef USE_SHMEM
+void pm::MatchingGraph::wire_ephemeral_fields(DetectorNodeEphemeralFields* base) {
+    const size_t n = nodes.size();
+    auto wire = [&](size_t i) {
+#ifdef ENABLE_SHOT_BUFFERS
+        for (int j = 0; j < NUM_BUFFERS_PER_UNIT; ++j) nodes[i].ephemeral_fields[j] = base + i + j * n;
+#else
+        nodes[i].ephemeral_fields = base + i;
+#endif
+    };
+    if (built_nodes.empty()) {
+        for (size_t i = 0; i < n; ++i) wire(i);
     } else {
-        partition_bounds[partition_bounds_idx].second = (int)node_part_id.size() - 1;
+        for (size_t i : built_nodes) wire(i);
     }
+}
+
+void pm::SharedMatchingGraph::wire_ephemeral_fields(DetectorNodeEphemeralFields* base) {
+    graph_ptr->wire_ephemeral_fields(base);
+}
+#endif
+
+// Scans node_part_id sequentially and fills partition_bounds / vb_bounds (see compute_partition_vb_bounds).
+void pm::SharedMatchingGraph::construct_partition_vb_bounds() {
+    compute_partition_vb_bounds(node_part_id, num_partitions, num_virtual_boundaries, partition_bounds, vb_bounds);
 
     if (DEBUG) {
         std::cout << "construct_partition_vb_bounds:"

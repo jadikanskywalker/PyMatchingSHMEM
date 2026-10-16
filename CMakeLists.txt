@@ -3,16 +3,10 @@ project(PyMatching2)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Feature flags
-#   USE_THREADS: enables OpenMP runtime paths
-#     USE_SHMEM: enables OpenSHMEM runtime paths
-#                can by combined with USE_THREADS for hybrid runs
-option(USE_THREADS "Enable OpenMP runtime" ON)
+#   USE_SHMEM: enables OpenSHMEM runtime paths (OpenMP threading is always compiled in)
 option(USE_SHMEM "Enable OpenSHMEM runtime" OFF)
 
-if(USE_THREADS)
-    message(STATUS "Compiling with USE_THREADS enabled")
-    find_package(OpenMP REQUIRED)
-endif()
+find_package(OpenMP REQUIRED)
 if(USE_SHMEM)
     message(STATUS "Compiling with USE_SHMEM enabled")
 endif()
@@ -78,13 +72,12 @@ set(SOURCE_FILES_NO_MAIN
         src/pymatching/rand/rand_gen.cc
         )
 
-# Add decoding_unit.cc only if USE_THREADS=ON
-if(USE_THREADS)
-    list(APPEND SOURCE_FILES_NO_MAIN
-        src/pymatching/sparse_blossom/driver/parallel/decoding_unit.cc
-        src/pymatching/sparse_blossom/driver/parallel/shot_buffer.cc
-    )
-endif()
+list(APPEND SOURCE_FILES_NO_MAIN
+    src/pymatching/sparse_blossom/driver/parallel/decoding_unit.cc
+    src/pymatching/sparse_blossom/driver/parallel/shot_buffer.cc
+    src/pymatching/sparse_blossom/driver/parallel/subset_plan.cc
+    src/pymatching/sparse_blossom/driver/parallel/node_turns.cc
+)
 
 set(TEST_FILES
         src/pymatching/sparse_blossom/driver/namespaced_main.test.cc
@@ -109,6 +102,7 @@ set(TEST_FILES
         src/pymatching/sparse_blossom/search/search_flooder.test.cc
         src/pymatching/sparse_blossom/driver/user_graph.test.cc
         src/pymatching/sparse_blossom/driver/helpers/graph_cache.test.cc
+        src/pymatching/sparse_blossom/driver/parallel/subset_plan.test.cc
         )
 
 set(PERF_FILES
@@ -128,14 +122,28 @@ set(PYTHON_API_FILES
 
 add_executable(pymatching src/main.cc ${SOURCE_FILES_NO_MAIN})
 
+# Opt-in Score-P instrumentation for pymatching's own sources only -- set via
+# -DPYMATCHING_COMPILER_LAUNCHER="scorep;--user;--compiler;--thread=omp:opari2" (or similar) at
+# configure time. Deliberately a per-target property, not the global CMAKE_<LANG>_COMPILER_LAUNCHER
+# cache variable: the latter would also wrap libstim's compile (a vendored FetchContent dependency),
+# and OPARI2's OpenMP-pragma preprocessing pass crashes ("unbalanced pragma/directive nesting") on
+# at least one stim source file (diagram/gltf.cc) -- unrelated to whether that file is actually
+# instrumented, since --instrument-filter only affects the --compiler method, not OPARI2's separate
+# preprocessing step. Left unset, this is a no-op for normal builds.
+if (PYMATCHING_COMPILER_LAUNCHER)
+    set_target_properties(pymatching PROPERTIES
+        CXX_COMPILER_LAUNCHER "${PYMATCHING_COMPILER_LAUNCHER}"
+        C_COMPILER_LAUNCHER "${PYMATCHING_COMPILER_LAUNCHER}"
+        CXX_LINKER_LAUNCHER "${PYMATCHING_COMPILER_LAUNCHER}"
+        C_LINKER_LAUNCHER "${PYMATCHING_COMPILER_LAUNCHER}"
+    )
+endif()
+
 target_compile_options(pymatching PRIVATE ${ARCH_OPT})
 if (NOT (MSVC))
     target_link_options(pymatching PRIVATE -pthread ${ARCH_OPT})
 endif ()
-if(USE_THREADS)
-    target_compile_definitions(pymatching PRIVATE USE_THREADS)
-    target_link_libraries(pymatching OpenMP::OpenMP_CXX)
-endif()
+target_link_libraries(pymatching OpenMP::OpenMP_CXX)
 if(USE_SHMEM)
     target_compile_definitions(pymatching PRIVATE USE_SHMEM)
 endif()
@@ -151,24 +159,42 @@ if (NOT (MSVC))
 else ()
     target_link_options(pymatching_tests PRIVATE -fsanitize=address -fsanitize=undefined -coverage)
 endif ()
-if(USE_THREADS)
-    target_compile_definitions(pymatching_tests PRIVATE USE_THREADS)
-    target_link_libraries(pymatching_tests OpenMP::OpenMP_CXX)
-endif()
+target_link_libraries(pymatching_tests OpenMP::OpenMP_CXX)
 if(USE_SHMEM)
     target_compile_definitions(pymatching_tests PRIVATE USE_SHMEM)
 endif()
 target_link_libraries(pymatching_tests GTest::gtest_main GTest::gmock_main libstim)
+
+# Standalone target for the subset-graph planning tests (builds without the rest of the test suite).
+add_executable(subset_plan_tests ${SOURCE_FILES_NO_MAIN} src/pymatching/sparse_blossom/driver/parallel/subset_plan.test.cc)
+target_compile_options(subset_plan_tests PRIVATE -fsanitize=address -fsanitize=undefined -g -fno-omit-frame-pointer)
+if (NOT (MSVC))
+    target_link_options(subset_plan_tests PRIVATE -pthread -fsanitize=address -fsanitize=undefined)
+endif ()
+target_link_libraries(subset_plan_tests OpenMP::OpenMP_CXX)
+if(USE_SHMEM)
+    target_compile_definitions(subset_plan_tests PRIVATE USE_SHMEM)
+endif()
+target_link_libraries(subset_plan_tests GTest::gtest_main GTest::gmock_main libstim)
+
+# Real-graph check of the partial (held-set) graph build against the full build.
+add_executable(subset_check ${SOURCE_FILES_NO_MAIN} src/pymatching/sparse_blossom/driver/tools/subset_check.cc)
+target_compile_options(subset_check PRIVATE ${ARCH_OPT})
+if (NOT (MSVC))
+    target_link_options(subset_check PRIVATE -pthread -O3)
+endif ()
+target_link_libraries(subset_check OpenMP::OpenMP_CXX)
+if(USE_SHMEM)
+    target_compile_definitions(subset_check PRIVATE USE_SHMEM)
+endif()
+target_link_libraries(subset_check libstim)
 
 add_executable(pymatching_perf ${SOURCE_FILES_NO_MAIN} ${PERF_FILES})
 target_compile_options(pymatching_perf PRIVATE ${ARCH_OPT})
 if (NOT (MSVC))
     target_link_options(pymatching_perf PRIVATE -pthread -O3)
 endif ()
-if(USE_THREADS)
-    target_compile_definitions(pymatching_perf PRIVATE USE_THREADS)
-    target_link_libraries(pymatching_perf OpenMP::OpenMP_CXX)
-endif()
+target_link_libraries(pymatching_perf OpenMP::OpenMP_CXX)
 if(USE_SHMEM)
     target_compile_definitions(pymatching_perf PRIVATE USE_SHMEM)
 endif()
@@ -181,10 +207,7 @@ target_compile_options(libpymatching PRIVATE ${ARCH_OPT} -fPIC)
 if(NOT(MSVC))
     target_link_options(libpymatching PRIVATE -pthread -O3)
 endif()
-if(USE_THREADS)
-    target_compile_definitions(libpymatching PRIVATE USE_THREADS)
-    target_link_libraries(libpymatching OpenMP::OpenMP_CXX)
-endif()
+target_link_libraries(libpymatching OpenMP::OpenMP_CXX)
 if(USE_SHMEM)
     target_compile_definitions(libpymatching PUBLIC USE_SHMEM)
 endif()
@@ -200,10 +223,7 @@ IF(EXISTS ${CMAKE_CURRENT_LIST_DIR}/pybind11/CMakeLists.txt)
     pybind11_add_module(_cpp_pymatching ${PYTHON_API_FILES} ${SOURCE_FILES_NO_MAIN})
     target_link_libraries(_cpp_pymatching PRIVATE libstim)
     target_compile_options(_cpp_pymatching PRIVATE ${ARCH_OPT})
-    if(USE_THREADS)
-        target_compile_definitions(_cpp_pymatching PRIVATE USE_THREADS)
-        target_link_libraries(_cpp_pymatching PRIVATE OpenMP::OpenMP_CXX)
-    endif()
+    target_link_libraries(_cpp_pymatching PRIVATE OpenMP::OpenMP_CXX)
     if(USE_SHMEM)
         target_compile_definitions(_cpp_pymatching PRIVATE USE_SHMEM)
     endif()

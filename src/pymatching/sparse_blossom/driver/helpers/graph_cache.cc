@@ -164,6 +164,102 @@ void pm::write_user_graph_cache(
     }
 }
 
+namespace {
+
+// Reads and validates the cache header; leaves `f` positioned at the first node record.
+pm::GraphCacheHeader parse_header(
+    FILE* f,
+    const std::string& path,
+    bool expected_enable_correlations,
+    int64_t expected_rounds_per_partition,
+    int expected_division_strategy) {
+    pm::GraphCacheHeader h;
+    uint64_t magic;
+    read_pod(f, magic);
+    if (magic != GRAPH_CACHE_MAGIC) {
+        throw pm::GraphCacheMismatchError("graph_cache: bad magic number in " + path);
+    }
+
+    uint32_t format_version;
+    read_pod(f, format_version);
+    if (format_version != GRAPH_CACHE_VERSION) {
+        throw pm::GraphCacheMismatchError(
+            "graph_cache: format version mismatch (file has " + std::to_string(format_version) + ", expected " +
+            std::to_string(GRAPH_CACHE_VERSION) + ")");
+    }
+
+    uint8_t build_mode;
+    read_pod(f, build_mode);
+    uint8_t expected_build_mode = 0;
+    // expected_build_mode = 1;
+    expected_build_mode = 2;
+
+    if (build_mode != expected_build_mode) {
+        throw pm::GraphCacheMismatchError(
+            "graph_cache: build mode mismatch (file has " + std::to_string(build_mode) + ", this binary is " +
+            std::to_string(expected_build_mode) + ")");
+    }
+
+    uint8_t enable_corr_u8;
+    read_pod(f, enable_corr_u8);
+    if ((bool)enable_corr_u8 != expected_enable_correlations) {
+        throw pm::GraphCacheMismatchError("graph_cache: enable_correlations mismatch");
+    }
+
+    uint8_t loaded_wo_corr_u8;
+    read_pod(f, loaded_wo_corr_u8);
+    h.loaded_from_dem_without_correlations = (bool)loaded_wo_corr_u8;
+
+    read_pod(f, h.num_nodes);
+    read_pod(f, h.num_edges);
+    read_pod(f, h.num_observables);
+    read_pod(f, h.num_boundary_nodes);
+
+    int64_t cache_rounds_per_partition;
+    read_pod(f, cache_rounds_per_partition);
+    if (cache_rounds_per_partition != expected_rounds_per_partition) {
+        throw pm::GraphCacheMismatchError(
+            "graph_cache: rounds_per_partition mismatch (file has " + std::to_string(cache_rounds_per_partition) +
+            ", expected " + std::to_string(expected_rounds_per_partition) + ")");
+    }
+    read_pod(f, h.num_partitions);
+    read_pod(f, h.num_rounds);
+    read_pod(f, h.num_virtual_boundaries);
+
+    int32_t cache_division_strategy;
+    read_pod(f, cache_division_strategy);
+    if (cache_division_strategy != expected_division_strategy) {
+        throw pm::GraphCacheMismatchError(
+            "graph_cache: task_division_strategy mismatch (file has " + std::to_string(cache_division_strategy) +
+            ", expected " + std::to_string(expected_division_strategy) + ")");
+    }
+    read_pod(f, h.num_obs_patches);
+    read_pod(f, h.p_per_obs_patch);
+    read_pod(f, h.vb_per_obs_patch);
+    return h;
+}
+
+}  // namespace
+
+pm::GraphCacheHeader pm::read_user_graph_cache_header(
+    const std::string& path,
+    bool expected_enable_correlations,
+    int64_t expected_rounds_per_partition,
+    int expected_division_strategy) {
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f)
+        throw std::runtime_error("graph_cache: failed to open " + path + " for reading");
+    try {
+        GraphCacheHeader h = parse_header(
+            f, path, expected_enable_correlations, expected_rounds_per_partition, expected_division_strategy);
+        fclose(f);
+        return h;
+    } catch (...) {
+        fclose(f);
+        throw;
+    }
+}
+
 pm::UserGraph pm::read_user_graph_cache(
     const std::string& path,
     bool expected_enable_correlations,
@@ -175,72 +271,15 @@ pm::UserGraph pm::read_user_graph_cache(
         throw std::runtime_error("graph_cache: failed to open " + path + " for reading");
 
     try {
-        uint64_t magic;
-        read_pod(f, magic);
-        if (magic != GRAPH_CACHE_MAGIC) {
-            throw pm::GraphCacheMismatchError("graph_cache: bad magic number in " + path);
-        }
-
-        uint32_t format_version;
-        read_pod(f, format_version);
-        if (format_version != GRAPH_CACHE_VERSION) {
-            throw pm::GraphCacheMismatchError(
-                "graph_cache: format version mismatch (file has " + std::to_string(format_version) +
-                ", expected " + std::to_string(GRAPH_CACHE_VERSION) + ")");
-        }
-
-        uint8_t build_mode;
-        read_pod(f, build_mode);
-        uint8_t expected_build_mode = 0;
-        // expected_build_mode = 1;
-        expected_build_mode = 2;
-
-        if (build_mode != expected_build_mode) {
-            throw pm::GraphCacheMismatchError(
-                "graph_cache: build mode mismatch (file has " + std::to_string(build_mode) +
-                ", this binary is " + std::to_string(expected_build_mode) + ")");
-        }
-
-        uint8_t enable_corr_u8;
-        read_pod(f, enable_corr_u8);
-        if ((bool)enable_corr_u8 != expected_enable_correlations) {
-            throw pm::GraphCacheMismatchError("graph_cache: enable_correlations mismatch");
-        }
-
-        uint8_t loaded_wo_corr_u8;
-        read_pod(f, loaded_wo_corr_u8);
-
-        uint64_t num_nodes, num_edges, num_observables, num_boundary_nodes;
-        read_pod(f, num_nodes);
-        read_pod(f, num_edges);
-        read_pod(f, num_observables);
-        read_pod(f, num_boundary_nodes);
-
-        int64_t cache_rounds_per_partition;
-        read_pod(f, cache_rounds_per_partition);
-        if (cache_rounds_per_partition != expected_rounds_per_partition) {
-            throw pm::GraphCacheMismatchError(
-                "graph_cache: rounds_per_partition mismatch (file has " +
-                std::to_string(cache_rounds_per_partition) + ", expected " +
-                std::to_string(expected_rounds_per_partition) + ")");
-        }
-        uint64_t cache_num_partitions, cache_num_rounds, cache_num_virtual_boundaries;
-        read_pod(f, cache_num_partitions);
-        read_pod(f, cache_num_rounds);
-        read_pod(f, cache_num_virtual_boundaries);
-
-        int32_t cache_division_strategy;
-        read_pod(f, cache_division_strategy);
-        if (cache_division_strategy != expected_division_strategy) {
-            throw pm::GraphCacheMismatchError(
-                "graph_cache: task_division_strategy mismatch (file has " +
-                std::to_string(cache_division_strategy) + ", expected " +
-                std::to_string(expected_division_strategy) + ")");
-        }
-        uint64_t cache_num_obs_patches, cache_p_per_obs_patch, cache_vb_per_obs_patch;
-        read_pod(f, cache_num_obs_patches);
-        read_pod(f, cache_p_per_obs_patch);
-        read_pod(f, cache_vb_per_obs_patch);
+        pm::GraphCacheHeader h = parse_header(
+            f, path, expected_enable_correlations, expected_rounds_per_partition, expected_division_strategy);
+        const uint64_t num_nodes = h.num_nodes, num_edges = h.num_edges, num_observables = h.num_observables;
+        const uint64_t num_boundary_nodes = h.num_boundary_nodes;
+        const uint64_t cache_num_partitions = h.num_partitions, cache_num_rounds = h.num_rounds;
+        const uint64_t cache_num_virtual_boundaries = h.num_virtual_boundaries;
+        const uint64_t cache_num_obs_patches = h.num_obs_patches, cache_p_per_obs_patch = h.p_per_obs_patch;
+        const uint64_t cache_vb_per_obs_patch = h.vb_per_obs_patch;
+        const uint8_t loaded_wo_corr_u8 = h.loaded_from_dem_without_correlations ? 1 : 0;
 
         pm::UserGraph user_graph(num_nodes, num_observables);
         user_graph.loaded_from_dem_without_correlations = (bool)loaded_wo_corr_u8;

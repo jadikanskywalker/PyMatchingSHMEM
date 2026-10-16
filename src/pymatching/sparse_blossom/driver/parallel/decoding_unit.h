@@ -23,6 +23,7 @@
 #include "pymatching/sparse_blossom/diagram/mwpm_diagram.h"
 #include "pymatching/sparse_blossom/driver/mwpm_decoding.h"
 #include "pymatching/sparse_blossom/driver/parallel/shot_buffer.h"
+#include "pymatching/sparse_blossom/driver/parallel/subset_plan.h"
 
 #ifdef USE_SHMEM
 #include <shmem.h>
@@ -45,9 +46,10 @@ class UserGraph;
 
 #ifdef USE_SHMEM
 #define SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION 3
+#define SHMEM_CACHE_LINE_SIZE 64
 
 struct FusionSummary {
-    GraphFillRegion* regions_ptr_base; // index where solving partition's arena begins
+    GraphFillRegion* local_regions_ptr_base; // sender's process-local GraphFillRegion buffer base (for rebasing region pointers)
     DetectorNode* static_nodes_base; // Base address of graph.nodes on the sender PE
     size_t blossom_children_size;
     size_t regions_to_unmatch_size;
@@ -63,6 +65,13 @@ struct FusionSummary {
 struct DecodingUnit {
     // Graph
     SharedMatchingGraph graph;
+    // Built only when needed (>64 observables, or ensure_search_flooder_included) -- shared
+    // read-only across every solver on this PE, mirroring graph.graph_ptr. No partition/vb bounds
+    // metadata needed (unlike SharedMatchingGraph): extract_paths_from_match_edges only ever runs
+    // on a single already-fused solver's own local match_edges, after cross-rank fusion for that
+    // shot/vb has fully resolved locally.
+    std::shared_ptr<pm::SearchGraph> search_graph_ptr;
+    bool needs_search_flooder{false};
 
     // Shots
     std::shared_ptr<ShotBuffer> shot_buffer;
@@ -79,15 +88,15 @@ struct DecodingUnit {
     // size_t num_partition_units;
     // Local partition count -- solvers only exist for this PE's own partitions (see build_solvers()
     // and the plan for this refactor: a full Mwpm is unnecessary for a remote partition, only its
-    // SHMEMArena is, see remote_arenas below).
+    // GraphFillRegionArena is, see remote_arenas below).
     size_t num_solvers_per_buffer;
     std::vector<std::shared_ptr<Mwpm>> solvers;
 #ifdef USE_SHMEM
     // Bare region-tracking arenas for every partition NOT owned by this PE, needed only so
     // get_solution_from_remote_pe can copy a sender's bitmap and stamp owner_arena on rebased regions
     // for later del() bookkeeping -- see region_arena_for(). Built once per shot container in
-    // build_solvers(), sized/ordered by remote_index() below.
-    std::vector<SHMEMArena<GraphFillRegion>> remote_arenas;
+    // build_solvers(), indexed through remote_arena_slot below.
+    std::vector<GraphFillRegionArena> remote_arenas;
 #endif
     // Global partition id of this PE's own first local partition, and how many local partitions it
     // owns -- both contiguous by construction (obs-major numbering, per-PE contiguous ownership for
@@ -99,6 +108,10 @@ struct DecodingUnit {
 
     std::vector<size_t> my_partition_task_ids;
 
+    // USE_SHMEM: Used for shmem region sizing
+    // Else: Used to reserve available vector for GraphFillRegion Arena, preventing any concurrent
+    // available.push_back()'s from triggering internal buffer growth and causing seg faults
+    size_t regions_nelems_per_solver;
 #ifdef USE_SHMEM
     
     int pid;
@@ -106,14 +119,14 @@ struct DecodingUnit {
 
     // Symmetric memory
     DetectorNodeEphemeralFields* node_ephemeral_fields_ptr{ nullptr }; // ephemeral field buffers for DetectorNodes
-    GraphFillRegion* regions_ptr{ nullptr }; // buffers for region SHMEMArenas
+    GraphFillRegionExtractedFields* extracted_fields_ptr{ nullptr }; // symmetric buffers for region GraphFillRegionArenas
+    GraphFillRegion* local_regions_ptr{ nullptr }; // process-local regions, index-aligned with extracted_fields_ptr
     BlossomChild* child_edges_ptr{ nullptr }; // blossom parent-child relationship buffer
     // uint64_t* atomics_ptr{ nullptr }; // shot counter for each shot container
-    uint64_t* task_status_ptr{ nullptr }; // status and signal for each fusion task
+    unsigned long* task_status_ptr{ nullptr }; // status, signal, and done for each fusion task
     FusionSummary* task_fusion_summary_ptr { nullptr }; // fusion summary for each fusion task
     // Info used for symmetric memory accesses
     size_t nodes_nelems_per_buffer;
-    size_t regions_nelems_per_solver;
     size_t child_edges_nelems_per_solver;
     size_t task_fusion_summary_size_per_task;
     size_t regions_matched_to_vb_nelems;
@@ -128,21 +141,20 @@ struct DecodingUnit {
         );
     }
 
-    inline uint64_t* get_task_status_ptr(size_t shot_container_id, bool iamleft) {
-        // There are two uint64s per slot: status and signal
+    inline unsigned long* get_task_status_ptr(size_t shot_container_id, bool iamleft) {
+        constexpr size_t stride = SHMEM_CACHE_LINE_SIZE / sizeof(unsigned long);
         //   Simple left/right case: num_cross_rank_fusions=2 slots per buffer
         //   Even PEs map slots (to left, to right), odd PEs (to right, to left)
         //   This ensures tasks correspond on each PE
         bool even = !(pid % 2);
         bool take_second_slot = (even && iamleft) || (!even && !iamleft);
-        return task_status_ptr + SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION*(num_cross_rank_fusions*shot_container_id + take_second_slot);
+        return task_status_ptr + stride * (num_cross_rank_fusions * shot_container_id + take_second_slot);
     }
 
     // OBS strategy: index by seam index s directly (both PEs compute seam_infos identically)
-    inline uint64_t* get_task_status_ptr_for_seam(size_t shot_id, int seam_idx) {
-        return task_status_ptr
-            + SHMEM_NUM_ATOMICS_PER_CROSS_RANK_FUSION
-              * (num_cross_rank_fusions * shot_id + seam_idx);
+    inline unsigned long* get_task_status_ptr_for_seam(size_t shot_id, int seam_idx) {
+        constexpr size_t stride = SHMEM_CACHE_LINE_SIZE / sizeof(unsigned long);
+        return task_status_ptr + stride * (num_cross_rank_fusions * shot_id + seam_idx);
     }
     inline FusionSummary* get_fusion_summary_ptr_for_seam(size_t shot_id, int seam_idx) {
         return reinterpret_cast<FusionSummary*>(
@@ -156,8 +168,12 @@ struct DecodingUnit {
         return node_ephemeral_fields_ptr + shot_container_id * nodes_nelems_per_buffer + bounds.first;
     }
 
-    inline GraphFillRegion* get_regions_ptr(size_t shot_container_id, int partition_id) {
-        return regions_ptr + (shot_container_id * graph.num_partitions + partition_id) * regions_nelems_per_solver;
+    inline GraphFillRegionExtractedFields* get_extracted_fields_ptr(size_t shot_container_id, int partition_id) {
+        return extracted_fields_ptr + (shot_container_id * graph.num_partitions + partition_id) * regions_nelems_per_solver;
+    }
+
+    inline GraphFillRegion* get_local_regions_ptr(size_t shot_container_id, int partition_id) {
+        return local_regions_ptr + (shot_container_id * graph.num_partitions + partition_id) * regions_nelems_per_solver;
     }
 
     inline BlossomChild* get_child_edges_ptr(size_t shot_container_id, int partition_id) {
@@ -181,14 +197,21 @@ struct DecodingUnit {
         pm::UserGraph user_graph,
         weight_int num_distinct_weights,
         bool ensure_search_flooder_included,
-        bool enable_correlations
+        bool enable_correlations,
+        const SubsetOptions* subset = nullptr
 #ifdef ENABLE_DRAW_FLAGS
-        , bool draw_frames
+        , bool draw_frames = false
         , const stim::DetectorErrorModel* dem_for_drawing = nullptr
 #endif
         );
 
     ~DecodingUnit();
+
+    // Seam windows derived from the seam spec (before conflict resolution); set when the graphs were built
+    // partially (SubsetOptions), in which case seam nodes of untouched seams are not built and the graph walk
+    // cannot be used to discover them.
+    bool subset_graph_build{false};
+    std::vector<SeamInfo> subset_seam_infos;
 
     void build_tasks_for_round_partitioning();
     void build_tasks_for_obs_patch_partitioning();
@@ -203,69 +226,97 @@ struct DecodingUnit {
     }
 
 #ifdef USE_SHMEM
-    // My own local range is one contiguous block, but its complement generally isn't (e.g. PE1 with
-    // local [8..15] has "remote" split across PE0's [0..7] and PE2's [16..23]). remote_arenas is built
-    // by iterating every global partition once and appending everything outside my own local range, in
-    // order -- so the index back is a two-branch formula, not a plain subtraction. Only ever called
-    // for partitions the caller has already confirmed are non-local.
-    inline int remote_index(int global_partition) const {
-        if (global_partition < my_partitions_start) return global_partition;
-        return global_partition - my_partition_count;
-    }
+    // remote_arenas holds one arena per remote partition this PE can receive a window for: every partition outside
+    // my own local range for a full graph build, only the held partitions for a subset build. remote_arena_slot[p]
+    // is the arena's index (per shot container) or -1 if p has none.
+    std::vector<int> remote_arena_slot;
+    size_t num_remote_arenas{0};
+    // Partitions built as held (subset build); empty means every partition is held.
+    std::vector<bool> held_partitions;
 
     // Dispatches to solvers[...]->flooder.region_arena for a local partition, or remote_arenas[...]
     // for a remote one. Used only by get_solution_from_remote_pe's bitmap-copy/rebase loop -- nowhere
     // else needs remote arena access, since every other solver reference goes through a task's own
     // ->solver (always local by construction).
-    SHMEMArena<GraphFillRegion>& region_arena_for(int shot_container_id, int global_partition);
+    GraphFillRegionArena& region_arena_for(int shot_container_id, int global_partition);
+
+    // Global partitions [first, last] a cross-rank task sends from (this PE's side) / receives into (the remote
+    // PE's side). Shared by send_solution_to_remote_pe, get_solution_from_remote_pe and prefault_crt_windows.
+    std::pair<int, int> crt_send_window(const CrossRankTask& t) const;
+    std::pair<int, int> crt_recv_window(const CrossRankTask& t) const;
+    // Faults in the symmetric-heap pages cross-rank fusions read or write (config_parallel::prefault_windows).
+    void prefault_crt_windows();
 #endif
 
 
     // Decoding Functions
 #ifdef USE_SHMEM
-    void send_solution_to_remote_pe(size_t shot_container_id, pm::MatchingResult& res, CrossRankTask &task, std::ofstream &t_out);
-    bool get_solution_from_remote_pe(size_t shot_container_id, CrossRankTask &task, std::ofstream &t_out, std::vector<uint64_t>& hitsref); // returns whether solving is necessary
+    void send_solution_to_remote_pe(size_t shot_container_id, size_t shot_id, pm::MatchingResult& res, CrossRankTask &task, Task &owner_task, int tid, std::ofstream &t_out);
+    bool get_solution_from_remote_pe(size_t shot_container_id, CrossRankTask &task, int shot_buffer_round, std::ofstream &t_out, std::vector<uint64_t>& hitsref); // returns whether solving is necessary
     // Extracts a cross-rank fusion's received window immediately, inline on the resolving thread.
     // Assumes crt->part's own vb has already been divided (see divide_vb) by the caller.
-    void extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, CrossRankTask& crt, int tid, std::ofstream* t_out = nullptr);
+    void extract_crt_received_window(ShotContainer& shot, size_t shot_container_id, size_t shot_id, CrossRankTask& crt, int tid, std::ofstream* t_out = nullptr);
+    // Extracts and saves the WINNER's own local window (the same in_crt_window-marked partitions
+    // send_solution_to_remote_pe would send if this PE were instead the sender this round) -- these
+    // are skipped by the normal process_extraction_job/divide_vb pipeline, so the winner must
+    // extract them itself. Mirrors extract_crt_received_window but for "my own side" and, unlike
+    // it, calls mark_extraction_done() on every partition leaf touched (a real local Task exists
+    // for each one here, unlike the remote window).
+    void extract_local_crt_window(ShotContainer& shot, size_t shot_container_id, size_t shot_id, CrossRankTask& crt, int tid, std::ofstream* t_out = nullptr);
+    // Deferred cleanup for a CRT this PE sent for this shot (see crts_i_sent in decode_shots()):
+    // quiets the send context, then shatters the sent local window WITHOUT saving any solution
+    // contribution (the receiver already saved the equivalent contribution via
+    // extract_crt_received_window/extract_local_crt_window), then reports extraction-done. Called
+    // right before a thread would otherwise fall into the shared extraction-job-claiming loop, so
+    // the sending thread never blocks on this immediately after send_solution_to_remote_pe returns.
+    void finalize_sent_crt_window(ShotContainer& shot, size_t shot_container_id, size_t shot_id, CrossRankTask& t, int shot_buffer_round, int tid, std::ofstream& t_out);
 #endif
 
-    // Erases every pointer in t->regions_matched_to_virtual_boundary whose region is no longer live
-    // (GraphFillRegion::allocated == false -- set/cleared solely by Arena/SHMEMArena's own
-    // alloc_unconstructed()/del(), so this needs no partition/shot lookup, just a field read per
-    // pointer). Not USE_SHMEM-gated: called unconditionally from divide_vb (t = its own prune_target,
-    // after that vb's own shatter -- every build, not just SHMEM ones), and additionally from
-    // send_solution_to_remote_pe (t = the CrossRankTask itself, after its own solution-isolation
-    // shatter -- the one shatter pass in the CRT path with no divide_vb call of its own to fold this
-    // into, SHMEM-only). get_solution_from_remote_pe needs no call: its own inline shatter step was
-    // removed (it was dividing over t.part before that vb was ever fused, so region_that_arrived_top
-    // there was never set -- see now-its-time-to-jazzy-turing.md Phase four Context §3), leaving
-    // divide_vb(..., crt->part, ..., prune_target=crt, ...) as the only shatter on the receiver side,
-    // already covered.
-    void prune_stale_regions_matched_to_vb(TaskBase* t);
-
     // Unit-checkpointed extraction (see plans/this-is-a-broader-purrfect-crystal.md). Universal
-    // across build configs -- both plain USE_THREADS and USE_SHMEM+USE_THREADS builds post to and
-    // drain the same job queue.
+    // across build configs -- both plain threads and USE_SHMEM builds post to and drain the same
+    // job queue.
 
-    // Separates the two subgraphs joined at vb_id: loops every node in graph.vb_bounds[vb_id]
-    // (not just ones with "hits" -- a blossom can span the vb without either side registering a hit
-    // exactly there) and shatters/extracts any non-null region_that_arrived_top. Synchronous/inline,
-    // never queued -- this is what makes it safe to later post an extraction job for either side
-    // independently: once divided, neither side's regions reference across the boundary anymore.
-    // solver_arg must be a genuine descendant leaf's own solver (the caller's own already-assigned
-    // ->solver, not an arbitrary fixed choice -- see definition for why).
+    // Separates the two subgraphs joined at range_task->part: loops every node in
+    // graph.vb_bounds[range_task->part] (not just ones with "hits" -- a blossom can span the vb
+    // without either side registering a hit exactly there) and shatters/extracts any non-null
+    // region_that_arrived_top. Synchronous/inline, never queued -- this is what makes it safe to
+    // later post an extraction job for either side independently: once divided, neither side's
+    // regions reference across the boundary anymore.
+    // range_task supplies both the vb id/solver to use (range_task->part / range_task->solver, a
+    // genuine descendant leaf's own solver, not an arbitrary fixed choice -- see definition for why)
+    // and the extraction-bounding window passed to Mwpm::prepare_for_extraction (range_task->
+    // vb_marker/vb_left/vb_right), so the search reconstructing each shattered match's path can't
+    // stray into a concurrently-processed neighboring partition (see SearchFlooder::is_active).
+    // Every call site happens to already have the right task on hand for this in every case traced
+    // (LocalSeamTask/CrossRankTask for their own seam, the connector Task for preemptive division,
+    // the link for back_divide_walk, the node for post-hoc chunking).
     // prune_target: the fusion task whose vb this is (Task* for a checkpoint, CrossRankTask* for a
-    // cross-rank fusion -- both derive from TaskBase). A blossom shattered here can span farther than
-    // this vb and destroy a region still referenced in prune_target->regions_matched_to_virtual_
-    // boundary (kept there for a LATER setup() call to consume) -- passing prune_target makes divide_vb
-    // prune any now-stale pointers out of that list afterward. Pass nullptr only when no future
-    // setup() call will ever read that list again (post-hoc chunking, run after the whole tree is
-    // already fully solved).
+    // cross-rank fusion -- both derive from TaskBase; often, but not always, the same object as
+    // range_task -- post-hoc chunking passes nullptr here while still needing range_task for the
+    // extraction bound). A blossom shattered here can span farther than this vb and destroy a region
+    // still referenced in prune_target->regions_matched_to_virtual_boundary (kept there for a LATER
+    // setup() call to consume) -- passing prune_target makes divide_vb prune any now-stale pointers
+    // out of that list afterward. Pass nullptr only when no future setup() call will ever read that
+    // list again (post-hoc chunking, run after the whole tree is already fully solved).
     // t_out: optional per-thread debug stream; when DEBUG and non-null, logs the vb being divided and
     // the solver/prune_target so divide timing can be traced end-to-end (see this-is-a-broader-
     // purrfect-crystal.md).
-    void divide_vb(ShotContainer& shot, int shot_container_id, int vb_id, Mwpm* solver_arg, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
+    // force=true bypasses the in_crt_window skip -- for the two boundary_fusions callers, which must
+    // still divide these now-in_crt_window-marked tasks themselves (see mark_crt_window).
+    void divide_vb(ShotContainer& shot, int shot_container_id, size_t shot_id, TaskBase* range_task, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr, bool force = false);
+    // Core of divide_vb, usable directly with an explicit vb id when no TaskBase exists there --
+    // see definition for the full rationale and set_vb_to_part's meaning. divide_vb itself is a
+    // thin wrapper over this (bounds_source == range_task, set_vb_to_part == true).
+    void divide_vb_core(int shot_container_id, size_t shot_id, int vb_id, TaskBase& bounds_source, bool set_vb_to_part, int tid, TaskBase* prune_target, std::ofstream* t_out = nullptr);
+
+    // Reinserted as a belt-and-suspenders diagnostic alongside Mwpm::remove_from_regions_matched_to_
+    // virtual_boundary's at-deletion pruning (see de1cf763): a post-hoc scan for any region left in
+    // t->regions_matched_to_virtual_boundary whose GraphFillRegion::allocated is now false -- i.e. a
+    // region that was deleted WITHOUT the inline prune catching it. If this ever fires, the at-deletion
+    // fix has a gap somewhere, and whatever consumes t's stale list next (a later setup() call) is
+    // exactly what's segfaulting inside Mwpm::unmatch_virtual_boundaries_between_partitions. caller:
+    // a short label identifying which of the two call sites below found the stale entry.
+    void prune_stale_regions_matched_to_vb(TaskBase* t, const char* caller, std::ofstream* t_out = nullptr);
 
     // Walk backward through start's own left_child chain, dividing+posting every deferred
     // (is_extraction_unit_connector && defer_division) link found, stopping at the first non-deferred
@@ -273,7 +324,7 @@ struct DecodingUnit {
     // solved Task's own special_tasks list is non-empty, once, after every attached special task is
     // fully resolved -- not USE_SHMEM-gated, since local seams (and the deferred spans they trigger)
     // work the same with or without SHMEM.
-    void back_divide_walk(Task* start, ShotContainer& shot, int shot_container_id, int tid, std::ofstream* t_out = nullptr);
+    void back_divide_walk(Task* start, ShotContainer& shot, int shot_container_id, size_t shot_id, int tid, std::ofstream* t_out = nullptr);
 
     // Shatter+extract an entire unit subtree (job.subtree_root), accumulating into
     // shot.thread_results[tid] (bit-packed) or shot.res directly (extended observables, under omp
@@ -287,14 +338,19 @@ struct DecodingUnit {
     // not yet fixed -- tracked separately) virtual_boundary_hits-based approach.
     // t_out: optional per-thread debug stream; when DEBUG and non-null, logs the vb/task address of
     // the job being processed.
-    void process_extraction_job(ShotContainer& shot, const ExtractionJob& job, int tid, std::ofstream* t_out = nullptr);
+    void process_extraction_job(ShotContainer& shot, size_t shot_id, const ExtractionJob& job, int tid, std::ofstream* t_out = nullptr);
 
     // Non-preemptive (extract_preemptively == false) post-hoc chunking: a single top-down walk of the
     // balanced-over-units tree, driven entirely by the extraction-role tags (see
     // decoding_task.h/build_tasks_for_round_partitioning) -- no dynamic leaf-counting needed. At a
     // unit root, post it and return; at a connector, divide its own vb inline (making both children
     // independently safe to post/recurse into) and recurse into both.
-    void post_hoc_chunk_and_post(Task* node, ShotContainer& shot, int shot_container_id, int tid, std::ofstream* t_out = nullptr);
+    void post_hoc_chunk_and_post(Task* node, ShotContainer& shot, int shot_container_id, size_t shot_id, int tid, std::ofstream* t_out = nullptr);
+
+    // Reset to 0.0 at the top of every decode_shots() call; accumulated by the single "last" thread
+    // per shot into wall-clock ms of pure decode compute, excluding the I/O window inside
+    // write_shot_result(). Read by the caller immediately after each decode_shots() call.
+    double last_decode_shots_wall_ms{0.0};
 
     void decode_shots();
     void reset();

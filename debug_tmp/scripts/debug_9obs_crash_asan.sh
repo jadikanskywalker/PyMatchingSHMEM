@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=debug_9obs_asan
-#SBATCH --output=debug_tmp/out/debug_9obs_asan-%j.out
-#SBATCH --error=debug_tmp/out/debug_9obs_asan-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/debug_9obs_asan-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/debug_9obs_asan-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=00:30:00
 #SBATCH --nodes=1

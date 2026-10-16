@@ -22,18 +22,20 @@
 #include "pymatching/sparse_blossom/flooder_matcher_interop/varying.h"
 #include "pymatching/sparse_blossom/tracker/queued_event_tracker.h"
 
-#ifdef USE_SHMEM
-#include "pymatching/sparse_blossom/flooder/helpers/shmem_arena.h"
-#endif
-
 #include "pymatching/sparse_blossom/arena.h"
-
 
 namespace pm {
 
 class AltTreeNode;
+struct GraphFillRegion;
+#ifdef USE_SHMEM
+struct GraphFillRegionArena;
+#endif
 
-struct GraphFillRegion {
+/// The fields of a GraphFillRegion that a cross-rank fusion sends to the receiving PE. Under USE_SHMEM
+/// these live in a separate shmem buffer that GraphFillRegion points to; otherwise they are stored in
+/// place. Always access them through GraphFillRegion::state().
+struct GraphFillRegionExtractedFields {
     /// If this region has merged with others into a blossom, this is that blossom.
     GraphFillRegion* blossom_parent;
     /// The topmost fill region that contains this region. This field must be kept up to date as
@@ -47,6 +49,22 @@ struct GraphFillRegion {
     pm::VaryingCT radius;
     /// If the region is matched, as opposed to growing/shrinking, this says what it is matched to.
     pm::Match match;
+
+    /// Under USE_SHMEM this also points owning_region->extracted_fields at this object.
+    explicit GraphFillRegionExtractedFields(GraphFillRegion* owning_region);
+    void reset(GraphFillRegion* owning_region);
+};
+
+struct GraphFillRegion {
+#ifdef USE_SHMEM
+    GraphFillRegionExtractedFields* extracted_fields = nullptr;
+    inline GraphFillRegionExtractedFields& state() { return *extracted_fields; }
+    inline const GraphFillRegionExtractedFields& state() const { return *extracted_fields; }
+#else
+    GraphFillRegionExtractedFields extracted_fields;
+    inline GraphFillRegionExtractedFields& state() { return extracted_fields; }
+    inline const GraphFillRegionExtractedFields& state() const { return extracted_fields; }
+#endif
     /// If this is a top-level region (not a blossom child), this is the alternating tree that
     /// it is part of. Note that it may be a degenerate alternating tree with just a single
     /// graph fill region (this one).
@@ -65,23 +83,41 @@ struct GraphFillRegion {
     void cleanup_shell_area();
 
 #ifdef USE_SHMEM
-    SHMEMArena<GraphFillRegion>* owner_arena;
+    GraphFillRegionArena* owner_arena;
 #else
     Arena<GraphFillRegion>* owner_arena;
 #endif
 
     int rotating_buffer_idx = 0;
 
-    // Liveness flag, set/cleared only by the owning arena's alloc_unconstructed()/del() (see arena.h,
-    // shmem_arena.h) -- lets any code holding a possibly-stale GraphFillRegion* determine whether it's
-    // still the same live region without threading an explicit "what did I just destroy" list through
-    // every shatter path. Costs zero bytes: sits in the struct's own existing tail padding (confirmed
-    // via a compiled offsetof probe -- rotating_buffer_idx ends at offset 140, struct size is 144).
-    bool allocated = false;
+    // Cumulative construct/destruct counts for whichever memory slot this object currently occupies.
+    // GraphFillRegion()'s body sets constructed=1, destructed=0 on a genuine construction (a brand-new
+    // slot, or a move-construction -- see below); the arena's del() increments `destructed` directly, and
+    // its alloc_default_constructed() increments `constructed` directly when reusing an
+    // already-constructed slot (see arena.h).
+    // Deliberately absent from every constructor's initializer list and given no default member
+    // initializer, so a placement-new on a recycled slot leaves whatever count was already sitting
+    // there untouched until the constructor body's own write -- the counts are tied to the memory
+    // slot's whole Arena-driven recycling lifetime, not any one object's. A freshly malloc'd
+    // (never-yet-constructed) slot needs both at a well-defined 0, which is why Arena::
+    // alloc_unconstructed() zeroes new memory via calloc instead of malloc. A genuinely live object has
+    // constructed == destructed + 1; Arena::del()/~Arena() check this immediately before acting, so a
+    // repeat/lost construct-destruct pairing is caught at the point of failure instead of inferred
+    // later from a lost available.push_back().
+    int constructed;
+    int destructed;
 
     GraphFillRegion();
+#ifdef USE_SHMEM
+    GraphFillRegion(GraphFillRegion&&) = delete;
+#else
     GraphFillRegion(GraphFillRegion&&);
+#endif
     GraphFillRegion(const GraphFillRegion&) = delete;
+
+    // Clears every vector/pointer field back to the state the default constructor establishes, WITHOUT
+    // ending this object's C++ lifetime and WITHOUT touching constructed/destructed or owner_arena.
+    void reset();
     bool tree_equal(const pm::GraphFillRegion& other) const;
 
     void add_match(pm::GraphFillRegion* match, const pm::CompressedEdge& edge);
@@ -127,23 +163,11 @@ inline void pm::GraphFillRegion::do_op_for_each_descendant_and_self(const Callab
     }
 }
 
-#ifdef USE_SHMEM
-struct GraphFillRegionSubstates {
-    GraphFillRegion* region;
-    GraphFillRegion* blossom_parent;
-    GraphFillRegion* blossom_parent_top;
-    pm::VaryingCT radius; 
-    pm::Match match;
-
-    GraphFillRegionSubstates(GraphFillRegion* region_)
-      : region(region_),
-        blossom_parent(region_->blossom_parent),
-        blossom_parent_top(region_->blossom_parent_top),
-        radius(region_->radius),
-        match(region_->match) {}
-};
-#endif
 
 }  // namespace pm
+
+#ifdef USE_SHMEM
+#include "pymatching/sparse_blossom/flooder/helpers/shmem_arena.h"
+#endif
 
 #endif  // PYMATCHING2_GRAPH_FILL_REGION_H

@@ -23,8 +23,6 @@ size_t pm::SearchDetectorNode::index_of_neighbor(SearchDetectorNode *target) con
     throw std::invalid_argument("Failed to find neighbor.");
 }
 
-void pm::SearchDetectorNode::reset() {
-    reached_from_source = nullptr;
-    index_of_predecessor = SIZE_MAX;
-    node_event_tracker.clear();
+void pm::SearchDetectorNode::reset(int rotating_buffer_idx) {
+    state(rotating_buffer_idx).reset();
 }

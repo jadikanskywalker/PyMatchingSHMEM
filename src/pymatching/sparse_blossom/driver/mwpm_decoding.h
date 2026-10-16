@@ -19,10 +19,8 @@
 #include "stim.h"
 #include <set>
 
-#ifdef USE_THREADS
 #include "pymatching/sparse_blossom/config_parallel.h"
 #include <memory>
-#endif
 
 #ifdef USE_SHMEM
 #include "pymatching/sparse_blossom/driver/helpers/vector_wrapper.h"
@@ -58,7 +56,6 @@ inline void ExtendedMatchingResult::reset() {
     weight = 0;
 }
 
-#ifdef USE_THREADS
 void process_timeline_until_completion(
     pm::Mwpm& mwpm,
     const std::vector<uint64_t>& detection_events,
@@ -67,11 +64,15 @@ void process_timeline_until_completion(
 #endif
     bool parallel = false,
     int tid = -1);
+// t_out: optional per-thread debug stream, forwarded into Mwpm::shatter_blossom_and_extract_matches/
+// _match_edges (see their own comment) -- nullptr (the default) for the serial, non-parallel call
+// sites below, which have no such stream; DecodingUnit::accumulate_hits passes its caller's real one
+// (process_extraction_job's/extract_crt_received_window's own t_out) through here, since this is the
+// only place those two paths ever shatter a region.
 MatchingResult shatter_blossoms_for_all_detection_events_and_extract_obs_mask_and_weight(
-    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events);
+    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, std::ofstream* t_out = nullptr);
 void shatter_blossoms_for_all_detection_events_and_extract_match_edges(
-    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events);
-#endif
+    pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, std::ofstream* t_out = nullptr);
 
 void fill_bit_vector_from_obs_mask(pm::obs_int obs_mask, uint8_t* obs_begin_ptr, size_t num_observables);
 obs_int bit_vector_to_obs_mask(const std::vector<uint8_t>& bit_vector);
@@ -81,17 +82,6 @@ Mwpm detector_error_model_to_mwpm(
     pm::weight_int num_distinct_weights,
     bool ensure_search_flooder_included = false,
     bool enable_correlations = false);
-
-// #ifdef USE_THREADS
-// DecodingUnit detector_error_model_to_decoding_unit(
-// #ifdef USE_SHMEM
-//     void* &nodes_ephemeral_fields_ptr,
-// #endif
-//     const stim::DetectorErrorModel& detector_error_model,
-//     pm::weight_int num_distinct_weights,
-//     bool ensure_search_flooder_included = false,
-//     bool enable_correlations = false);
-// #endif
 
 MatchingResult decode_detection_events_for_up_to_64_observables(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, bool edge_correlations);
@@ -107,11 +97,9 @@ void decode_detection_events(
     uint8_t* obs_begin_ptr,
     pm::total_weight_int& weight,
     bool edge_correlations
-#ifdef USE_THREADS
     , int shot = 0
 #ifdef ENABLE_DRAW_FLAGS
     , bool draw_frames = false
-#endif
 #endif
 );
 
@@ -130,7 +118,6 @@ void decode_detection_events_to_edges(
 void decode_detection_events_to_edges_with_edge_correlations(
     pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, std::vector<int64_t>& edges);
  
-#ifdef USE_THREADS
 void setup_output_dirs(
 #ifdef ENABLE_DRAW_FLAGS
     bool draw_frames,
@@ -141,16 +128,6 @@ void output_detection_events(pm::Mwpm& mwpm, const std::vector<uint64_t>& detect
 void output_solution_state(pm::Mwpm& mwpm, const std::vector<uint64_t>& detection_events, bool parallel=false);
 void draw_frame(pm::Mwpm& mwpm, pm::MwpmEvent ev, int frame_number, bool parallel=false, int thread=-1);
 
-// void decode_detection_events_using_threads(
-//     DecodingUnit unit,
-//     const std::vector<uint64_t>& detection_events,
-//     uint8_t* obs_begin_ptr,
-//     pm::total_weight_int& weight,
-//     bool edge_correlations,
-//     int shot,
-//     bool draw_frames);
-// ===============
-#endif
 } // namespace pm
 
 #endif  // PYMATCHING2_MWPM_DECODING_H

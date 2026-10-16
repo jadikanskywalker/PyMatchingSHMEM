@@ -1,12 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=pymatching_call
 #SBATCH --partition=zen4
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
-#SBATCH --sockets=1
-#SBATCH --cpus-per-task=128
-#SBATCH --mem-per-cpu=8G
+#SBATCH --exclusive
+#SBATCH --mem=512GB
+#SBATCH --exclude=rpc-96-1,rpc-91-[1-20],rpc-94-3
 
 thisM=$1
 thisThreads=$2
@@ -14,7 +13,7 @@ thisThreads=$2
 source ~/.bash_profile
 conda activate pymatching
 
-threads_build=~/PyMatchingSHMEM/build_threads/pymatching
+threads_build=~/PyMatchingSHMEM/build_threads_release/pymatching
 # sos_build=~/PyMatchingSHMEM/build_sos/pymatching
 export OMP_PLACES=cores
 export OMP_PROC_BIND=close

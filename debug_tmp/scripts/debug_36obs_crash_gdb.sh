@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=debug_36obs_gdb
-#SBATCH --output=debug_tmp/out/debug_36obs_gdb-%j.out
-#SBATCH --error=debug_tmp/out/debug_36obs_gdb-%j.err
+#SBATCH --output=debug_tmp/out/sbatch/debug_36obs_gdb-%j.out
+#SBATCH --error=debug_tmp/out/sbatch/debug_36obs_gdb-%j.err
 #SBATCH --partition=zen4
 #SBATCH --time=04:00:00
 #SBATCH --nodes=1

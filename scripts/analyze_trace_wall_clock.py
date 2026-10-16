@@ -41,7 +41,7 @@ from collections import defaultdict
 import otf2.reader
 import otf2.events
 
-PHASE_REGIONS = ("Local Decoding", "Cross Rank Phase", "Solution Extraction")
+PHASE_REGIONS = ("Local Decoding", "Cross Rank Phase", "Deferred CRT Cleanup", "Solution Extraction")
 SHOT_REGION = "Shot Iteration"
 SHOT_DECODE_REGION = "Shot Decode"
 
@@ -50,8 +50,10 @@ SHOT_DECODE_REGION = "Shot Decode"
 # needed, so these remain meaningful even for cross-node runs where merging PEs is unsafe.
 # "wait_until_done" (decoding_task.h) blocks on the task-status rendezvous flag; "Receiver
 # Wait Until" (get_solution_from_remote_pe) blocks on the data-payload-arrived signal;
-# "Sender Ctx Quiet" (send_solution_to_remote_pe) is the sender's shmem_ctx_quiet flushing
-# its RMA puts before signaling done.
+# "Sender Ctx Quiet" now lives inside finalize_sent_crt_window (decoding_unit.cc), called
+# from the "Deferred CRT Cleanup" phase rather than synchronously inside send_solution_to_
+# remote_pe (Phase 5 of the CRT sync plan) -- same literal region name, so this list still
+# matches it with no other change needed.
 WAIT_REGIONS = ("wait_until_done", "Receiver Wait Until", "Sender Ctx Quiet")
 
 

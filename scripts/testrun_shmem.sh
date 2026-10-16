@@ -4,8 +4,8 @@
 #SBATCH --error=run.err
 #SBATCH --partition=zen4
 #SBATCH --time=03:00:00
-#SBATCH --nodes=1
-#SBATCH --ntasks=4
+#SBATCH --nodes=2
+#SBATCH --ntasks=2
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=1000GB
 
@@ -15,15 +15,14 @@ conda activate pymatching
 # module unload python
 # module load python
 
-# export FI_LOG_LEVEL=trace/
+# export FI_LOG_LEVEL=debug
 # export SHMEM_OFI_PROVIDER="verbs"
-export FI_VERBS_DEVICE_NAME="mlx5_2"
-# unset FI_VERBS_DEVICE_NAME
+# export FI_VERBS_DEVICE_NAME="mlx5_2"
 # export SHMEM_OFI_PROVIDER=shm
 
 if [ $# -le 7 ]
   then
-    echo "Args: [n] [ppn] [nthreads_shmem] [nthreads] [shots] [rounds] [M] [k]"
+    echo "Args: [n] [ppn] [nthreads_shmem] [nthreads] [shots] [rounds] [M] [k] [num_repeats]"
     exit 1
 else
     n=$1
@@ -34,6 +33,7 @@ else
     rounds=$(($6-1))
     M=$7
     k=$8
+    num_repeats=${9:-1}
 fi
 
 if [ ! -d "run" ]
@@ -169,13 +169,17 @@ echo "Starting SHMEM run..."
 start_parallel=$(date +%s)
 export OMP_NUM_THREADS=$nthreads_shmem
 export SHMEM_SYMMETRIC_SIZE=16G
+# export UCX_LOG_LEVEL=trace
 # export LIBFABRIC_DEBUG=0
-$SWHOME/sos_1.5_scalable/bin/oshrun  \
+# OSSS oshrun has a hardcoded `env python3.12` shebang; the pymatching env is 3.13, so append base miniforge (has 3.12)
+export PATH="$PATH:$HOME/miniforge3/bin"
+# $SWHOME/osss-ucx_1.5/bin/oshrun \
+$SWHOME/sos_1.5/bin/oshrun \
     -n $n \
     --map-by ppr:$ppn:package:PE=$nthreads_shmem \
     --bind-to core \
     --report-bindings \
-~/PyMatchingSHMEM/scripts/pe_output_wrapper.sh \
+~/PyMatchingSHMEM/debug_tmp/scripts/pe_gdb_wrapper.sh \
 ~/PyMatchingSHMEM/build_sos/pymatching predict \
     --dem error_model.dem \
     --in detection_events.b8 \
@@ -188,7 +192,7 @@ $SWHOME/sos_1.5_scalable/bin/oshrun  \
     --use_threads \
     --extraction_unit_size 4 \
     --extract_preemptively \
-    --draw_frames \
+    --num_repeats $num_repeats \
     > log_shmem.out 2>log_shmem.err
 
     # --dem ../testdems/error_model_48obs_d21_p001_640r.dem \
@@ -208,19 +212,30 @@ python3 ../scripts/combine_results.py predicted_obs_flips__shmem.01 $n
 
 # Check work
 echo SHMEM
-echo correct predictions:
-paste -d " " predicted_obs_flips__shmem.01 actual_obs_flips.01 | grep "1 1\|0 0" | wc -l
-echo wrong predictions:
-paste -d " " predicted_obs_flips__shmem.01 actual_obs_flips.01 | grep "0 1\|1 0" | wc -l
+total_bits=$(awk '{ n += length($0) } END { print n }' actual_obs_flips.01)
+paste -d "" predicted_obs_flips__shmem.01 actual_obs_flips.01 | awk -v total="$total_bits" '
+{
+    n = length($0) / 2
+    for (i = 1; i <= n; i++) {
+        if (substr($0, i, 1) == substr($0, n + i, 1)) correct++
+        else wrong++
+    }
+}
+END {
+    print "correct predictions:"
+    print correct + 0 "/" total
+    print "wrong predictions:"
+    print wrong + 0 "/" total
+}'
 
-echo
-echo Shots with differring predictions:
-awk 'NR==FNR{a[NR]=$0; n=NR; next} {
-  if (FNR>n || $0!=a[FNR]) { print FNR-1; out=1 }
-} END {
-  if (n>FNR) { for (i=FNR+1;i<=n;i++) { print i-1; out=1 } }
-  if (!out) print "no differences"
-}' predicted_obs_flips__threads.01 predicted_obs_flips__shmem.01
+# echo
+# echo Shots with differring predictions:
+# awk 'NR==FNR{a[NR]=$0; n=NR; next} {
+#   if (FNR>n || $0!=a[FNR]) { print FNR-1; out=1 }
+# } END {
+#   if (n>FNR) { for (i=FNR+1;i<=n;i++) { print i-1; out=1 } }
+#   if (!out) print "no differences"
+# }' predicted_obs_flips__threads.01 predicted_obs_flips__shmem.01
 
 rm hostfile.txt
 cd ..
